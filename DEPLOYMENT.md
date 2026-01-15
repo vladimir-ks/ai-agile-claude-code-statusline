@@ -25,28 +25,36 @@ This document guides you through publishing the statusline to GitHub, npm, and c
 
 ## GitHub Repository Setup
 
+**Note:** Git is already initialized at `~/_dev_tools/ai-agile-claude-code-statusline/`
+
 ### 1. Create GitHub Repository
 
 ```bash
-# Create repo on github.com
+# Go to github.com and create new repository:
 # Name: ai-agile-claude-code-statusline
 # Description: Real-time cost tracking and session monitoring statusline for Claude Code
 # License: MIT
-# Template: None (custom setup)
 # Visibility: Public
+# DO NOT initialize (already have git locally)
 
-# Clone locally
-git clone https://github.com/yourusername/ai-agile-claude-code-statusline.git
-cd ai-agile-claude-code-statusline
+# Then, from your local repo:
+cd ~/_dev_tools/ai-agile-claude-code-statusline
 
-# Copy package contents
-cp -r ~/.claude/ai-agile-claude-code-statusline/* .
+# Add GitHub remote
+git remote add origin https://github.com/YOUR_USERNAME/ai-agile-claude-code-statusline.git
 
-# Commit initial
-git add .
-git commit -m "Initial commit: v1.0.1 production-ready statusline"
+# Rename branch to main if needed
+git branch -m master main
+
+# Push to GitHub
 git push -u origin main
+
+# Create release tag
+git tag -a v1.0.1 -m "Release v1.0.1 - Production-ready statusline"
+git push origin v1.0.1
 ```
+
+**See GITHUB_PUBLISHING.md for detailed step-by-step instructions.**
 
 ### 2. Configure GitHub Settings
 

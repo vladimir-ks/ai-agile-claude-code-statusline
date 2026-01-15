@@ -34,17 +34,36 @@ This statusline displays real-time session metrics, cost tracking, context windo
 
 ### Installation
 
+**Standard Installation (Recommended)**
 ```bash
-# 1. Clone or download this repository
-git clone <repo-url> ai-agile-claude-code-statusline
-cd ai-agile-claude-code-statusline
+# Clone to your development tools directory
+git clone https://github.com/yourusername/ai-agile-claude-code-statusline.git ~/_dev_tools/ai-agile-claude-code-statusline
 
-# 2. Run setup
-./examples/setup.sh
-
-# 3. Restart Claude Code or run:
-source ~/.claude/statusline.sh --test
+# Verify installation
+cd ~/_dev_tools/ai-agile-claude-code-statusline
+bash -n scripts/statusline.sh
 ```
+
+**npm Installation (Coming Soon)**
+```bash
+npm install -g ai-agile-claude-code-statusline
+```
+
+### Configuration
+
+The statusline is automatically configured in Claude Code's `~/.claude/settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "~/_dev_tools/ai-agile-claude-code-statusline/scripts/statusline.sh",
+  "padding": 0
+}
+```
+
+**Install location:** `~/_dev_tools/ai-agile-claude-code-statusline/`
+
+If using npm, update the command path to wherever npm installs it.
 
 ### Requirements
 
