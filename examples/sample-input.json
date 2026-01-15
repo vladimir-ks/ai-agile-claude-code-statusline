@@ -1,0 +1,25 @@
+{
+  "cwd": "/Users/vmks/.claude",
+  "workspace": {
+    "current_dir": "/Users/vmks/.claude",
+    "project_dir": "/Users/vmks/.claude"
+  },
+  "model": {
+    "display_name": "Haiku4.5",
+    "id": "claude-haiku-4-5-20251001"
+  },
+  "session_id": "test-session-12345",
+  "transcript_path": "/Users/vmks/.claude/.claude_sessions/test-session-12345/session.jsonl",
+  "version": "1.0",
+  "context_window": {
+    "context_window_size": 200000,
+    "total_input_tokens": 50000,
+    "total_output_tokens": 10000,
+    "current_usage": {
+      "input_tokens": 5000,
+      "output_tokens": 1000,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 500
+    }
+  }
+}

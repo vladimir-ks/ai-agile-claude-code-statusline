@@ -1,0 +1,62 @@
+{
+  "name": "ai-agile-claude-code-statusline",
+  "version": "1.0.1",
+  "description": "Real-time cost tracking and session monitoring statusline for Claude Code. See your spending, token usage, and git status in one compact line.",
+  "main": "scripts/statusline.sh",
+  "bin": {
+    "statusline": "scripts/statusline.sh"
+  },
+  "scripts": {
+    "test": "./examples/test.sh",
+    "setup": "./examples/setup.sh",
+    "verify": "bash -n scripts/statusline.sh && echo '✓ Script syntax valid'"
+  },
+  "keywords": [
+    "claude-code",
+    "statusline",
+    "cost-tracking",
+    "token-usage",
+    "session-monitoring",
+    "bash",
+    "real-time",
+    "ai",
+    "anthropic"
+  ],
+  "author": "Vladimir K.S.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/ai-agile-claude-code-statusline"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/ai-agile-claude-code-statusline/issues"
+  },
+  "homepage": "https://github.com/yourusername/ai-agile-claude-code-statusline#readme",
+  "engines": {
+    "bash": ">=4.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "jq": "*",
+    "@anthropic-sdk/ccusage": ">=0.0.1"
+  },
+  "optionalDependencies": {},
+  "devDependencies": {},
+  "preferGlobal": false,
+  "files": [
+    "scripts/",
+    "docs/",
+    "examples/",
+    "cache-config/",
+    "README.md",
+    "CLAUDE.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    ".gitignore"
+  ]
+}

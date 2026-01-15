@@ -1,0 +1,127 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "description": "Default cache configuration for Claude Code Status Line",
+    "last_updated": "2026-01-15"
+  },
+  "cache_strategy": {
+    "ccusage_blocks": {
+      "ttl_seconds": 900,
+      "ttl_display": "15 minutes",
+      "validation": [
+        "File must be valid JSON",
+        "Blocks array must exist",
+        "Earliest block startTime must be today",
+        "No block can have actualEndTime > 5 minutes in past"
+      ],
+      "file_location": "~/.claude/.ccusage_cache.json",
+      "typical_size_bytes": 2000,
+      "refresh_triggers": [
+        "Cache expired (>15 min old)",
+        "Cache file missing or corrupted",
+        "Active block has ended (>5 min)",
+        "Manual deletion of cache file"
+      ]
+    },
+    "git_status": {
+      "ttl_seconds": 10,
+      "ttl_display": "10 seconds",
+      "validation": [
+        "File must exist",
+        "Must have exactly 4 lines",
+        "Lines 2-4 must be numeric"
+      ],
+      "file_location": "~/.claude/.git_status_cache",
+      "typical_size_bytes": 50,
+      "refresh_triggers": [
+        "File modification time >10 seconds",
+        "Manual deletion of cache file"
+      ]
+    },
+    "weekly_quota": {
+      "ttl_seconds": 1800,
+      "ttl_display": "30 minutes",
+      "status": "deprecated",
+      "note": "Kept for legacy compatibility, not displayed by default",
+      "file_location": "~/.claude/.weekly_quota_cache.json",
+      "typical_size_bytes": 500
+    },
+    "data_freshness_tracking": {
+      "ttl_seconds": null,
+      "ttl_display": "No expiration",
+      "description": "Tracks timestamp when each data source was last fetched",
+      "file_location": "~/.claude/.data_freshness.json",
+      "typical_size_bytes": 300,
+      "used_for": [
+        "Staleness indicators (red dots 🔴 for >1 hour old)",
+        "Data freshness diagnostics"
+      ]
+    },
+    "deduplication_hash": {
+      "ttl_seconds": null,
+      "ttl_display": "No expiration",
+      "description": "MD5 hash of last output, prevents terminal flicker",
+      "file_location": "~/.claude/.statusline.hash",
+      "typical_size_bytes": 33,
+      "behavior": "Skips printing if output unchanged from last call"
+    },
+    "debug_log": {
+      "ttl_seconds": null,
+      "ttl_display": "No expiration",
+      "description": "Debug output when --debug flag is used",
+      "file_location": "~/.claude/statusline.log",
+      "typical_size_bytes_per_run": 5000,
+      "note": "Only created if --debug flag is used"
+    }
+  },
+  "staleness_indicators": {
+    "red_dot_threshold": {
+      "seconds": 3600,
+      "display": "1 hour",
+      "indicator": "🔴",
+      "meaning": "Data last fetched >1 hour ago"
+    },
+    "orange_dot_threshold": {
+      "seconds": 0,
+      "display": "Currently updating",
+      "indicator": "🟠",
+      "meaning": "System is actively fetching fresh data"
+    },
+    "no_indicator": {
+      "seconds": 3600,
+      "display": "<1 hour",
+      "indicator": "none",
+      "meaning": "Data is fresh"
+    }
+  },
+  "performance_targets": {
+    "cache_hit": {
+      "time_milliseconds": 15,
+      "description": "Time to render statusline when all caches are valid"
+    },
+    "cache_miss": {
+      "time_seconds": 20,
+      "description": "Time to render statusline when ccusage needs refresh (network call)"
+    },
+    "memory_peak": {
+      "megabytes": 5,
+      "description": "Peak memory usage during execution"
+    },
+    "cpu_average": {
+      "percent": 1,
+      "description": "Average CPU usage across full execution"
+    }
+  },
+  "total_disk_usage": {
+    "typical_bytes": 2500,
+    "with_debug_bytes": 102500,
+    "description": "All cache and log files combined"
+  },
+  "recovery_procedures": {
+    "clear_all_caches": "rm ~/.claude/.*.json ~/.claude/.statusline.hash 2>/dev/null",
+    "force_ccusage_refresh": "rm ~/.claude/.ccusage_cache.json",
+    "force_git_refresh": "rm ~/.claude/.git_status_cache",
+    "reset_staleness_tracking": "rm ~/.claude/.data_freshness.json",
+    "verify_cache_integrity": "jq . ~/.claude/.ccusage_cache.json > /dev/null && echo '✓ Valid'"
+  }
+}

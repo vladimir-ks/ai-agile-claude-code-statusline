@@ -1,0 +1,49 @@
+# Statusline Cache Files
+.ccusage_cache.json
+.weekly_quota_cache.json
+.git_status_cache
+.data_freshness.json
+.statusline.hash
+.statusline.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+*~
+.vscode/
+
+# Temporary/backup files
+*.tmp
+*.bak
+*.tmp.*
+
+# Node (if package.json added)
+node_modules/
+npm-debug.log
+package-lock.json
+yarn.lock
+
+# Test artifacts
+test-output/
+.test-temp/
+*.test.log
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+
+# User-specific session data
+.claude_sessions/
+
+# Misc
+*.orig
+.env.local
