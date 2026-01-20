@@ -8,6 +8,15 @@ trap '' EXIT  # Ignore errors at exit
 # Read input first (CRITICAL: must be before any other operations)
 input=$(cat 2>/dev/null) || input=""
 
+# Detect if JSON input was actually provided (not empty stdin)
+# DEFENSIVE: Check jq exists before attempting JSON validation
+json_input_provided=0
+if command -v jq >/dev/null 2>&1; then
+    if [ -n "$input" ] && echo "$input" | jq -e . >/dev/null 2>&1; then
+        json_input_provided=1
+    fi
+fi
+
 # ANTI-FLICKER: Build all output in variable, print once at end
 OUTPUT=""
 
@@ -18,6 +27,9 @@ WEEKLY_BUDGET="${WEEKLY_BUDGET:-456}"
 
 # Timeout for all external commands (prevent hangs)
 CMD_TIMEOUT=2
+
+# Force refresh mode (bypasses all caches for debugging/manual updates)
+FORCE_REFRESH="${STATUSLINE_FORCE_REFRESH:-0}"
 
 # Debug mode setup
 DEBUG=0
@@ -323,74 +335,123 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev
 fi
 
 # ========================================
-# PHASE 2.5: Session Model Detection (4-LAYER FALLBACK - CORRECTED PRIORITY)
+# PHASE 2.5: Session Model Detection (IMPROVED - PRIORITY: JSON → settings.json → transcript → default)
 # ========================================
-# CORRECTED PRIORITY ORDER:
-# Layer 1: JSON input (current session data) - PRIMARY SOURCE
-# Layer 2: Transcript (session-specific, only if Layer 1 missing)
-# Layer 3: settings.json (global fallback)
+# REORDERED PRIORITY (most reliable first):
+# Layer 1: JSON input - ONLY if actually provided + has real model data
+# Layer 2: settings.json - stable global config (most reliable)
+# Layer 3: Transcript - last resort (can be stale, needs TTL)
 # Layer 4: Default "Claude" (safe fallback)
 
-# Start with Layer 1: JSON input (already parsed in PHASE 1, lines 146-147)
-# model_name already set from JSON input with safe default "Claude"
-# Only enhance if needed from transcript
+# Model cache files
+SAVED_MODEL_FILE="${HOME}/.claude/.last_model_name"
+last_model_name=""
+if [ -f "$SAVED_MODEL_FILE" ]; then
+    last_model_name=$(cat "$SAVED_MODEL_FILE" 2>/dev/null)
+fi
 
-# Layer 2: If JSON model is empty/null, try transcript
-if [ -z "$model_name" ] || [ "$model_name" = "Claude" ] || [ "$model_name" = "null" ]; then
-    transcript_model_name=""
-    transcript_model_id=""
+# Force refresh invalidates all caches for a complete data refresh
+if [ "$FORCE_REFRESH" = "1" ]; then
+    # Clear model cache
+    rm -f "${HOME}/.claude/.last_model_name" 2>/dev/null
+    # Clear git cache
+    rm -f "${HOME}/.claude/.git_status_cache" 2>/dev/null
+    # Clear statusline deduplication hash
+    rm -f "${HOME}/.claude/.statusline.hash" 2>/dev/null
+    # Clear last print time (allows immediate reprint)
+    rm -f "${HOME}/.claude/.statusline.last_print_time" 2>/dev/null
+fi
 
-    if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
+# Start with Layer 1: JSON input - ONLY if input was actually provided (not empty stdin)
+json_model_name="$model_name"  # This is the default "Claude" from Phase 1
+if [ "$json_input_provided" -eq 0 ] || [ "$json_model_name" = "Claude" ]; then
+    # JSON not provided or contains only default - move to Layer 2
+    json_model_name=""
+fi
+
+# Layer 2: Try settings.json (stable, authoritative global config)
+settings_model=""
+settings_model_raw=$(jq -r '.model // ""' "$HOME/.claude/settings.json" 2>/dev/null)
+if [ -n "$settings_model_raw" ] && [ "$settings_model_raw" != "null" ]; then
+    case "$settings_model_raw" in
+        *"opus-4-5"*) settings_model="Opus4.5" ;;
+        *"opus"*) settings_model="Opus" ;;
+        *"sonnet-4-5"*) settings_model="Sonnet4.5" ;;
+        *"sonnet"*) settings_model="Sonnet" ;;
+        *"haiku-4-5"*) settings_model="Haiku4.5" ;;
+        *"haiku"*) settings_model="Haiku" ;;
+        *"claude"*) settings_model="Claude" ;;
+        *) settings_model="" ;;
+    esac
+fi
+
+# Layer 3: Transcript fallback (only if settings.json is empty)
+# WITH TTL CHECK: Only trust transcript if file was modified within last 1 hour
+transcript_model=""
+if [ -z "$settings_model" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
+    # Check if transcript was recently updated (TTL validation)
+    transcript_age=$(($(date +%s) - $(stat -f %m "$transcript_path" 2>/dev/null || stat -c %Y "$transcript_path" 2>/dev/null || echo 0)))
+    TRANSCRIPT_TTL=3600  # 1 hour
+
+    if [ "$transcript_age" -lt "$TRANSCRIPT_TTL" ]; then
+        transcript_model_id=""
+
+        # Optimization: Use timeout to prevent hanging on large files
         # Get last line and extract model (fastest approach for large JSONL files)
-        transcript_model_id=$(tail -1 "$transcript_path" | jq -r '.message.model // ""' 2>/dev/null)
+        transcript_model_id=$(timeout 2 tail -1 "$transcript_path" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
 
         # If last line isn't assistant, search recent lines
-        if [ -z "$transcript_model_id" ]; then
-            transcript_model_id=$(tail -50 "$transcript_path" | grep '"type": "assistant"' | tail -1 | jq -r '.message.model // ""' 2>/dev/null)
+        if [ -z "$transcript_model_id" ] || [ "$transcript_model_id" = "null" ]; then
+            transcript_model_id=$(timeout 2 bash -c "tail -50 '$transcript_path' 2>/dev/null | grep '\"type\": \"assistant\"' | tail -1" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
         fi
 
         if [ -n "$transcript_model_id" ] && [ "$transcript_model_id" != "null" ]; then
             # Map model ID to display name
             case "$transcript_model_id" in
-                *"opus-4-5"*) transcript_model_name="Opus4.5" ;;
-                *"opus"*) transcript_model_name="Opus" ;;
-                *"sonnet-4-5"*) transcript_model_name="Sonnet4.5" ;;
-                *"sonnet"*) transcript_model_name="Sonnet" ;;
-                *"haiku-4-5"*) transcript_model_name="Haiku4.5" ;;
-                *"haiku"*) transcript_model_name="Haiku" ;;
-                *) transcript_model_name="Claude" ;;
+                *"opus-4-5"*) transcript_model="Opus4.5" ;;
+                *"opus"*) transcript_model="Opus" ;;
+                *"sonnet-4-5"*) transcript_model="Sonnet4.5" ;;
+                *"sonnet"*) transcript_model="Sonnet" ;;
+                *"haiku-4-5"*) transcript_model="Haiku4.5" ;;
+                *"haiku"*) transcript_model="Haiku" ;;
+                *) transcript_model="" ;;
             esac
-
-            # Only use transcript model if it's better than JSON default
-            if [ -n "$transcript_model_name" ]; then
-                model_name="$transcript_model_name"
-                model_id="$transcript_model_id"
-            fi
         fi
     fi
 fi
 
-# Layer 3: If still empty/default, try settings.json
-if [ -z "$model_name" ] || [ "$model_name" = "null" ]; then
-    settings_model=$(jq -r '.model // ""' "$HOME/.claude/settings.json" 2>/dev/null)
-    if [ -n "$settings_model" ] && [ "$settings_model" != "null" ]; then
-        case "$settings_model" in
-            *"opus-4-5"*) model_name="Opus4.5" ;;
-            *"opus"*) model_name="Opus" ;;
-            *"sonnet-4-5"*) model_name="Sonnet4.5" ;;
-            *"sonnet"*) model_name="Sonnet" ;;
-            *"haiku-4-5"*) model_name="Haiku4.5" ;;
-            *"haiku"*) model_name="Haiku" ;;
-            *"claude"*) model_name="Claude" ;;
-            *) model_name="Claude" ;;
-        esac
-    fi
+# Determine final model using new priority order
+model_name=""
+model_id=""
+
+# Priority 1: Use JSON if it had real data
+if [ -n "$json_model_name" ] && [ "$json_model_name" != "Claude" ]; then
+    model_name="$json_model_name"
+    model_id=$(echo "$input" | jq -r '.model.id // ""' 2>/dev/null)
+# Priority 2: Use settings.json (stable)
+elif [ -n "$settings_model" ]; then
+    model_name="$settings_model"
+    model_id=""  # Don't expose ID from settings
+# Priority 3: Use transcript (if fresh)
+elif [ -n "$transcript_model" ]; then
+    model_name="$transcript_model"
+    model_id=$(echo "$input" | jq -r '.model.id // ""' 2>/dev/null)
+# Priority 4: Default to Claude
+else
+    model_name="Claude"
+    model_id=""
 fi
 
-# Layer 4: Safety - Ensure model_name is never empty
-if [ -z "$model_name" ] || [ "$model_name" = "null" ]; then
-    model_name="Claude"
+# Detect model changes and force refresh on switch
+MODEL_CHANGED=0
+if [ -n "$last_model_name" ] && [ "$last_model_name" != "$model_name" ]; then
+    MODEL_CHANGED=1
+    # Force invalidate git cache when model changes to ensure immediate update
+    rm -f "$GIT_CACHE_FILE" 2>/dev/null || true
 fi
+
+# Save current model for next invocation
+echo "$model_name" >"$SAVED_MODEL_FILE" 2>/dev/null || true
 
 # ========================================
 # PHASE 5: AIGILE Integration
@@ -493,6 +554,28 @@ format_tokens() {
     else
         printf '%d' "$tok"
     fi
+}
+
+# Smooth noisy metrics to reduce statusline flicker during active processing
+# When Claude is working, tokens and cache ratios change rapidly
+# This function rounds to reduce noise while keeping display responsive
+smooth_tokens() {
+    local tok="$1"
+    # Round to nearest 100 tokens (ignores small fluctuations)
+    printf '%d' $(( (tok + 50) / 100 * 100 ))
+}
+
+smooth_tpm() {
+    local tpm="$1"
+    # Round to nearest 10 TPM (ignores processing jitter)
+    local int_tpm=${tpm%.*}  # Get integer part
+    printf '%d' $(( (int_tpm + 5) / 10 * 10 ))
+}
+
+smooth_cache_ratio() {
+    local pct="$1"
+    # Round to nearest 5% (only show meaningful changes)
+    printf '%d' $(( (pct + 2) / 5 * 5 ))
 }
 
 # Compact format for large numbers (with M, k, for display)
@@ -948,7 +1031,9 @@ fi
 # Bar shows: [====|-----] where | is the compact threshold (78%)
 if [ "$context_window_size" -gt 0 ]; then
     context_bar=$(progress_bar_with_marker "$context_used_pct" "$COMPACT_THRESHOLD_PCT" 12)
-    tokens_display=$(format_tokens "$tokens_until_compact")
+    # Smooth tokens to reduce flicker during active processing (Claude working)
+    smoothed_tokens=$(smooth_tokens "$tokens_until_compact")
+    tokens_display=$(format_tokens "$smoothed_tokens")
 
     # Show remaining tokens left (more useful than "used %")
     if [ "$tokens_until_compact" -gt 0 ]; then
@@ -1016,7 +1101,9 @@ if [ -n "$tot_tokens" ] && [[ "$tot_tokens" =~ ^[0-9]+$ ]]; then
 
     tok_str="📊${COLON}$(usage_color)${tok_compact}tok${tok_staleness_indicator}$(rst)"
     if [ -n "$tpm" ] && [[ "$tpm" =~ ^[0-9.]+$ ]]; then
-        tpm_compact=$(format_compact_number "$tpm")
+        # Smooth TPM to reduce flicker during active processing
+        smoothed_tpm=$(smooth_tpm "$tpm")
+        tpm_compact=$(format_compact_number "$smoothed_tpm")
         tok_str="📊${COLON}$(usage_color)${tok_compact}tok(${tpm_compact}tpm)${tok_staleness_indicator}$(rst)"
     fi
     OUTPUT="${OUTPUT}${SEP}$tok_str"
@@ -1038,7 +1125,15 @@ fi
 # === 6. HEALTH ===
 # Cache metrics (before last message)
 if [ -n "$cache_hit_ratio" ]; then
-    OUTPUT="${OUTPUT}${SEP}💾${COLON}$(cache_color)${cache_hit_ratio}$(rst)"
+    # Smooth cache ratio to reduce flicker (extract percentage, smooth, reformat)
+    cache_pct="${cache_hit_ratio%\%}"  # Remove % sign
+    if [[ "$cache_pct" =~ ^[0-9]+$ ]]; then
+        smoothed_cache=$(smooth_cache_ratio "$cache_pct")
+        smoothed_cache_display="${smoothed_cache}%"
+        OUTPUT="${OUTPUT}${SEP}💾${COLON}$(cache_color)${smoothed_cache_display}$(rst)"
+    else
+        OUTPUT="${OUTPUT}${SEP}💾${COLON}$(cache_color)${cache_hit_ratio}$(rst)"
+    fi
 fi
 
 # === 7. LAST MESSAGE ===
@@ -1070,27 +1165,50 @@ if [ -z "$OUTPUT" ]; then
     OUTPUT="🕐:$(date '+%H:%M:%S') [statusline-error]"
 fi
 
-# Calculate hash of current output (with fallback to simple checksum if md5sum unavailable)
-# Include the full timestamp (with seconds) in hash so it changes every second
-# This ensures deduplication works even when display time is HH:MM (no seconds)
-hash_input="${OUTPUT}${current_statusline_time_hash}"
+# Calculate hash of current output ONLY (no timestamp)
+# CRITICAL: Do NOT include time in hash - time changes every minute
+# This causes unnecessary redraws when only the display time updates
+# Instead, only hash the actual DATA content
+# Deduplication should only trigger when actual data changes, not when display updates
+hash_input="${OUTPUT}"
 current_hash=$(echo -n "$hash_input" | md5sum 2>/dev/null | awk '{print $1}' || \
               echo -n "$hash_input" | shasum 2>/dev/null | awk '{print $1}' || \
               echo -n "$hash_input" | wc -c)
 
-# Read last hash
+# Read last hash and timestamp
 last_hash=""
+last_print_time=0
+LAST_PRINT_TIME_FILE="${HOME}/.claude/.statusline.last_print_time"
+
 if [ -f "$LAST_OUTPUT_HASH_FILE" ]; then
     last_hash=$(cat "$LAST_OUTPUT_HASH_FILE" 2>/dev/null)
 fi
 
+if [ -f "$LAST_PRINT_TIME_FILE" ]; then
+    last_print_time=$(cat "$LAST_PRINT_TIME_FILE" 2>/dev/null || echo 0)
+fi
+
+# Check if enough time has passed since last print (micro-rate-limiting)
+# Prevent rapid blinking by limiting updates during active processing
+# When Claude is working, metrics change rapidly - smooth them and rate-limit
+# Only check this if data hash is the same (avoid skipping genuine changes)
+current_time_ms=$(date +%s%N | cut -b1-13)  # milliseconds since epoch
+time_since_last_print=$((current_time_ms - last_print_time))
+RATE_LIMIT_MS=500  # Minimum 500ms between prints (reduced flicker during processing)
+
 # DEFENSIVE: Always print if hash file missing or hash is different
+# Also force print if model changed (immediate feedback on model switch)
 # Fallback: if hash comparison fails, always print (better to show duplicate than nothing)
 should_print=0
-if [ -z "$last_hash" ]; then
+if [ "$MODEL_CHANGED" -eq 1 ]; then
+    should_print=1  # Force immediate print on model change
+elif [ -z "$last_hash" ]; then
     should_print=1  # First run - always print
 elif [ -n "$current_hash" ] && [ -n "$last_hash" ] && [ "$current_hash" != "$last_hash" ]; then
-    should_print=1  # Output changed - print
+    # Output changed - check rate limit
+    if [ "$time_since_last_print" -ge "$RATE_LIMIT_MS" ] || [ "$last_print_time" -eq 0 ]; then
+        should_print=1
+    fi
 elif [ -z "$current_hash" ] || [ -z "$last_hash" ]; then
     should_print=1  # Hash calculation failed - print as fallback
 fi
@@ -1103,4 +1221,7 @@ if [ "$should_print" -eq 1 ]; then
     if [ -n "$current_hash" ]; then
         echo "$current_hash" >"$LAST_OUTPUT_HASH_FILE" 2>/dev/null || true
     fi
+
+    # Save current time for rate limiting (ignore errors)
+    echo "$current_time_ms" >"$LAST_PRINT_TIME_FILE" 2>/dev/null || true
 fi

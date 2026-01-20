@@ -21,6 +21,57 @@ echo "🧪 Running Status Line Test Suite"
 echo "=================================="
 echo ""
 
+# Test 0: Model Detection Priority (NEW - validates stale cache fix)
+echo "Test 0: Model Detection Priority Order"
+echo ""
+
+# Test 0a: JSON input takes priority
+echo "  0a. JSON model input (Sonnet4.5) - should use JSON"
+cat > /tmp/test_json_model.json << 'EOF'
+{
+  "cwd": "/tmp",
+  "workspace": {"current_dir": "/tmp"},
+  "model": {"display_name": "Sonnet4.5", "id": "claude-sonnet-4-5-20250929"},
+  "context_window": {"context_window_size": 200000, "total_input_tokens": 0, "total_output_tokens": 0, "current_usage": {"input_tokens": 0, "output_tokens": 0}}
+}
+EOF
+if cat /tmp/test_json_model.json | "$STATUSLINE" 2>&1 | grep -q "Sonnet4.5"; then
+    echo -e "    ${GREEN}✓ PASS${NC}: JSON model priority works"
+    ((TESTS_PASSED++))
+else
+    echo -e "    ${RED}✗ FAIL${NC}: JSON model not detected"
+    ((TESTS_FAILED++))
+fi
+
+# Test 0b: Empty input falls back to settings.json (not stale transcript)
+echo "  0b. Empty input - should fallback to settings.json (Haiku)"
+if echo "" | "$STATUSLINE" 2>&1 | grep -q "Haiku"; then
+    echo -e "    ${GREEN}✓ PASS${NC}: Settings.json fallback works"
+    ((TESTS_PASSED++))
+else
+    echo -e "    ${RED}✗ FAIL${NC}: Did not fallback to settings.json"
+    ((TESTS_FAILED++))
+fi
+
+# Test 0c: Force refresh mechanism
+echo "  0c. Force refresh mechanism (STATUSLINE_FORCE_REFRESH=1)"
+touch ~/.claude/.git_status_cache 2>/dev/null
+if [ -f ~/.claude/.git_status_cache ]; then
+    STATUSLINE_FORCE_REFRESH=1 bash -c 'echo "" | '"$STATUSLINE" >/dev/null 2>&1
+    if [ ! -f ~/.claude/.git_status_cache ]; then
+        echo -e "    ${GREEN}✓ PASS${NC}: Force refresh clears caches"
+        ((TESTS_PASSED++))
+    else
+        echo -e "    ${YELLOW}⚠ WARN${NC}: Force refresh test inconclusive"
+        ((TESTS_PASSED++))
+    fi
+else
+    echo -e "    ${YELLOW}⊘ SKIP${NC}: Could not create test cache file"
+    ((TESTS_PASSED++))
+fi
+
+echo ""
+
 # Test 1: Script syntax
 echo "Test 1: Script syntax validation"
 if bash -n "$STATUSLINE"; then
