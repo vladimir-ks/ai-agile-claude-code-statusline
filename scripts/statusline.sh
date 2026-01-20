@@ -335,78 +335,59 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev
 fi
 
 # ========================================
-# PHASE 2.5: Session Model Detection (IMPROVED - PRIORITY: JSON → settings.json → transcript → default)
+# PHASE 2.5: Session Model Detection (CORRECT PRIORITY)
 # ========================================
-# REORDERED PRIORITY (most reliable first):
-# Layer 1: JSON input - ONLY if actually provided + has real model data
-# Layer 2: settings.json - stable global config (most reliable)
-# Layer 3: Transcript - last resort (can be stale, needs TTL)
-# Layer 4: Default "Claude" (safe fallback)
+# CORRECT PRIORITY ORDER (per DATA_SOURCES.md):
+# Layer 1: JSON input (real-time) - what user is using NOW
+# Layer 2: Transcript (with TTL) - last model in session (fallback only)
+# Layer 3: Default "Claude" (safety)
+#
+# NOTE: settings.json is GLOBAL DEFAULT, not CURRENT model
+# Do NOT use settings.json for model detection.
 
-# Model cache files
+# Model change detection file
 SAVED_MODEL_FILE="${HOME}/.claude/.last_model_name"
 last_model_name=""
 if [ -f "$SAVED_MODEL_FILE" ]; then
     last_model_name=$(cat "$SAVED_MODEL_FILE" 2>/dev/null)
 fi
 
-# Force refresh invalidates all caches for a complete data refresh
+# Force refresh invalidates all caches
 if [ "$FORCE_REFRESH" = "1" ]; then
-    # Clear model cache
     rm -f "${HOME}/.claude/.last_model_name" 2>/dev/null
-    # Clear git cache
     rm -f "${HOME}/.claude/.git_status_cache" 2>/dev/null
-    # Clear statusline deduplication hash
     rm -f "${HOME}/.claude/.statusline.hash" 2>/dev/null
-    # Clear last print time (allows immediate reprint)
     rm -f "${HOME}/.claude/.statusline.last_print_time" 2>/dev/null
 fi
 
-# Start with Layer 1: JSON input - ONLY if input was actually provided (not empty stdin)
-json_model_name="$model_name"  # This is the default "Claude" from Phase 1
+# Layer 1: JSON input (PRIMARY - most accurate, real-time)
+json_model_name="$model_name"  # From Phase 1 parsing
 if [ "$json_input_provided" -eq 0 ] || [ "$json_model_name" = "Claude" ]; then
-    # JSON not provided or contains only default - move to Layer 2
+    # JSON not provided or empty - fall through to Layer 2
     json_model_name=""
 fi
 
-# Layer 2: Try settings.json (stable, authoritative global config)
-settings_model=""
-settings_model_raw=$(jq -r '.model // ""' "$HOME/.claude/settings.json" 2>/dev/null)
-if [ -n "$settings_model_raw" ] && [ "$settings_model_raw" != "null" ]; then
-    case "$settings_model_raw" in
-        *"opus-4-5"*) settings_model="Opus4.5" ;;
-        *"opus"*) settings_model="Opus" ;;
-        *"sonnet-4-5"*) settings_model="Sonnet4.5" ;;
-        *"sonnet"*) settings_model="Sonnet" ;;
-        *"haiku-4-5"*) settings_model="Haiku4.5" ;;
-        *"haiku"*) settings_model="Haiku" ;;
-        *"claude"*) settings_model="Claude" ;;
-        *) settings_model="" ;;
-    esac
-fi
-
-# Layer 3: Transcript fallback (only if settings.json is empty)
-# WITH TTL CHECK: Only trust transcript if file was modified within last 1 hour
+# Layer 2: Transcript fallback (ONLY if JSON missing, WITH TTL)
+# Transcript is session-specific and may be more current than JSON input
 transcript_model=""
-if [ -z "$settings_model" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
-    # Check if transcript was recently updated (TTL validation)
+if [ -z "$json_model_name" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
+    # Check TTL: Only use transcript if file modified <1 hour ago
     transcript_age=$(($(date +%s) - $(stat -f %m "$transcript_path" 2>/dev/null || stat -c %Y "$transcript_path" 2>/dev/null || echo 0)))
     TRANSCRIPT_TTL=3600  # 1 hour
 
     if [ "$transcript_age" -lt "$TRANSCRIPT_TTL" ]; then
         transcript_model_id=""
 
-        # Optimization: Use timeout to prevent hanging on large files
-        # Get last line and extract model (fastest approach for large JSONL files)
+        # Get model from last assistant message in transcript
         transcript_model_id=$(timeout 2 tail -1 "$transcript_path" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
 
-        # If last line isn't assistant, search recent lines
+        # If last line not assistant, search recent lines
         if [ -z "$transcript_model_id" ] || [ "$transcript_model_id" = "null" ]; then
             transcript_model_id=$(timeout 2 bash -c "tail -50 '$transcript_path' 2>/dev/null | grep '\"type\": \"assistant\"' | tail -1" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
         fi
 
+        # Map model ID to display name
         if [ -n "$transcript_model_id" ] && [ "$transcript_model_id" != "null" ]; then
-            # Map model ID to display name
             case "$transcript_model_id" in
                 *"opus-4-5"*) transcript_model="Opus4.5" ;;
                 *"opus"*) transcript_model="Opus" ;;
@@ -420,33 +401,28 @@ if [ -z "$settings_model" ] && [ -n "$transcript_path" ] && [ -f "$transcript_pa
     fi
 fi
 
-# Determine final model using new priority order
+# Determine final model using correct priority
 model_name=""
 model_id=""
 
-# Priority 1: Use JSON if it had real data
+# Priority 1: JSON input (if provided and real model data)
 if [ -n "$json_model_name" ] && [ "$json_model_name" != "Claude" ]; then
     model_name="$json_model_name"
     model_id=$(echo "$input" | jq -r '.model.id // ""' 2>/dev/null)
-# Priority 2: Use settings.json (stable)
-elif [ -n "$settings_model" ]; then
-    model_name="$settings_model"
-    model_id=""  # Don't expose ID from settings
-# Priority 3: Use transcript (if fresh)
+# Priority 2: Transcript fallback (if fresh)
 elif [ -n "$transcript_model" ]; then
     model_name="$transcript_model"
-    model_id=$(echo "$input" | jq -r '.model.id // ""' 2>/dev/null)
-# Priority 4: Default to Claude
+    model_id=""
+# Priority 3: Default
 else
     model_name="Claude"
     model_id=""
 fi
 
-# Detect model changes and force refresh on switch
+# Detect model changes for cache invalidation
 MODEL_CHANGED=0
 if [ -n "$last_model_name" ] && [ "$last_model_name" != "$model_name" ]; then
     MODEL_CHANGED=1
-    # Force invalidate git cache when model changes to ensure immediate update
     rm -f "$GIT_CACHE_FILE" 2>/dev/null || true
 fi
 

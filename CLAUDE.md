@@ -77,20 +77,23 @@ export NO_COLOR=1                          # Disable colored output
 
 ## Architecture
 
-### Data Sources (Priority Order)
-The statusline intelligently selects data sources with smart fallback logic:
+### Data Sources
+See **[DATA_SOURCES.md](DATA_SOURCES.md)** for complete documentation of all data sources.
 
-1. **JSON input** (instant, freshest): Model, context window, session ID
-2. **settings.json** (stable global config): Fallback model if JSON unavailable
-3. **Git cache** (10s TTL): Branch, commits, dirty files
+**Quick Reference - Priority Order:**
+
+1. **JSON input** (real-time): Model, context window, session data
+2. **Git cache** (10s TTL): Branch, commits, dirty files
+3. **Transcript** (real-time, with 1-hour TTL): Last message, model fallback
 4. **ccusage cache** (15 min TTL): Costs, tokens, burn rate
-5. **Transcript** (1 hour TTL): Conversation turns, model fallback only if fresh
-6. **Default values** (safe fallback): Prevents blank/missing data
+5. **settings.json**: Global defaults only (NOT for current model)
+6. **Default values**: Safety fallback
 
-**Model Detection Priority:** JSON → settings.json → Transcript (if fresh) → "Claude"
-- Prevents stale transcript data from overriding stable settings.json
-- Transcript data only used if file modified <1 hour ago
-- Use `STATUSLINE_FORCE_REFRESH=1` to bypass all caches
+**Critical: Model Detection**
+- **PRIMARY:** JSON `model.display_name` (what user is using NOW)
+- **FALLBACK:** Transcript `.message.model` (if JSON input missing, max 1 hour old)
+- **NEVER:** settings.json `.model` (this is GLOBAL DEFAULT, not current model)
+- Use `STATUSLINE_FORCE_REFRESH=1` to clear caches
 
 ### Cache Files
 | File | TTL | Purpose |

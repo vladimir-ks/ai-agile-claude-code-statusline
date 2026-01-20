@@ -122,31 +122,35 @@ STATUSLINE_FORCE_REFRESH=1 claude ask "hello"
 ```
 
 **What It Clears:**
-- `.last_model_name` - Model cache
+- `.last_model_name` - Model change detection cache
 - `.git_status_cache` - Git status cache
 - `.statusline.hash` - Output deduplication hash
 - `.statusline.last_print_time` - Print rate limiter
 
-### Model Detection Priority (New)
+### Model Detection Priority (Correct)
 
 Model name is determined by this priority order (first match wins):
 
-1. **JSON Input** (most current)
-   - Comes from Claude Code session data
-   - If provided, always used
+**See [DATA_SOURCES.md](DATA_SOURCES.md) for complete documentation.**
 
-2. **settings.json** (stable, reliable)
-   - Global configuration file
-   - Default fallback when JSON unavailable
-   - **This is the primary fix** - prevents transcript from overriding
+1. **JSON Input** (PRIMARY - real-time)
+   - Comes from Claude Code on every invocation
+   - Shows actual model in use NOW
+   - Most accurate source
 
-3. **Transcript** (last resort, with TTL)
-   - Only used if settings.json empty
-   - Only used if file modified <1 hour ago (TTL validation)
+2. **Transcript** (FALLBACK - session-specific, with TTL)
+   - Only used if JSON input missing
+   - Only used if file modified <1 hour ago
+   - Session-specific history
    - Prevents indefinite stale data
 
-4. **Default** ("Claude")
+3. **Default** ("Claude")
    - Safe fallback if all else fails
+
+**IMPORTANT: settings.json is NOT used for current model detection**
+- Contains GLOBAL DEFAULT, not current model
+- Does not update when user switches models mid-session
+- Use JSON input (Layer 1) for actual current model
 
 ---
 
