@@ -487,6 +487,18 @@ context_color_fn="context_color_good"
 
 context_window_size=$(num_or_zero "$context_window_size")
 
+# Debug: Log what we're using
+if [ "$DEBUG" -eq 1 ]; then
+    {
+        echo "[DEBUG] Context window calculation:"
+        echo "  json_input_provided: $json_input_provided"
+        echo "  context_window_size: $context_window_size"
+        echo "  current_input: $current_input"
+        echo "  cache_read: $cache_read"
+        echo "  total_input_tokens: $total_input_tokens (not used)"
+    } >>"$LOG_FILE" 2>/dev/null
+fi
+
 # Use current_usage fields (NOT total_input_tokens which is cumulative and never resets)
 # current_input + cache_read = actual tokens in context window (resets after /compact)
 current_context_tokens=$((current_input + cache_read))
@@ -502,6 +514,16 @@ if [ "$context_window_size" -gt 0 ]; then
     usable_tokens=$((context_window_size * COMPACT_THRESHOLD_PCT / 100))
     tokens_until_compact=$((usable_tokens - current_context_tokens))
     ((tokens_until_compact < 0)) && tokens_until_compact=0
+
+    # Debug: Log calculation
+    if [ "$DEBUG" -eq 1 ]; then
+        {
+            echo "  current_context_tokens: $current_context_tokens"
+            echo "  context_used_pct: $context_used_pct%"
+            echo "  usable_tokens (78%): $usable_tokens"
+            echo "  tokens_until_compact: $tokens_until_compact"
+        } >>"$LOG_FILE" 2>/dev/null
+    fi
 
     # Calculate distance to compact threshold as percentage
     if [ "$usable_tokens" -gt 0 ]; then
@@ -1011,6 +1033,15 @@ if [ "$context_window_size" -gt 0 ]; then
     smoothed_tokens=$(smooth_tokens "$tokens_until_compact")
     tokens_display=$(format_tokens "$smoothed_tokens")
 
+    # Debug: Log display values
+    if [ "$DEBUG" -eq 1 ]; then
+        {
+            echo "  smoothed_tokens: $smoothed_tokens (before: $tokens_until_compact)"
+            echo "  tokens_display: ${tokens_display}left"
+            echo "  context_bar: [${context_bar}]"
+        } >>"$LOG_FILE" 2>/dev/null
+    fi
+
     # Show remaining tokens left (more useful than "used %")
     if [ "$tokens_until_compact" -gt 0 ]; then
         OUTPUT="${OUTPUT}${SEP}🧠${COLON}$($context_color_fn)${tokens_display}left$(rst) [${context_bar}]"
@@ -1164,29 +1195,37 @@ if [ -f "$LAST_PRINT_TIME_FILE" ]; then
     last_print_time=$(cat "$LAST_PRINT_TIME_FILE" 2>/dev/null || echo 0)
 fi
 
-# Check if enough time has passed since last print (micro-rate-limiting)
-# Prevent rapid blinking by limiting updates during active processing
-# When Claude is working, metrics change rapidly - smooth them and rate-limit
-# Only check this if data hash is the same (avoid skipping genuine changes)
-current_time_ms=$(date +%s%N | cut -b1-13)  # milliseconds since epoch
-time_since_last_print=$((current_time_ms - last_print_time))
-RATE_LIMIT_MS=500  # Minimum 500ms between prints (reduced flicker during processing)
+# Cross-platform millisecond time calculation
+# macOS (BSD) doesn't support %N (nanoseconds), so use perl or fallback to seconds
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS: Use perl for millisecond precision (Time::HiRes is built-in)
+    current_time_ms=$(perl -MTime::HiRes=time -e 'printf "%.0f", time * 1000' 2>/dev/null || echo $(($(date +%s) * 1000)))
+else
+    # Linux: GNU date supports %3N for milliseconds
+    current_time_ms=$(date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000)))
+fi
 
-# DEFENSIVE: Always print if hash file missing or hash is different
-# Also force print if model changed (immediate feedback on model switch)
-# Fallback: if hash comparison fails, always print (better to show duplicate than nothing)
+# Rate limiting only applies to IDENTICAL output (deduplication)
+# Changed output should ALWAYS print immediately
+time_since_last_print=$((current_time_ms - last_print_time))
+RATE_LIMIT_MS=500  # Minimum 500ms between identical prints
+
+# Print decision logic:
+# - Model changed: ALWAYS print (immediate feedback)
+# - First run (no hash): ALWAYS print
+# - Output changed (hash differs): ALWAYS print immediately
+# - Output identical (hash same): Skip (deduplication)
+# - Hash calculation failed: Print as fallback
 should_print=0
 if [ "$MODEL_CHANGED" -eq 1 ]; then
-    should_print=1  # Force immediate print on model change
+    should_print=1  # Model change: immediate feedback
 elif [ -z "$last_hash" ]; then
-    should_print=1  # First run - always print
+    should_print=1  # First run: always print
 elif [ -n "$current_hash" ] && [ -n "$last_hash" ] && [ "$current_hash" != "$last_hash" ]; then
-    # Output changed - check rate limit
-    if [ "$time_since_last_print" -ge "$RATE_LIMIT_MS" ] || [ "$last_print_time" -eq 0 ]; then
-        should_print=1
-    fi
-elif [ -z "$current_hash" ] || [ -z "$last_hash" ]; then
-    should_print=1  # Hash calculation failed - print as fallback
+    should_print=1  # Output changed: ALWAYS print immediately (no rate limit)
+# When hashes are identical, should_print stays 0 (correct deduplication)
+elif [ -z "$current_hash" ]; then
+    should_print=1  # Hash calculation failed: print as fallback
 fi
 
 # Print if should print
