@@ -335,23 +335,20 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev
 fi
 
 # ========================================
-# PHASE 2.5: Session Model Detection (CORRECT PRIORITY)
+# PHASE 2.5: Session Model Detection (TRANSCRIPT PRIMARY)
 # ========================================
-# CORRECT PRIORITY ORDER (per DATA_SOURCES.md):
-# Layer 1: JSON input (real-time) - what user is using NOW
-# Layer 2: Transcript (with TTL) - last model in session (fallback only)
+# PRIORITY ORDER:
+# Layer 1: Transcript (PRIMARY) - actual model from API responses
+# Layer 2: JSON input (fallback) - may be stale in long sessions
 # Layer 3: Default "Claude" (safety)
 #
-# NOTE: settings.json is GLOBAL DEFAULT, not CURRENT model
-# Do NOT use settings.json for model detection.
+# WHY TRANSCRIPT FIRST: Claude Code's JSON input can report stale model
+# when user switches models mid-session. Transcript has actual API model.
 
 # Model change detection file (SESSION-SPECIFIC to avoid cross-chat contamination)
-# Each session has its own model cache based on session_id from JSON input
 if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
-    # Session-specific cache (prevents model "bleeding" between chats)
     SAVED_MODEL_FILE="${HOME}/.claude/.model_cache_${session_id}"
 else
-    # Fallback to global cache only if no session_id available
     SAVED_MODEL_FILE="${HOME}/.claude/.last_model_name"
 fi
 
@@ -363,42 +360,33 @@ fi
 # Force refresh invalidates all caches
 if [ "$FORCE_REFRESH" = "1" ]; then
     rm -f "${HOME}/.claude/.last_model_name" 2>/dev/null
-    rm -f "${HOME}/.claude/.model_cache_"* 2>/dev/null  # All session-specific caches
+    rm -f "${HOME}/.claude/.model_cache_"* 2>/dev/null
     rm -f "${HOME}/.claude/.git_status_cache" 2>/dev/null
     rm -f "${HOME}/.claude/.statusline.hash" 2>/dev/null
     rm -f "${HOME}/.claude/.statusline.last_print_time" 2>/dev/null
 fi
 
 # Periodic cleanup: Remove stale session model caches (older than 7 days)
-# Run only occasionally (when cache file doesn't exist) to avoid overhead
 if [ ! -f "$SAVED_MODEL_FILE" ]; then
     find "${HOME}/.claude" -name ".model_cache_*" -mtime +7 -delete 2>/dev/null || true
 fi
 
-# Layer 1: JSON input (PRIMARY - most accurate, real-time)
-json_model_name="$model_name"  # From Phase 1 parsing
-if [ "$json_input_provided" -eq 0 ] || [ "$json_model_name" = "Claude" ]; then
-    # JSON not provided or empty - fall through to Layer 2
-    json_model_name=""
-fi
-
-# Layer 2: Transcript fallback (ONLY if JSON missing, WITH TTL)
-# Transcript is session-specific and may be more current than JSON input
+# Layer 1: Transcript (PRIMARY - actual model from API responses)
+# This is the most accurate source because it reflects what model actually responded
 transcript_model=""
-if [ -z "$json_model_name" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
+transcript_model_id=""
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
     # Check TTL: Only use transcript if file modified <1 hour ago
     transcript_age=$(($(date +%s) - $(stat -f %m "$transcript_path" 2>/dev/null || stat -c %Y "$transcript_path" 2>/dev/null || echo 0)))
     TRANSCRIPT_TTL=3600  # 1 hour
 
     if [ "$transcript_age" -lt "$TRANSCRIPT_TTL" ]; then
-        transcript_model_id=""
-
         # Get model from last assistant message in transcript
         transcript_model_id=$(timeout 2 tail -1 "$transcript_path" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
 
         # If last line not assistant, search recent lines
         if [ -z "$transcript_model_id" ] || [ "$transcript_model_id" = "null" ]; then
-            transcript_model_id=$(timeout 2 bash -c "tail -50 '$transcript_path' 2>/dev/null | grep '\"type\": \"assistant\"' | tail -1" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
+            transcript_model_id=$(timeout 2 bash -c "tail -50 '$transcript_path' 2>/dev/null | grep '\"model\"' | tail -1" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
         fi
 
         # Map model ID to display name
@@ -416,18 +404,24 @@ if [ -z "$json_model_name" ] && [ -n "$transcript_path" ] && [ -f "$transcript_p
     fi
 fi
 
+# Layer 2: JSON input (fallback if transcript empty)
+json_model_name=""
+if [ "$json_input_provided" -eq 1 ] && [ -n "$model_name" ] && [ "$model_name" != "Claude" ]; then
+    json_model_name="$model_name"
+fi
+
 # Determine final model using correct priority
 model_name=""
 model_id=""
 
-# Priority 1: JSON input (if provided and real model data)
-if [ -n "$json_model_name" ] && [ "$json_model_name" != "Claude" ]; then
+# Priority 1: Transcript (actual API model - most accurate)
+if [ -n "$transcript_model" ]; then
+    model_name="$transcript_model"
+    model_id="$transcript_model_id"
+# Priority 2: JSON input (may be stale but better than nothing)
+elif [ -n "$json_model_name" ]; then
     model_name="$json_model_name"
     model_id=$(echo "$input" | jq -r '.model.id // ""' 2>/dev/null)
-# Priority 2: Transcript fallback (if fresh)
-elif [ -n "$transcript_model" ]; then
-    model_name="$transcript_model"
-    model_id=""
 # Priority 3: Default
 else
     model_name="Claude"
