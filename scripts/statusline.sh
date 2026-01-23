@@ -345,8 +345,16 @@ fi
 # NOTE: settings.json is GLOBAL DEFAULT, not CURRENT model
 # Do NOT use settings.json for model detection.
 
-# Model change detection file
-SAVED_MODEL_FILE="${HOME}/.claude/.last_model_name"
+# Model change detection file (SESSION-SPECIFIC to avoid cross-chat contamination)
+# Each session has its own model cache based on session_id from JSON input
+if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
+    # Session-specific cache (prevents model "bleeding" between chats)
+    SAVED_MODEL_FILE="${HOME}/.claude/.model_cache_${session_id}"
+else
+    # Fallback to global cache only if no session_id available
+    SAVED_MODEL_FILE="${HOME}/.claude/.last_model_name"
+fi
+
 last_model_name=""
 if [ -f "$SAVED_MODEL_FILE" ]; then
     last_model_name=$(cat "$SAVED_MODEL_FILE" 2>/dev/null)
@@ -355,9 +363,16 @@ fi
 # Force refresh invalidates all caches
 if [ "$FORCE_REFRESH" = "1" ]; then
     rm -f "${HOME}/.claude/.last_model_name" 2>/dev/null
+    rm -f "${HOME}/.claude/.model_cache_"* 2>/dev/null  # All session-specific caches
     rm -f "${HOME}/.claude/.git_status_cache" 2>/dev/null
     rm -f "${HOME}/.claude/.statusline.hash" 2>/dev/null
     rm -f "${HOME}/.claude/.statusline.last_print_time" 2>/dev/null
+fi
+
+# Periodic cleanup: Remove stale session model caches (older than 7 days)
+# Run only occasionally (when cache file doesn't exist) to avoid overhead
+if [ ! -f "$SAVED_MODEL_FILE" ]; then
+    find "${HOME}/.claude" -name ".model_cache_*" -mtime +7 -delete 2>/dev/null || true
 fi
 
 # Layer 1: JSON input (PRIMARY - most accurate, real-time)
