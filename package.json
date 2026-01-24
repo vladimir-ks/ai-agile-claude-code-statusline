@@ -1,5 +1,5 @@
 {
-  "name": "ai-agile-claude-code-statusline",
+  "name": "aigile",
   "version": "1.0.1",
   "description": "Real-time cost tracking and session monitoring statusline for Claude Code. See your spending, token usage, and git status in one compact line.",
   "main": "scripts/statusline.sh",
@@ -26,12 +26,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/ai-agile-claude-code-statusline"
+    "url": "https://github.com/anthropics/aigile"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/ai-agile-claude-code-statusline/issues"
+    "url": "https://github.com/anthropics/aigile/issues"
   },
-  "homepage": "https://github.com/yourusername/ai-agile-claude-code-statusline#readme",
+  "homepage": "https://github.com/anthropics/aigile#readme",
   "engines": {
     "bash": ">=4.0.0"
   },
