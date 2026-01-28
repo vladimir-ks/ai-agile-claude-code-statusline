@@ -389,7 +389,8 @@ fi
 
 # RELIABILITY FIX: Cleanup orphaned temp files (older than 60 minutes)
 # These accumulate if processes crash during atomic writes
-timeout 5 find "${HOME}/.claude" -name ".*.tmp.*" -mmin +60 -delete 2>/dev/null || true
+# maxdepth 1 prevents deep recursion under high load
+timeout 5 find "${HOME}/.claude" -maxdepth 1 -name ".*.tmp.*" -mmin +60 -delete 2>/dev/null || true
 
 # Layer 1: Transcript (PRIMARY - actual model from API responses)
 # This is the most accurate source because it reflects what model actually responded
