@@ -867,6 +867,9 @@ if command -v jq >/dev/null 2>&1 && [ -n "$CCUSAGE_CMD" ]; then
             if [ "$block_is_fresh" -eq 1 ]; then
                 blocks_output="$cached_data"
                 use_cache=1
+                # Update freshness timestamp when using valid cached data
+                # This prevents false staleness indicators when cache is still valid
+                record_fetch_time "ccusage_blocks"
             fi
         fi
         fi  # Close the validation else block
@@ -885,7 +888,6 @@ if command -v jq >/dev/null 2>&1 && [ -n "$CCUSAGE_CMD" ]; then
                 blocks_output=$(timeout 35 "$CCUSAGE_CMD" blocks --json 2>/dev/null)
                 if [ -n "$blocks_output" ]; then
                     write_cache "$CCUSAGE_CACHE_FILE" "$blocks_output"
-                    record_fetch_time "ccusage_blocks"
                 fi
             else
                 # Another ccusage is running, use existing cache if available
@@ -898,6 +900,9 @@ if command -v jq >/dev/null 2>&1 && [ -n "$CCUSAGE_CMD" ]; then
     fi
 
     if [ -n "$blocks_output" ]; then
+        # Update freshness timestamp - we successfully fetched data (even if no active blocks)
+        record_fetch_time "ccusage_blocks"
+
         active_block=$(echo "$blocks_output" | jq -c '.blocks[] | select(.isActive == true)' 2>/dev/null | head -n1)
 
         if [ -n "$active_block" ]; then
