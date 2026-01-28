@@ -590,8 +590,13 @@ format_tokens() {
 # This function rounds to reduce noise while keeping display responsive
 smooth_tokens() {
     local tok="$1"
-    # Round to nearest 100 tokens (ignores small fluctuations)
-    printf '%d' $(( (tok + 50) / 100 * 100 ))
+    # Round MORE aggressively to reduce blinking during active work
+    # For large numbers, round to nearest 1000; otherwise 100
+    if (( tok >= 10000 )); then
+        printf '%d' $(( (tok + 500) / 1000 * 1000 ))
+    else
+        printf '%d' $(( (tok + 50) / 100 * 100 ))
+    fi
 }
 
 smooth_tpm() {
@@ -617,9 +622,11 @@ format_compact_number() {
 
     if (( num_int >= 1000000 )); then
         # Use awk for float division (always available, faster than bc)
-        printf '%.1fM' "$(awk "BEGIN {printf \"%.1f\", $num / 1000000}" 2>/dev/null || echo $((num_int / 1000000)))"
+        local awk_out="$(awk "BEGIN {printf \"%.1f\", $num / 1000000}" 2>/dev/null || echo $((num_int / 1000000)))"
+        printf '%.1fM' "$awk_out"
     elif (( num_int >= 1000 )); then
-        printf '%.0fk' "$(awk "BEGIN {printf \"%.0f\", $num / 1000}" 2>/dev/null || echo $((num_int / 1000)))"
+        local awk_out="$(awk "BEGIN {printf \"%.0f\", $num / 1000}" 2>/dev/null || echo $((num_int / 1000)))"
+        printf '%.0fk' "$awk_out"
     else
         printf '%.0f' "$num"
     fi
@@ -1190,7 +1197,19 @@ fi
 
 # === 5. USAGE METRICS ===
 if [ -n "$tot_tokens" ] && [[ "$tot_tokens" =~ ^[0-9]+$ ]]; then
-    tok_compact=$(format_compact_number "$tot_tokens")
+    # Smooth tokens MORE aggressively to reduce blinking (nearest 1M for large numbers)
+    smoothed_tot_tokens="$tot_tokens"
+    if (( tot_tokens >= 10000000 )); then
+        # Round to nearest 10M for very large numbers
+        smoothed_tot_tokens=$(( (tot_tokens + 5000000) / 10000000 * 10000000 ))
+    elif (( tot_tokens >= 1000000 )); then
+        # Round to nearest 1M
+        smoothed_tot_tokens=$(( (tot_tokens + 500000) / 1000000 * 1000000 ))
+    fi
+
+    # Format token count - store in variable to avoid double expansion
+    unset tok_compact
+    tok_compact="$(format_compact_number "$smoothed_tot_tokens")"
 
     # Add staleness indicator for token data
     tok_staleness_indicator=""
@@ -1200,14 +1219,23 @@ if [ -n "$tot_tokens" ] && [[ "$tot_tokens" =~ ^[0-9]+$ ]]; then
         tok_staleness_indicator="🔴"  # Red - stale >1 hour
     fi
 
+    # Build token string without TPM first
     tok_str="📊${COLON}$(usage_color)${tok_compact}tok${tok_staleness_indicator}$(rst)"
+
+    # Add TPM if available
     if [ -n "$tpm" ] && [[ "$tpm" =~ ^[0-9.]+$ ]]; then
-        # Smooth TPM to reduce flicker during active processing
+        # Smooth TPM using the existing smooth_tpm function (nearest 10)
         smoothed_tpm=$(smooth_tpm "$tpm")
-        tpm_compact=$(format_compact_number "$smoothed_tpm")
+
+        # Format TPM - store in variable to avoid double expansion
+        unset tpm_compact
+        tpm_compact="$(format_compact_number "$smoothed_tpm")"
+
+        # Rebuild complete string with TPM
         tok_str="📊${COLON}$(usage_color)${tok_compact}tok(${tpm_compact}tpm)${tok_staleness_indicator}$(rst)"
     fi
-    OUTPUT="${OUTPUT}${SEP}$tok_str"
+
+    OUTPUT="${OUTPUT}${SEP}${tok_str}"
 fi
 
 # Conversation metrics (turns, velocity, efficiency)
