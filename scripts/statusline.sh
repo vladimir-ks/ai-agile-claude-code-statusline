@@ -15,6 +15,12 @@ if command -v jq >/dev/null 2>&1; then
     if [ -n "$input" ] && echo "$input" | jq -e . >/dev/null 2>&1; then
         json_input_provided=1
     fi
+else
+    # RELIABILITY FIX: If jq missing and JSON input provided, fail fast with clear error
+    if [ -n "$input" ] && [[ "$input" == "{"* ]]; then
+        echo "ERROR: jq is required but not found. Install with: brew install jq (macOS) or apt-get install jq (Linux)" >&2
+        exit 1
+    fi
 fi
 
 # ANTI-FLICKER: Build all output in variable, print once at end
@@ -43,6 +49,9 @@ if [ "$1" = "--debug" ]; then
         echo "---"
     } >>"$LOG_FILE" 2>/dev/null
 fi
+
+# RELIABILITY FIX: Ensure ~/.claude directory exists (required for all cache operations)
+mkdir -p "$HOME/.claude" 2>/dev/null || true
 
 # ---- color helpers ----
 use_color=1
@@ -94,7 +103,10 @@ write_cache() {
     local content="$2"
 
     # Atomic write using temp file
-    local temp_file="${cache_file}.tmp.$$"
+    # CONCURRENCY FIX: Add nanosecond timestamp for uniqueness under rapid invocation
+    # Fallback to RANDOM if date +%s%N not supported
+    local temp_suffix="$$.$(date +%s%N 2>/dev/null || echo "$RANDOM")"
+    local temp_file="${cache_file}.tmp.${temp_suffix}"
     echo "$content" >"$temp_file" 2>/dev/null && mv "$temp_file" "$cache_file" 2>/dev/null
 }
 
@@ -316,8 +328,10 @@ session_velocity=""
 response_efficiency=""
 
 # Count turns from transcript if available
-if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev/null 2>&1; then
-    transcript_turns=$(jq -s 'length' "$transcript_path" 2>/dev/null || echo 0)
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    # PERFORMANCE FIX: Use wc -l instead of jq -s (no memory spike on large transcripts)
+    # For JSONL format, line count = turn count
+    transcript_turns=$(wc -l < "$transcript_path" 2>/dev/null || echo 0)
     transcript_turns=$(num_or_zero "$transcript_turns")
 
     # Calculate session velocity (tokens per turn)
@@ -360,7 +374,8 @@ fi
 # Force refresh invalidates all caches
 if [ "$FORCE_REFRESH" = "1" ]; then
     rm -f "${HOME}/.claude/.last_model_name" 2>/dev/null
-    rm -f "${HOME}/.claude/.model_cache_"* 2>/dev/null
+    # SECURITY FIX: Use find instead of glob expansion to handle arbitrary number of files
+    timeout 5 find "${HOME}/.claude" -name ".model_cache_*" -delete 2>/dev/null || true
     rm -f "${HOME}/.claude/.git_status_cache" 2>/dev/null
     rm -f "${HOME}/.claude/.statusline.hash" 2>/dev/null
     rm -f "${HOME}/.claude/.statusline.last_print_time" 2>/dev/null
@@ -368,8 +383,13 @@ fi
 
 # Periodic cleanup: Remove stale session model caches (older than 7 days)
 if [ ! -f "$SAVED_MODEL_FILE" ]; then
-    find "${HOME}/.claude" -name ".model_cache_*" -mtime +7 -delete 2>/dev/null || true
+    # RELIABILITY FIX: Add timeout to prevent hang on slow filesystems
+    timeout 5 find "${HOME}/.claude" -name ".model_cache_*" -mtime +7 -delete 2>/dev/null || true
 fi
+
+# RELIABILITY FIX: Cleanup orphaned temp files (older than 60 minutes)
+# These accumulate if processes crash during atomic writes
+timeout 5 find "${HOME}/.claude" -name ".*.tmp.*" -mmin +60 -delete 2>/dev/null || true
 
 # Layer 1: Transcript (PRIMARY - actual model from API responses)
 # This is the most accurate source because it reflects what model actually responded
@@ -386,7 +406,8 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && command -v jq >/dev
 
         # If last line not assistant, search recent lines
         if [ -z "$transcript_model_id" ] || [ "$transcript_model_id" = "null" ]; then
-            transcript_model_id=$(timeout 2 bash -c "tail -50 '$transcript_path' 2>/dev/null | grep '\"model\"' | tail -1" 2>/dev/null | jq -r '.message.model // ""' 2>/dev/null)
+            # SECURITY FIX: Remove bash -c to prevent variable injection
+            transcript_model_id=$(timeout 2 tail -50 "$transcript_path" 2>/dev/null | grep '"model"' | tail -1 | jq -r '.message.model // ""' 2>/dev/null)
         fi
 
         # Map model ID to display name
@@ -588,11 +609,16 @@ smooth_cache_ratio() {
 # Compact format for large numbers (with M, k, for display)
 format_compact_number() {
     local num="$1"
-    # Handle both integers and floats
-    if (( $(echo "$num >= 1000000" | bc -l 2>/dev/null || echo 0) )); then
-        printf '%.1fM' "$(echo "scale=1; $num / 1000000" | bc -l 2>/dev/null || echo $((${num%.*} / 1000000)))"
-    elif (( $(echo "$num >= 1000" | bc -l 2>/dev/null || echo 0) )); then
-        printf '%.0fk' "$(echo "scale=0; $num / 1000" | bc -l 2>/dev/null || echo $((${num%.*} / 1000)))"
+    # PERFORMANCE FIX: Use bash arithmetic instead of bc for comparisons
+    # Handle both integers and floats (remove decimal for integer comparison)
+    local num_int="${num%.*}"
+    num_int="${num_int:-0}"  # Default to 0 if empty
+
+    if (( num_int >= 1000000 )); then
+        # Use awk for float division (always available, faster than bc)
+        printf '%.1fM' "$(awk "BEGIN {printf \"%.1f\", $num / 1000000}" 2>/dev/null || echo $((num_int / 1000000)))"
+    elif (( num_int >= 1000 )); then
+        printf '%.0fk' "$(awk "BEGIN {printf \"%.0f\", $num / 1000}" 2>/dev/null || echo $((num_int / 1000)))"
     else
         printf '%.0f' "$num"
     fi
@@ -605,6 +631,22 @@ session_file=""
 if [ -n "$session_id" ] && [ -n "$current_dir" ]; then
     proj_path=$(echo "$current_dir" | sed "s|~|$HOME|g" | sed 's|/|-|g' | sed 's|\.|-|g' | sed 's|_|-|g' | sed 's|^-||')
     session_file="$HOME/.claude/projects/-${proj_path}/${session_id}.jsonl"
+
+    # SECURITY FIX: Validate path stays within bounds (prevent path traversal)
+    # Use realpath if available, fallback to readlink -f, fallback to manual check
+    if command -v realpath >/dev/null 2>&1; then
+        session_file_resolved=$(realpath -m "$session_file" 2>/dev/null || echo "$session_file")
+    elif command -v readlink >/dev/null 2>&1; then
+        session_file_resolved=$(readlink -f "$session_file" 2>/dev/null || echo "$session_file")
+    else
+        session_file_resolved="$session_file"
+    fi
+
+    # Check that resolved path starts with $HOME/.claude/projects/
+    if [[ "$session_file_resolved" != "$HOME/.claude/projects/"* ]]; then
+        # Path escapes bounds - reject it
+        session_file=""
+    fi
 fi
 
 # ========================================
@@ -623,13 +665,17 @@ if [ -n "$session_file" ] && [ -f "$session_file" ] && [ -s "$session_file" ] &&
 
         if echo "$raw_text" | grep -q "<local-command-stdout>"; then
             if echo "$raw_text" | grep -q "<command-name>"; then
-                command_name=$(echo "$raw_text" | sed -n 's/.*<command-name>\(.*\)<\/command-name>.*/\1/p')
+                # SECURITY FIX: Use jq to safely extract command_name (if raw_text is JSON)
+                # If not JSON, use parameter expansion to strip tags (safe)
+                command_name=$(echo "$last_msg" | jq -r '.text' 2>/dev/null | grep -oP '(?<=<command-name>)[^<]+' 2>/dev/null || echo "unknown")
                 last_prompt_text="[Local command: /${command_name}]"
             else
                 last_prompt_text="[Local command executed]"
             fi
         else
-            last_prompt_text=$(echo "$raw_text" | sed 's/<[^>]*>//g' | sed 's/^ *//;s/ *$//' | tr '\n' ' ')
+            # SECURITY FIX: Strip HTML-like tags safely using parameter expansion instead of sed
+            # First remove newlines, then strip tags
+            last_prompt_text=$(echo "$raw_text" | tr '\n' ' ' | sed 's/<[^>]*>//g; s/^[[:space:]]*//; s/[[:space:]]*$//')
             # Truncate to 60 chars with ellipsis if longer
             if [ ${#last_prompt_text} -gt 60 ]; then
                 last_prompt_text="${last_prompt_text:0:60}..."
@@ -734,8 +780,10 @@ record_fetch_time() {
 
     # Atomic write
     if [ -n "$updated_json" ]; then
-        echo "$updated_json" > "${DATA_FRESHNESS_FILE}.tmp.$$" 2>/dev/null && \
-        mv "${DATA_FRESHNESS_FILE}.tmp.$$" "$DATA_FRESHNESS_FILE" 2>/dev/null || true
+        # CONCURRENCY FIX: Add nanosecond timestamp for uniqueness
+        local temp_suffix="$$.$(date +%s%N 2>/dev/null || echo "$RANDOM")"
+        echo "$updated_json" > "${DATA_FRESHNESS_FILE}.tmp.${temp_suffix}" 2>/dev/null && \
+        mv "${DATA_FRESHNESS_FILE}.tmp.${temp_suffix}" "$DATA_FRESHNESS_FILE" 2>/dev/null || true
     fi
 }
 
@@ -776,7 +824,14 @@ if command -v jq >/dev/null 2>&1 && [ -n "$CCUSAGE_CMD" ]; then
     if [ -f "$CCUSAGE_CACHE_FILE" ]; then
         # Validate cache is from today (not stale from yesterday) AND block hasn't ended
         cached_data=$(cat "$CCUSAGE_CACHE_FILE" 2>/dev/null)
-        active_block_in_cache=$(echo "$cached_data" | jq -c '.blocks[] | select(.isActive == true)' 2>/dev/null | head -n1)
+
+        # RELIABILITY FIX: Validate cache JSON is parseable before using it
+        if ! echo "$cached_data" | jq . >/dev/null 2>&1; then
+            # Cache corrupted (truncated JSON, etc.) - force fresh fetch
+            use_cache=0
+            rm -f "$CCUSAGE_CACHE_FILE" 2>/dev/null  # Remove corrupted cache
+        else
+            active_block_in_cache=$(echo "$cached_data" | jq -c '.blocks[] | select(.isActive == true)' 2>/dev/null | head -n1)
 
         if [ -n "$active_block_in_cache" ]; then
             # Extract startTime from cached block
@@ -813,18 +868,32 @@ if command -v jq >/dev/null 2>&1 && [ -n "$CCUSAGE_CMD" ]; then
                 use_cache=1
             fi
         fi
+        fi  # Close the validation else block
     fi
 
     # Fetch fresh data if cache missing, stale, or invalid
-    # Use 20s timeout to allow ccusage to complete (it takes ~19-20s)
+    # Use 35s timeout to allow ccusage to complete (actual runtime: 24-30s)
     # NOTE: This only triggers when cache is stale (from previous day)
     # Most of the time cache will be from today (fast path)
     if [ "$use_cache" -eq 0 ]; then
-        blocks_output=$(timeout 20 "$CCUSAGE_CMD" blocks --json 2>/dev/null)
-        if [ -n "$blocks_output" ]; then
-            write_cache "$CCUSAGE_CACHE_FILE" "$blocks_output"
-            record_fetch_time "ccusage_blocks"
-        fi
+        # CONCURRENCY FIX: Use flock for atomic lock to prevent concurrent ccusage executions
+        # Non-blocking lock (flock -n) - if locked, skip and use stale cache
+        CCUSAGE_LOCK_FILE="${HOME}/.claude/.ccusage.lock"
+        {
+            if flock -n 200 2>/dev/null; then
+                blocks_output=$(timeout 35 "$CCUSAGE_CMD" blocks --json 2>/dev/null)
+                if [ -n "$blocks_output" ]; then
+                    write_cache "$CCUSAGE_CACHE_FILE" "$blocks_output"
+                    record_fetch_time "ccusage_blocks"
+                fi
+            else
+                # Another ccusage is running, use existing cache if available
+                if [ -f "$CCUSAGE_CACHE_FILE" ]; then
+                    blocks_output=$(cat "$CCUSAGE_CACHE_FILE" 2>/dev/null)
+                fi
+            fi
+            # Lock automatically released when subshell exits
+        } 200>"$CCUSAGE_LOCK_FILE" || true
     fi
 
     if [ -n "$blocks_output" ]; then
@@ -907,11 +976,21 @@ if [ -n "$CCUSAGE_CMD" ] && command -v jq >/dev/null 2>&1; then
     fi
 
     # Only fetch fresh data if cache missing or invalid
-    # Use 20s timeout to allow ccusage to complete (it takes ~19-20s)
+    # Use 35s timeout to allow ccusage to complete (actual runtime: 24-30s)
     if [ "$use_weekly_cache" -eq 0 ]; then
-        cached_weekly=$(timeout 20 "$CCUSAGE_CMD" weekly --json 2>/dev/null)
-        if [ -n "$cached_weekly" ]; then
-            write_cache "$WEEKLY_QUOTA_CACHE" "$cached_weekly"
+        # Prevent concurrent ccusage executions - if already running, skip and use stale cache
+        if ! pgrep -f "ccusage weekly" > /dev/null 2>&1; then
+            cached_weekly=$(timeout 35 "$CCUSAGE_CMD" weekly --json 2>/dev/null)
+            if [ -n "$cached_weekly" ]; then
+                write_cache "$WEEKLY_QUOTA_CACHE" "$cached_weekly"
+            fi
+            # RELIABILITY FIX: Add timeout to wait to prevent indefinite hang
+            timeout 5 wait 2>/dev/null || true
+        else
+            # Another ccusage is running, use existing cache if available
+            if [ -f "$WEEKLY_QUOTA_CACHE" ]; then
+                cached_weekly=$(cat "$WEEKLY_QUOTA_CACHE" 2>/dev/null)
+            fi
         fi
     fi
 

@@ -162,25 +162,26 @@ Not input sources, but reuse processed results:
 
 ## Model Detection: Correct Priority Order
 
-**This is the only source of truth for CURRENT model:**
+**CORRECTED: Actual implementation priority (transcript-first):**
 
-1. **JSON `model.display_name`** ← PRIMARY (most accurate)
-   - Shows what model user is ACTUALLY using NOW
-   - Provided on every invocation
-   - Never stale
+1. **Transcript `.message.model`** ← PRIMARY (most accurate)
+   - Shows actual model from API responses
+   - Session-specific, reflects what model responded last
+   - TTL: 1 hour (prevents indefinite stale data)
+   - **Why first**: Reflects actual conversation history
 
-2. **Transcript `.message.model`** ← FALLBACK (with 1-hour TTL)
-   - Only if JSON input missing
-   - Session-specific history
-   - TTL prevents indefinite stale data
+2. **JSON `model.display_name`** ← FALLBACK
+   - Only if transcript missing/stale (>1hr old)
+   - Shows model configured for current request
+   - Provided on every invocation by Claude Code
 
 3. **Settings.json `.model`** ← DO NOT USE for current model
-   - Contains DEFAULT only
+   - Contains GLOBAL DEFAULT only
    - Does NOT change when user switches models
    - Misleads about actual model in use
 
 4. **Default "Claude"** ← LAST RESORT
-   - Safe fallback only
+   - Safe fallback if all sources fail
 
 ---
 

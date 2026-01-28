@@ -71,7 +71,7 @@ export NO_COLOR=1                          # Disable colored output
 | 💾 | `16%` | Cache hit ratio |
 | 💬 | `14:30(2h43m) What is...` | Last message time (elapsed), preview |
 
-**Staleness Indicator:** 🔴 appears when data >1 hour old
+**Staleness Indicator:** 🔴 appears when ccusage data >1 hour old (Note: Only ccusage tracked, not git/weekly)
 
 ---
 
@@ -89,21 +89,24 @@ See **[DATA_SOURCES.md](DATA_SOURCES.md)** for complete documentation of all dat
 5. **settings.json**: Global defaults only (NOT for current model)
 6. **Default values**: Safety fallback
 
-**Critical: Model Detection**
-- **PRIMARY:** JSON `model.display_name` (what user is using NOW)
-- **FALLBACK:** Transcript `.message.model` (if JSON input missing, max 1 hour old)
-- **NEVER:** settings.json `.model` (this is GLOBAL DEFAULT, not current model)
+**Critical: Model Detection** (Corrected Priority)
+- **PRIMARY:** Transcript `.message.model` (actual model from API responses, <1hr old)
+- **FALLBACK:** JSON `model.display_name` (if transcript stale/missing)
+- **NEVER:** settings.json `.model` (global default only, not current session)
 - Use `STATUSLINE_FORCE_REFRESH=1` to clear caches
+- **Rationale:** Transcript reflects actual conversation history, more accurate than JSON config
 
 ### Cache Files
 | File | TTL | Purpose |
 |------|-----|---------|
-| `.ccusage_cache.json` | 15 min | Billing data |
+| `.ccusage_cache.json` | Same-day* | Billing data (valid if block started today) |
 | `.git_status_cache` | 10 sec | Git status (refreshes frequently) |
-| `.last_model_name` | ∞ (monitored) | Model name for change detection; ignored if stale settings.json avoids it |
-| `.data_freshness.json` | — | Fetch timestamps for staleness indicators |
+| `.last_model_name` | ∞ (monitored) | Model name for change detection |
+| `.data_freshness.json` | — | Fetch timestamps (ccusage only) |
 | `.statusline.hash` | ∞ | Output deduplication (prevents duplicate redraws) |
-| `.statusline.last_print_time` | — | Rate limiting (100ms minimum between prints) |
+| `.statusline.last_print_time` | — | Rate limiting (500ms for identical output) |
+
+*ccusage cache TTL: Valid if block started today AND block hasn't ended. Fresh fetch if block ended >5min ago OR different block detected. Effective TTL is "until UTC midnight" for same-day blocks.
 
 **Note:** Transcript data has implicit 1-hour TTL (not a file—validation at runtime)
 
