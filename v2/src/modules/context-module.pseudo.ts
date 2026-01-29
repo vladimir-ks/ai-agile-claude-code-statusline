@@ -22,8 +22,9 @@ interface ContextData {
   cacheCreationTokens: number;
   totalCurrentTokens: number;
   tokensUntilCompact: number;
-  percentageUsed: number;
-  compactThreshold: number;  // 78% default
+  percentageUsedWindow: number;   // % of full window (for logs/debug)
+  percentageUsedCompact: number;  // % toward compact threshold (for display)
+  compactThreshold: number;       // 78 (78% default)
 }
 
 class ContextModule implements DataModule<ContextData> {
@@ -63,16 +64,25 @@ class ContextModule implements DataModule<ContextData> {
 
     // STEP 3: Calculate total current tokens
     // IMPORTANT: Use current_input + cache_read (NOT total_input which is cumulative)
+    // NOTE: Output tokens NOT included pending verification of Claude Code compaction behavior
+    // See: v2/docs/CONTEXT_CALCULATION_ANALYSIS.md for details
     const totalCurrentTokens = currentInputTokens + cacheReadTokens;
 
     // STEP 4: Calculate tokens until compact
-    const compactThreshold = 78;  // 78% of window
+    const compactThreshold = 78;  // 78% of window (should be configurable in v2)
     const usableTokens = Math.floor(contextWindowSize * compactThreshold / 100);
     const tokensUntilCompact = Math.max(0, usableTokens - totalCurrentTokens);
 
-    // STEP 5: Calculate percentage used
-    const percentageUsed = contextWindowSize > 0
+    // STEP 5: Calculate percentages
+    // A. Percentage of window (for logs/debug)
+    const percentageUsedWindow = contextWindowSize > 0
       ? Math.floor((totalCurrentTokens * 100) / contextWindowSize)
+      : 0;
+
+    // B. Percentage toward compact threshold (for progress bar)
+    // FIXED: This is what should be displayed, not percentageUsedWindow
+    const percentageUsedCompact = usableTokens > 0
+      ? Math.floor((totalCurrentTokens * 100) / usableTokens)
       : 0;
 
     // STEP 6: Return structured data
@@ -85,7 +95,8 @@ class ContextModule implements DataModule<ContextData> {
       cacheCreationTokens,
       totalCurrentTokens,
       tokensUntilCompact,
-      percentageUsed,
+      percentageUsedWindow,      // % of full window
+      percentageUsedCompact,     // % toward compact (use for progress bar)
       compactThreshold
     };
   }
@@ -135,9 +146,13 @@ class ContextModule implements DataModule<ContextData> {
       warnings.push(`Session ID format unusual: ${data.sessionId}`);
     }
 
-    // Rule 5: Percentage should be 0-100
-    if (data.percentageUsed < 0 || data.percentageUsed > 100) {
-      errors.push(`Percentage used out of range: ${data.percentageUsed}%`);
+    // Rule 5: Percentages should be 0-100
+    if (data.percentageUsedWindow < 0 || data.percentageUsedWindow > 100) {
+      errors.push(`Percentage used (window) out of range: ${data.percentageUsedWindow}%`);
+    }
+
+    if (data.percentageUsedCompact < 0 || data.percentageUsedCompact > 100) {
+      errors.push(`Percentage used (compact) out of range: ${data.percentageUsedCompact}%`);
     }
 
     return {
@@ -161,7 +176,8 @@ class ContextModule implements DataModule<ContextData> {
       cacheCreationTokens: Math.max(0, data.cacheCreationTokens),
       totalCurrentTokens: Math.max(0, data.totalCurrentTokens),
       tokensUntilCompact: Math.max(0, data.tokensUntilCompact),
-      percentageUsed: Math.max(0, Math.min(100, data.percentageUsed))
+      percentageUsedWindow: Math.max(0, Math.min(100, data.percentageUsedWindow)),
+      percentageUsedCompact: Math.max(0, Math.min(100, data.percentageUsedCompact))
     };
   }
 
@@ -169,11 +185,14 @@ class ContextModule implements DataModule<ContextData> {
    * Format data for display
    *
    * Output: 🧠:156kleft[---------|--]
+   *
+   * FIXED: Use percentageUsedCompact (progress toward compact), not percentageUsedWindow
    */
   format(data: ContextData): string {
     const smoothedTokens = this.smoothTokens(data.tokensUntilCompact);
     const tokensDisplay = this.formatTokens(smoothedTokens);
-    const progressBar = this.generateProgressBar(data.percentageUsed, data.compactThreshold);
+    // FIXED: Use percentageUsedCompact for progress bar (% toward compact threshold)
+    const progressBar = this.generateProgressBar(data.percentageUsedCompact, 100);
 
     if (data.tokensUntilCompact > 0) {
       return `🧠:${tokensDisplay}left[${progressBar}]`;
@@ -209,9 +228,16 @@ class ContextModule implements DataModule<ContextData> {
   }
 
   /**
-   * Generate progress bar with compact threshold marker
+   * Generate progress bar showing progress toward compact threshold
    *
-   * Example: [---------|--] where | is 78% threshold
+   * FIXED: Bar now shows % toward compact (0-100%), not % of window
+   *
+   * Examples:
+   *   50% toward compact: [======------] (halfway)
+   *   78% toward compact: [=========---] (close)
+   *   100% toward compact: [============] (COMPACT!)
+   *
+   * Note: Marker removed since bar represents 0-100% of usable space
    */
   private generateProgressBar(percentUsed: number, thresholdPercent: number): string {
     const totalWidth = 12;
@@ -220,8 +246,8 @@ class ContextModule implements DataModule<ContextData> {
 
     let bar = '';
     for (let i = 0; i < totalWidth; i++) {
-      if (i === thresholdPos) {
-        bar += '|';
+      if (i === thresholdPos && thresholdPercent < 100) {
+        bar += '|';  // Only show marker if threshold < 100%
       } else if (i < usedPos) {
         bar += '=';
       } else {
@@ -244,8 +270,9 @@ class ContextModule implements DataModule<ContextData> {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
       totalCurrentTokens: 0,
-      tokensUntilCompact: 200000,
-      percentageUsed: 0,
+      tokensUntilCompact: 156000,  // 78% of 200k
+      percentageUsedWindow: 0,      // 0% of window
+      percentageUsedCompact: 0,     // 0% toward compact
       compactThreshold: 78
     };
   }

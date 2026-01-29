@@ -1,0 +1,9 @@
+{
+  "runtime": "nodejs",
+  "version": "v22.18.0",
+  "coldStartMs": 0,
+  "memoryMB": 9.44,
+  "jsonParseMs": 10.43,
+  "subprocessMs": 7.13,
+  "timestamp": "2026-01-29T09:59:11.908Z"
+}

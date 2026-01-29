@@ -1,0 +1,9 @@
+{
+  "runtime": "bun",
+  "version": "1.2.22",
+  "coldStartMs": 0,
+  "memoryMB": 0.22,
+  "jsonParseMs": 3.34,
+  "subprocessMs": 11.15,
+  "timestamp": "2026-01-29T09:59:11.960Z"
+}

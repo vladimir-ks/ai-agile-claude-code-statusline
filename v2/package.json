@@ -1,0 +1,35 @@
+{
+  "name": "claude-code-statusline-v2",
+  "version": "2.0.0-alpha.1",
+  "description": "Production-grade modular statusline for Claude Code (v2 architecture)",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.0.0",
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir=dist --target=bun",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "test:coverage": "bun test --coverage",
+    "benchmark": "./benchmarks/run-comparison.sh",
+    "lint": "echo 'TODO: Add linting'",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "claude",
+    "statusline",
+    "cli",
+    "monitoring",
+    "cost-tracking"
+  ],
+  "author": "Vladimir K.S.",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {},
+  "trustedDependencies": []
+}
