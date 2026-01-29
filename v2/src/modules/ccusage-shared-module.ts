@@ -1,0 +1,188 @@
+/**
+ * Shared ccusage Module - Single Source for Cost/Budget/Usage
+ *
+ * CRITICAL: This module is called ONCE and provides data for:
+ * - CostModule (💰)
+ * - BudgetModule (⌛)
+ * - UsageModule (📊)
+ *
+ * This prevents 3 concurrent ccusage calls!
+ */
+
+import type { DataModule, DataModuleConfig, ValidationResult } from '../types/data-module';
+import { promisify } from 'util';
+import { exec } from 'child_process';
+
+const execAsync = promisify(exec);
+
+interface CCUsageData {
+  // Raw block data
+  blockId: string;
+  startTime: Date;
+  endTime: Date;
+  isActive: boolean;
+
+  // Cost data
+  costUSD: number;
+  costPerHour: number | null;
+
+  // Budget data
+  hoursLeft: number;
+  minutesLeft: number;
+  percentageUsed: number;
+  resetTime: string;  // HH:MM format
+
+  // Usage data
+  totalTokens: number;
+  tokensPerMinute: number | null;
+
+  // Metadata
+  isFresh: boolean;  // false if fetch failed
+}
+
+class CCUsageSharedModule implements DataModule<CCUsageData> {
+  readonly moduleId = 'ccusage';  // Single module ID
+
+  config: DataModuleConfig = {
+    timeout: 35000,      // 35s (ccusage can take 20-30s)
+    cacheTTL: 900000     // 15 min cache
+  };
+
+  async fetch(sessionId: string): Promise<CCUsageData> {
+    try {
+      const { stdout } = await execAsync('ccusage blocks --json --active', {
+        timeout: this.config.timeout
+      });
+
+      const data = JSON.parse(stdout);
+      const activeBlock = data.blocks?.find((b: any) => b.isActive === true);
+
+      if (!activeBlock) {
+        return this.getDefaultData();
+      }
+
+      // Extract all data from single ccusage call
+      const costUSD = Math.max(0, activeBlock.costUSD || 0);
+      const costPerHour = activeBlock.burnRate?.costPerHour || null;
+
+      const totalTokens = Math.max(0, activeBlock.totalTokens || 0);
+      const tokensPerMinute = activeBlock.burnRate?.tokensPerMinute || null;
+
+      const resetTimeStr = activeBlock.usageLimitResetTime || activeBlock.endTime;
+      const startTimeStr = activeBlock.startTime;
+
+      let hoursLeft = 0;
+      let minutesLeft = 0;
+      let percentageUsed = 0;
+      let resetTime = '00:00';
+
+      if (resetTimeStr && startTimeStr) {
+        const startTime = new Date(startTimeStr);
+        const endTime = new Date(resetTimeStr);
+        const now = new Date();
+
+        const totalMs = endTime.getTime() - startTime.getTime();
+        const elapsedMs = now.getTime() - startTime.getTime();
+        const remainingMs = Math.max(0, endTime.getTime() - now.getTime());
+
+        percentageUsed = Math.min(100, Math.floor((elapsedMs / totalMs) * 100));
+        hoursLeft = Math.floor(remainingMs / (1000 * 60 * 60));
+        minutesLeft = Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60));
+        resetTime = `${String(endTime.getUTCHours()).padStart(2, '0')}:${String(endTime.getUTCMinutes()).padStart(2, '0')}`;
+      }
+
+      return {
+        blockId: activeBlock.blockId || '',
+        startTime: new Date(startTimeStr),
+        endTime: new Date(resetTimeStr),
+        isActive: true,
+        costUSD,
+        costPerHour,
+        hoursLeft,
+        minutesLeft,
+        percentageUsed,
+        resetTime,
+        totalTokens,
+        tokensPerMinute,
+        isFresh: true
+      };
+    } catch (error) {
+      return this.getDefaultData();
+    }
+  }
+
+  private getDefaultData(): CCUsageData {
+    return {
+      blockId: '',
+      startTime: new Date(),
+      endTime: new Date(),
+      isActive: false,
+      costUSD: 0,
+      costPerHour: null,
+      hoursLeft: 0,
+      minutesLeft: 0,
+      percentageUsed: 0,
+      resetTime: '00:00',
+      totalTokens: 0,
+      tokensPerMinute: null,
+      isFresh: false
+    };
+  }
+
+  validate(data: CCUsageData): ValidationResult {
+    if (!data || !data.isFresh) {
+      return {
+        valid: false,
+        confidence: 0,
+        errors: ['ccusage data unavailable']
+      };
+    }
+
+    return {
+      valid: true,
+      confidence: 100,
+      warnings: []
+    };
+  }
+
+  format(data: CCUsageData): string {
+    // This module doesn't format - individual modules will
+    return '';
+  }
+
+  // Helper methods for individual modules to use
+  formatCost(costUSD: number): string {
+    if (costUSD >= 100) {
+      return `$${costUSD.toFixed(0)}`;
+    } else if (costUSD >= 10) {
+      return `$${costUSD.toFixed(1)}`;
+    } else {
+      return `$${costUSD.toFixed(2)}`;
+    }
+  }
+
+  formatTokens(tokens: number): string {
+    let smoothed = tokens;
+
+    if (tokens >= 10000000) {
+      smoothed = Math.round(tokens / 10000000) * 10000000;
+    } else if (tokens >= 1000000) {
+      smoothed = Math.round(tokens / 1000000) * 1000000;
+    } else if (tokens >= 1000) {
+      smoothed = Math.round(tokens / 100) * 100;
+    }
+
+    if (smoothed >= 1000000) {
+      const millions = smoothed / 1000000;
+      return `${millions.toFixed(1)}M`;
+    } else if (smoothed >= 1000) {
+      const thousands = Math.floor(smoothed / 1000);
+      return `${thousands}k`;
+    }
+
+    return String(smoothed);
+  }
+}
+
+export default CCUsageSharedModule;
+export { CCUsageData };

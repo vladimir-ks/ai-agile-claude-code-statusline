@@ -272,8 +272,10 @@ class DataBroker extends EventEmitter {
       this.cleanupTimer = undefined;
     }
 
-    const pending = Array.from(this.inFlight.values());
-    await Promise.allSettled(pending);
+    // DON'T wait for pending promises - let them finish in background
+    // This prevents 35s ccusage timeout from blocking shutdown
+    // const pending = Array.from(this.inFlight.values());
+    // await Promise.allSettled(pending);
 
     this.cache.clear();
     this.sessions.clear();
