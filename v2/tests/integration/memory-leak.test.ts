@@ -12,7 +12,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import MemoryMonitor from '../../src/lib/memory-monitor.pseudo';
+import MemoryMonitor from '../../src/lib/memory-monitor';
 
 describe('Memory Leak Detection', () => {
   let monitor: MemoryMonitor;
