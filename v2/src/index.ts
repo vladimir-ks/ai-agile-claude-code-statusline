@@ -143,9 +143,9 @@ async function main() {
     const renderer = new StatuslineRenderer({ useColors: true });
     const output = renderer.render(components);
 
-    // Output to stdout
+    // Output to stdout (NO trailing newline - critical for CLI UI)
     if (output) {
-      console.log(output);
+      process.stdout.write(output);
     }
 
     // Cleanup (non-blocking)
