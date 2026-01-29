@@ -1,0 +1,115 @@
+{
+  "$schema": "./statusline.config.schema.json",
+  "version": "2.0.0",
+
+  "modules": {
+    "context": {
+      "enabled": true,
+      "refreshInterval": 0,
+      "cacheTTL": 0,
+      "stalenessThreshold": 60000,
+      "timeout": 100,
+      "maxRetries": 0,
+      "description": "Session context window data from JSON stdin"
+    },
+
+    "git": {
+      "enabled": true,
+      "refreshInterval": 10000,
+      "cacheTTL": 30000,
+      "stalenessThreshold": 120000,
+      "timeout": 5000,
+      "maxRetries": 2,
+      "description": "Git status (branch, ahead/behind, dirty files)"
+    },
+
+    "cost": {
+      "enabled": true,
+      "refreshInterval": 180000,
+      "cacheTTL": 900000,
+      "stalenessThreshold": 3600000,
+      "timeout": 35000,
+      "maxRetries": 1,
+      "description": "Claude usage billing data (ccusage blocks)"
+    },
+
+    "weekly": {
+      "enabled": false,
+      "refreshInterval": 300000,
+      "cacheTTL": 3600000,
+      "stalenessThreshold": 7200000,
+      "timeout": 35000,
+      "maxRetries": 1,
+      "description": "Weekly usage quota (ccusage weekly)"
+    },
+
+    "model": {
+      "enabled": true,
+      "refreshInterval": 0,
+      "cacheTTL": 3600000,
+      "stalenessThreshold": 3600000,
+      "timeout": 1000,
+      "maxRetries": 1,
+      "description": "Active model from transcript"
+    },
+
+    "time": {
+      "enabled": true,
+      "refreshInterval": 1000,
+      "cacheTTL": 0,
+      "stalenessThreshold": 5000,
+      "timeout": 10,
+      "maxRetries": 0,
+      "description": "Current time (HH:MM)"
+    },
+
+    "project": {
+      "enabled": true,
+      "refreshInterval": 0,
+      "cacheTTL": 0,
+      "stalenessThreshold": 60000,
+      "timeout": 100,
+      "maxRetries": 0,
+      "description": "Project directory from JSON stdin"
+    }
+  },
+
+  "renderer": {
+    "colorEnabled": true,
+    "deduplication": true,
+    "rateLimitMs": 100,
+    "stalenessIndicator": "🔴",
+    "separators": {
+      "section": " ",
+      "colon": ":"
+    }
+  },
+
+  "broker": {
+    "maxCacheSize": 1000,
+    "evictionPolicy": "LRU",
+    "sessionTimeoutMs": 3600000,
+    "enableMetrics": true,
+    "metricsPort": null
+  },
+
+  "performance": {
+    "maxConcurrentFetches": 5,
+    "fetchPoolSize": 3,
+    "workerThreads": false,
+    "lazyModuleLoading": true
+  },
+
+  "logging": {
+    "level": "warn",
+    "destination": "~/.claude/statusline.log",
+    "maxSizeBytes": 10485760,
+    "rotateOnStartup": false,
+    "sentry": {
+      "enabled": false,
+      "dsn": null,
+      "environment": "production",
+      "sampleRate": 0.1
+    }
+  }
+}
