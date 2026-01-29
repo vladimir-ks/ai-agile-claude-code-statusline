@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import ContextValidator from '../../../src/validators/context-validator.pseudo';
+import ContextValidator from '../../../src/validators/context-validator';
 import type { DataPoint } from '../../../src/types/validation';
 
 interface ContextTokens {
@@ -309,9 +309,166 @@ describe('ContextValidator', () => {
 
       const result = validator.validate(json, [transcript]);
 
-      // Should still complete validation (even with invalid data)
-      expect(result).toBeDefined();
-      expect(result.confidence).toBeLessThanOrEqual(100);
+      // Should reject negative tokens
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('Invalid token counts');
+    });
+  });
+
+  describe('Defensive Engineering - Error Handling', () => {
+    test('Invalid primary data point (missing fetchedAt)', () => {
+      const primary = { value: createTokens(100000, 0, 0), source: 'json' } as any;
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('Invalid primary data point');
+    });
+
+    test('Invalid secondary (not an array)', () => {
+      const primary = createDataPoint(createTokens(100000, 0, 0), 'json');
+
+      const result = validator.validate(primary, {} as any);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('not array');
+    });
+
+    test('Malformed token structure (missing fields)', () => {
+      const badTokens = { currentInputTokens: 100000 } as any; // Missing other fields
+      const primary = createDataPoint(badTokens, 'json');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('Non-numeric token values', () => {
+      const badTokens = createTokens('100000' as any, 0, 0);
+      const primary = createDataPoint(badTokens, 'json');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('Infinity token values rejected', () => {
+      const badTokens = createTokens(Infinity, 0, 0);
+      const primary = createDataPoint(badTokens, 'json');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('NaN token values rejected', () => {
+      const badTokens = createTokens(NaN, 0, 0);
+      const primary = createDataPoint(badTokens, 'json');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('Negative tokens in comparison rejected', () => {
+      const json = createDataPoint(createTokens(100000, -5000, 0), 'json');
+      const transcript = createDataPoint(createTokens(100000, 0, 0), 'transcript');
+
+      const result = validator.validate(json, [transcript]);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('Invalid token counts');
+    });
+
+    test('Division by zero handled (both sources zero)', () => {
+      const json = createDataPoint(createTokens(0, 0, 0), 'json');
+      const transcript = createDataPoint(createTokens(0, 0, 0), 'transcript');
+
+      const result = validator.validate(json, [transcript]);
+
+      expect(result.valid).toBe(true);
+      expect(result.confidence).toBe(100);
+    });
+
+    test('Very large token counts handled', () => {
+      const hugeTokens = createTokens(
+        Number.MAX_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER,
+        0
+      );
+      const primary = createDataPoint(hugeTokens, 'json');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(true);
+      expect(result.confidence).toBeGreaterThan(0);
+    });
+
+    test('Null token object handled', () => {
+      const primary: DataPoint<ContextTokens> = {
+        value: null as any,
+        source: 'json',
+        fetchedAt: Date.now()
+      };
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('validateBreakdown with invalid inputs returns all false', () => {
+      const badTokens = { currentInputTokens: -1 } as any;
+      const goodTokens = createTokens(100000, 0, 0);
+
+      const result = validator.validateBreakdown(badTokens, goodTokens);
+
+      expect(result.inputMatch).toBe(false);
+      expect(result.cacheMatch).toBe(false);
+      expect(result.outputMatch).toBe(false);
+    });
+
+    test('formatTokens handles edge cases', () => {
+      // Access private method through validation result warnings
+      const json = createDataPoint(createTokens(1500000, 0, 0), 'json');
+      const transcript = createDataPoint(createTokens(1000000, 0, 0), 'transcript');
+
+      const result = validator.validate(json, [transcript]);
+
+      // Check formatting in warning message
+      if (result.warnings.length > 0) {
+        expect(result.warnings[0]).toMatch(/\d+\.\d+M/);
+      }
+    });
+
+    test('Secondary array with null entries handled gracefully', () => {
+      const primary = createDataPoint(createTokens(100000, 0, 0), 'json');
+      const secondary = [null, undefined, createDataPoint(createTokens(100000, 0, 0), 'transcript')] as any;
+
+      const result = validator.validate(primary, secondary);
+
+      expect(result.valid).toBe(true);
+    });
+
+    test('Error message truncation (very long errors)', () => {
+      // Force an error with a very long message
+      const primary = {
+        value: null as any,
+        source: 'json'.repeat(100), // Very long source name
+        fetchedAt: Date.now()
+      };
+
+      const result = validator.validate(primary, []);
+
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].length).toBeLessThanOrEqual(200);
     });
   });
 });
