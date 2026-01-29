@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import CostValidator from '../../../src/validators/cost-validator.pseudo';
+import CostValidator from '../../../src/validators/cost-validator';
 import type { DataPoint } from '../../../src/types/validation';
 
 interface CostData {
@@ -282,15 +282,16 @@ describe('CostValidator', () => {
       expect(result.confidence).toBe(100); // Within tolerance
     });
 
-    test('Negative costs handled gracefully', () => {
+    test('Negative costs rejected explicitly', () => {
       const ccusage = createDataPoint(createCost(-10.00, 5.00, 100000), 'ccusage'); // Invalid
       const transcript = createDataPoint(createCost(10.00, 5.00, 100000), 'transcript');
 
       const result = validator.validate(ccusage, [transcript]);
 
-      // Should still complete validation
-      expect(result).toBeDefined();
-      expect(result.recommendedSource).toBe('ccusage'); // Always prefer ccusage
+      // Should reject negative costs
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('Invalid cost data');
     });
 
     test('Zero ccusage but transcript has cost - use transcript', () => {
@@ -317,6 +318,150 @@ describe('CostValidator', () => {
       expect(result.valid).toBe(false);
       expect(result.showStaleIndicator).toBe(true);
       expect(result.errors[0]).toContain('1000.00');
+    });
+  });
+
+  describe('Defensive Engineering - Error Handling', () => {
+    test('Invalid primary data point (missing fetchedAt)', () => {
+      const primary = { value: createCost(10, 5, 100000), source: 'ccusage' } as any;
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('Invalid primary data point');
+    });
+
+    test('Invalid secondary (not an array)', () => {
+      const primary = createDataPoint(createCost(10, 5, 100000), 'ccusage');
+
+      const result = validator.validate(primary, {} as any);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('not array');
+    });
+
+    test('Malformed cost structure (missing fields)', () => {
+      const badCost = { totalCost: 10 } as any; // Missing hourlyRate, tokensPerMinute
+      const primary = createDataPoint(badCost, 'ccusage');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('Non-numeric cost values', () => {
+      const badCost = createCost('10.00' as any, 5, 100000);
+      const primary = createDataPoint(badCost, 'ccusage');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('Infinity cost values rejected', () => {
+      const badCost = createCost(Infinity, 5, 100000);
+      const primary = createDataPoint(badCost, 'ccusage');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('NaN cost values rejected', () => {
+      const badCost = createCost(NaN, 5, 100000);
+      const primary = createDataPoint(badCost, 'ccusage');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('Negative hourlyRate rejected', () => {
+      const badCost = createCost(10, -5, 100000);
+      const primary = createDataPoint(badCost, 'ccusage');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('negative or malformed');
+    });
+
+    test('Negative tokensPerMinute rejected', () => {
+      const badCost = createCost(10, 5, -100000);
+      const primary = createDataPoint(badCost, 'ccusage');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('formatCost handles edge cases', () => {
+      const ccusage = createDataPoint(createCost(1500, 500, 100000), 'ccusage');
+      const transcript = createDataPoint(createCost(1000, 300, 100000), 'transcript');
+
+      const result = validator.validate(ccusage, [transcript]);
+
+      // Check formatting in warning
+      if (result.warnings.length > 0) {
+        expect(result.warnings[0]).toMatch(/\d+\.\d+k/);
+      }
+    });
+
+    test('validateBurnRate with invalid inputs returns all false', () => {
+      const badCost = { totalCost: -1 } as any;
+      const goodCost = createCost(10, 5, 100000);
+
+      const result = validator.validateBurnRate(badCost, goodCost);
+
+      expect(result.hourlyRateMatch).toBe(false);
+      expect(result.tokensPerMinuteMatch).toBe(false);
+    });
+
+    test('Division by zero handled in percentage calculation', () => {
+      const ccusage = createDataPoint(createCost(0, 0, 0), 'ccusage');
+      const transcript = createDataPoint(createCost(10, 5, 100000), 'transcript');
+
+      const result = validator.validate(ccusage, [transcript]);
+
+      // Should handle gracefully without throwing
+      expect(result).toBeDefined();
+    });
+
+    test('Very large costs handled', () => {
+      const hugeCost = createCost(
+        Number.MAX_SAFE_INTEGER / 1000,
+        1000000,
+        10000000
+      );
+      const primary = createDataPoint(hugeCost, 'ccusage');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(true);
+      expect(result.confidence).toBeGreaterThan(0);
+    });
+
+    test('Null cost object handled', () => {
+      const primary: DataPoint<CostData> = {
+        value: null as any,
+        source: 'ccusage',
+        fetchedAt: Date.now()
+      };
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('Secondary array with null entries handled gracefully', () => {
+      const primary = createDataPoint(createCost(10, 5, 100000), 'ccusage');
+      const secondary = [null, undefined, createDataPoint(createCost(10, 5, 100000), 'transcript')] as any;
+
+      const result = validator.validate(primary, secondary);
+
+      expect(result.valid).toBe(true);
     });
   });
 });
