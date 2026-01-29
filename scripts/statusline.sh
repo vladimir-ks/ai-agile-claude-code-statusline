@@ -1145,9 +1145,9 @@ if [ "$context_window_size" -gt 0 ]; then
 
     # Show remaining tokens left (more useful than "used %")
     if [ "$tokens_until_compact" -gt 0 ]; then
-        OUTPUT="${OUTPUT}${SEP}🧠${COLON}$($context_color_fn)${tokens_display}left$(rst) [${context_bar}]"
+        OUTPUT="${OUTPUT}${SEP}🧠${COLON}$($context_color_fn)${tokens_display}left$(rst)[${context_bar}]"
     else
-        OUTPUT="${OUTPUT}${SEP}🧠${COLON}$(context_color_crit)COMPACT!$(rst) [${context_bar}]"
+        OUTPUT="${OUTPUT}${SEP}🧠${COLON}$(context_color_crit)COMPACT!$(rst)[${context_bar}]"
     fi
 else
     OUTPUT="${OUTPUT}${SEP}🧠${COLON}$(context_color_good)Context:calculating...$(rst)"
