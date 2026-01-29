@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import ModelValidator from '../../../src/validators/model-validator.pseudo';
+import ModelValidator from '../../../src/validators/model-validator';
 import type { DataPoint } from '../../../src/types/validation';
 
 describe('ModelValidator', () => {
@@ -178,6 +178,103 @@ describe('ModelValidator', () => {
 
       expect(result.valid).toBe(true);
       expect(result.confidence).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Defensive Engineering - Error Handling', () => {
+    test('Invalid primary data point (missing fetchedAt)', () => {
+      const primary = { value: 'Claude', source: 'json' } as any; // Missing fetchedAt
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('Invalid primary data point');
+    });
+
+    test('Invalid primary data point (negative fetchedAt)', () => {
+      const primary = { value: 'Claude', source: 'json', fetchedAt: -1 };
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('Invalid secondary (not an array)', () => {
+      const primary = createDataPoint('Claude Sonnet 4.5', 'json');
+
+      const result = validator.validate(primary, {} as any); // Not an array
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('not array');
+    });
+
+    test('Secondary array with null entries', () => {
+      const primary = createDataPoint('Claude Sonnet 4.5', 'json');
+      const secondary = [null, undefined, createDataPoint('Claude Haiku 4', 'transcript')] as any;
+
+      const result = validator.validate(primary, secondary);
+
+      // Should handle gracefully, ignoring null/undefined entries
+      expect(result.valid).toBe(true);
+    });
+
+    test('Model name with newlines and control characters sanitized', () => {
+      const maliciousName = 'Claude\nSonnet\r4.5\t\x00\x1f';
+      const primary = createDataPoint(maliciousName, 'json');
+      const transcript = createDataPoint('Claude Haiku 4', 'transcript');
+
+      const result = validator.validate(primary, [transcript]);
+
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toHaveLength(1);
+      // Verify sanitized (no newlines in warning message)
+      expect(result.warnings[0]).not.toContain('\n');
+      expect(result.warnings[0]).not.toContain('\r');
+    });
+
+    test('Extremely long model name truncated in warnings', () => {
+      const veryLongName = 'A'.repeat(500);
+      const primary = createDataPoint(veryLongName, 'json');
+      const transcript = createDataPoint('Claude Sonnet 4.5', 'transcript');
+
+      const result = validator.validate(primary, [transcript]);
+
+      expect(result.valid).toBe(true);
+      expect(result.warnings).toHaveLength(1);
+      // Warning message should be truncated (not 500 chars)
+      expect(result.warnings[0].length).toBeLessThan(200);
+      expect(result.warnings[0]).toContain('...');
+    });
+
+    test('Future fetchedAt timestamp handled gracefully', () => {
+      const futureTime = Date.now() + 86400000; // 1 day in future
+      const primary = createDataPoint('Claude Sonnet 4.5', 'json', -86400000); // Make it "future"
+
+      const result = validator.validate(primary, []);
+
+      // Should still work (negative staleness is valid, just unusual)
+      expect(result.valid).toBe(true);
+    });
+
+    test('Zero fetchedAt rejected', () => {
+      const primary = { value: 'Claude', source: 'json', fetchedAt: 0 };
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('Non-string model value converted to string', () => {
+      const primary = { value: 12345 as any, source: 'json', fetchedAt: Date.now() };
+
+      const result = validator.validate(primary, []);
+
+      // Should handle gracefully (coerce to string)
+      expect(result.valid).toBe(true);
     });
   });
 
