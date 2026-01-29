@@ -221,19 +221,37 @@ class ModelValidator implements Validator<string> {
 
   /**
    * Sanitize string for safe logging (prevent injection)
+   * Used for model names in warning messages - shorter to fit both names
    */
   private sanitizeString(value: string): string {
     if (typeof value !== 'string') {
       return String(value);
     }
 
-    // Truncate very long strings
-    const maxLength = 100;
+    // Truncate to 50 chars (allows 2 names + prefix to fit in <200 chars)
+    const maxLength = 50;
     const truncated = value.length > maxLength
       ? value.substring(0, maxLength) + '...'
       : value;
 
     // Remove newlines and control characters
+    return truncated.replace(/[\r\n\t\x00-\x1f\x7f]/g, ' ').trim();
+  }
+
+  /**
+   * Sanitize error message (longer limit for full error text)
+   */
+  private sanitizeErrorMessage(value: string): string {
+    if (typeof value !== 'string') {
+      return String(value);
+    }
+
+    // Truncate to 200 characters
+    const truncated = value.length > 200
+      ? value.substring(0, 200) + '...'
+      : value;
+
+    // Remove control characters (prevent injection)
     return truncated.replace(/[\r\n\t\x00-\x1f\x7f]/g, ' ').trim();
   }
 
@@ -245,7 +263,7 @@ class ModelValidator implements Validator<string> {
       valid: false,
       confidence: 0,
       warnings: [],
-      errors: [this.sanitizeString(errorMessage)],
+      errors: [this.sanitizeErrorMessage(errorMessage)],
       recommendedSource: 'none',
       showStaleIndicator: true,
       metadata: {

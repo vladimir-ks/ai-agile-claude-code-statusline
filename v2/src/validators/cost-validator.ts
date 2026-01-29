@@ -342,6 +342,23 @@ class CostValidator implements Validator<CostData> {
   }
 
   /**
+   * Sanitize error message (truncate + remove control characters)
+   */
+  private sanitizeErrorMessage(value: string): string {
+    if (typeof value !== 'string') {
+      return String(value);
+    }
+
+    // Truncate to 200 characters
+    const truncated = value.length > 200
+      ? value.substring(0, 200) + '...'
+      : value;
+
+    // Remove control characters (prevent injection)
+    return truncated.replace(/[\r\n\t\x00-\x1f\x7f]/g, ' ').trim();
+  }
+
+  /**
    * Create error result with consistent structure
    */
   private createErrorResult(errorMessage: string): ValidationResult {
@@ -349,7 +366,7 @@ class CostValidator implements Validator<CostData> {
       valid: false,
       confidence: 0,
       warnings: [],
-      errors: [String(errorMessage).substring(0, 200)],
+      errors: [this.sanitizeErrorMessage(errorMessage)],
       recommendedSource: 'none',
       showStaleIndicator: true,
       metadata: {

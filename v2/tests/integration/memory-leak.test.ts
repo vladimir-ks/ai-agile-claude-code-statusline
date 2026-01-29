@@ -148,6 +148,9 @@ describe('Memory Leak Detection', () => {
     test('No listener leaks (register/unregister 1000 listeners)', () => {
       const initialCount = monitor.listenerCount('test-event');
 
+      // Set max listeners to avoid warning (test only)
+      monitor.setMaxListeners(1500);
+
       // Register 1000 listeners
       const handlers: Array<() => void> = [];
       for (let i = 0; i < 1000; i++) {
