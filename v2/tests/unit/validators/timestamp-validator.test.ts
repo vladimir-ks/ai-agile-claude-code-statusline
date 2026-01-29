@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import TimestampValidator from '../../../src/validators/timestamp-validator.pseudo';
+import TimestampValidator from '../../../src/validators/timestamp-validator';
 import type { DataPoint } from '../../../src/types/validation';
 
 interface TimestampData {
