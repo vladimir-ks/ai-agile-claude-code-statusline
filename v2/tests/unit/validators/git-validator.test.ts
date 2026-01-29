@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import GitValidator from '../../../src/validators/git-validator.pseudo';
+import GitValidator from '../../../src/validators/git-validator';
 import type { DataPoint } from '../../../src/types/validation';
 
 interface GitData {
@@ -310,6 +310,161 @@ describe('GitValidator', () => {
       // Should still match (only branch name matters)
       expect(result.valid).toBe(true);
       expect(result.confidence).toBe(100);
+    });
+  });
+
+  describe('Defensive Engineering - Error Handling', () => {
+    test('Invalid primary data point (missing fetchedAt)', () => {
+      const primary = { value: createGit('main'), source: 'git_status' } as any;
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]).toContain('Invalid primary data point');
+    });
+
+    test('Invalid secondary (not an array)', () => {
+      const primary = createDataPoint(createGit('main'), 'git_status');
+
+      const result = validator.validate(primary, {} as any);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('not array');
+    });
+
+    test('Malformed git data structure (missing fields)', () => {
+      const badGit = { branch: 'main' } as any; // Missing other fields
+      const primary = createDataPoint(badGit, 'git_status');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('Invalid git data structure');
+    });
+
+    test('Non-numeric ahead/behind/dirty values', () => {
+      const badGit = createGit('main', '10' as any, 0, 0);
+      const primary = createDataPoint(badGit, 'git_status');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('Negative ahead count rejected', () => {
+      const badGit = createGit('main', -1, 0, 0);
+      const primary = createDataPoint(badGit, 'git_status');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors[0]).toContain('Invalid git data structure');
+    });
+
+    test('Infinity values rejected', () => {
+      const badGit = createGit('main', Infinity, 0, 0);
+      const primary = createDataPoint(badGit, 'git_status');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('Non-boolean isRepo rejected', () => {
+      const badGit = { ...createGit('main'), isRepo: 'true' as any };
+      const primary = createDataPoint(badGit, 'git_status');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('Branch name with newlines and control characters sanitized', () => {
+      const maliciousBranch = 'main\nmalicious\r\ncode\t\x00';
+      const gitStatus = createDataPoint(createGit(maliciousBranch), 'git_status');
+      const headFile = createDataPoint(createGit('develop'), 'git_head');
+
+      const result = validator.validate(gitStatus, [headFile]);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      // Verify sanitized (no newlines in error message)
+      expect(result.errors[0]).not.toContain('\n');
+      expect(result.errors[0]).not.toContain('\r');
+    });
+
+    test('Extremely long branch name truncated in errors', () => {
+      const veryLongBranch = 'A'.repeat(500);
+      const gitStatus = createDataPoint(createGit(veryLongBranch), 'git_status');
+      const headFile = createDataPoint(createGit('main'), 'git_head');
+
+      const result = validator.validate(gitStatus, [headFile]);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      // Error message should be truncated
+      expect(result.errors[0].length).toBeLessThan(250);
+      expect(result.errors[0]).toContain('...');
+    });
+
+    test('validateGitState with invalid inputs returns all false', () => {
+      const badGit = { branch: 'main' } as any;
+      const goodGit = createGit('main');
+
+      const result = validator.validateGitState(badGit, goodGit);
+
+      expect(result.branchExists).toBe(false);
+      expect(result.refsConsistent).toBe(false);
+      expect(result.workingTreeClean).toBe(false);
+    });
+
+    test('isDetachedHead with invalid input returns false', () => {
+      const badGit = { branch: 'main' } as any;
+
+      const result = validator.isDetachedHead(badGit);
+
+      expect(result).toBe(false);
+    });
+
+    test('Null git object handled', () => {
+      const primary: DataPoint<GitData> = {
+        value: null as any,
+        source: 'git_status',
+        fetchedAt: Date.now()
+      };
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toHaveLength(1);
+    });
+
+    test('Non-string branch name converted gracefully', () => {
+      const badGit = { ...createGit('main'), branch: 12345 as any };
+      const primary = createDataPoint(badGit, 'git_status');
+
+      const result = validator.validate(primary, []);
+
+      expect(result.valid).toBe(false);
+    });
+
+    test('Secondary array with null entries handled gracefully', () => {
+      const primary = createDataPoint(createGit('main'), 'git_status');
+      const secondary = [null, undefined, createDataPoint(createGit('main'), 'git_head')] as any;
+
+      const result = validator.validate(primary, secondary);
+
+      expect(result.valid).toBe(true);
+    });
+
+    test('normalizeBranchName with non-string input returns empty', () => {
+      // Access through detached HEAD check which uses normalization internally
+      const gitData = createGit(null as any);
+      const result = validator.isDetachedHead(gitData);
+
+      // Should handle gracefully
+      expect(result).toBe(false);
     });
   });
 });
