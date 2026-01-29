@@ -15,7 +15,8 @@ class BudgetWrapperModule {
       return '';  // Don't show if no data
     }
 
-    return `⌛:${data.hoursLeft}h${data.minutesLeft}m(${data.percentageUsed}%)${data.resetTime}`;
+    const stale = data.isFresh ? '' : '🔴';  // Staleness indicator
+    return `⌛:${data.hoursLeft}h${data.minutesLeft}m(${data.percentageUsed}%)${data.resetTime}${stale}`;
   }
 }
 

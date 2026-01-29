@@ -5,7 +5,8 @@
  * Format: hours_left minutes_left (percentage_used%) reset_time_HH:MM
  */
 
-import type { DataModule, DataModuleConfig, ValidationResult } from '../types/data-module';
+import type { DataModule, DataModuleConfig } from '../broker/data-broker';
+import type { ValidationResult } from '../types/validation';
 import { promisify } from 'util';
 import { exec } from 'child_process';
 

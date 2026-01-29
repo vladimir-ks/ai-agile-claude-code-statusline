@@ -16,9 +16,16 @@ class CostWrapperModule {
     }
 
     const cost = this.formatCost(data.costUSD);
-    const burnRate = data.costPerHour ? this.formatCost(data.costPerHour) : '0.00';
 
-    return `💰:${cost}|${burnRate}/h`;
+    // V1 parity: Don't show burn rate if null/0 (show only cost)
+    if (!data.costPerHour || data.costPerHour === 0) {
+      return `💰:${cost}`;
+    }
+
+    const burnRate = this.formatCost(data.costPerHour);
+    const stale = data.isFresh ? '' : '🔴';  // Staleness indicator
+
+    return `💰:${cost}|${burnRate}/h${stale}`;
   }
 
   private formatCost(costUSD: number): string {

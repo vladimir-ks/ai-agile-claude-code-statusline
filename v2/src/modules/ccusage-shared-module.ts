@@ -9,11 +9,19 @@
  * This prevents 3 concurrent ccusage calls!
  */
 
-import type { DataModule, DataModuleConfig, ValidationResult } from '../types/data-module';
+import type { DataModule, DataModuleConfig } from '../broker/data-broker';
+import type { ValidationResult } from '../types/validation';
 import { promisify } from 'util';
 import { exec } from 'child_process';
+import ProcessLock from '../lib/process-lock';
 
 const execAsync = promisify(exec);
+const ccusageLock = new ProcessLock({
+  lockPath: `${process.env.HOME}/.claude/.ccusage.lock`,
+  timeout: 35000,
+  retryInterval: 100,
+  maxRetries: 3
+});
 
 interface CCUsageData {
   // Raw block data
@@ -49,13 +57,27 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
   };
 
   async fetch(sessionId: string): Promise<CCUsageData> {
-    try {
-      const { stdout } = await execAsync('ccusage blocks --json --active', {
-        timeout: this.config.timeout
-      });
+    // CRITICAL: Acquire system-wide lock to prevent concurrent ccusage spawns
+    const result = await ccusageLock.withLock(async () => {
+      try {
+        const { stdout } = await execAsync('ccusage blocks --json --active', {
+          timeout: this.config.timeout
+        });
 
-      const data = JSON.parse(stdout);
-      const activeBlock = data.blocks?.find((b: any) => b.isActive === true);
+        return JSON.parse(stdout);
+      } catch (error) {
+        console.error('[CCUsageSharedModule] ccusage execution failed:', error);
+        return null;
+      }
+    });
+
+    // Lock acquisition failed or ccusage failed
+    if (!result) {
+      return this.getDefaultData();
+    }
+
+    try {
+      const activeBlock = result.blocks?.find((b: any) => b.isActive === true);
 
       if (!activeBlock) {
         return this.getDefaultData();

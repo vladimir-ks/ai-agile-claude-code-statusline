@@ -48,15 +48,8 @@ class TimeModule implements DataModule<TimeData> {
     const hours = String(data.currentTime.getHours()).padStart(2, '0');
     const mins = String(data.currentTime.getMinutes()).padStart(2, '0');
 
-    // Format session duration
-    const durationMins = Math.floor(data.sessionDuration / 60000);
-    const durationHours = Math.floor(durationMins / 60);
-    const remainderMins = durationMins % 60;
-    const duration = durationHours > 0
-      ? `${durationHours}h${remainderMins}m`
-      : `${remainderMins}m`;
-
-    return `🕐:${hours}:${mins} ⏱:${duration}`;
+    // V1 parity: Only show time, no session duration
+    return `🕐:${hours}:${mins}`;
   }
 }
 

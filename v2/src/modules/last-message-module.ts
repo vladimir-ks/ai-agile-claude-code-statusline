@@ -4,7 +4,8 @@
  * Displays: 💬:14:30(2h43m) What is...
  */
 
-import type { DataModule, DataModuleConfig, ValidationResult } from '../types/data-module';
+import type { DataModule, DataModuleConfig } from '../broker/data-broker';
+import type { ValidationResult } from '../types/validation';
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 

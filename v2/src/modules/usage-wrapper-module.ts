@@ -17,11 +17,13 @@ class UsageWrapperModule {
 
     const tokens = this.formatTokens(data.totalTokens);
     const tpm = data.tokensPerMinute ? this.formatTokens(data.tokensPerMinute) : null;
+    const stale = data.isFresh ? '' : '🔴';  // Staleness indicator
 
     let output = `📊:${tokens}tok`;
     if (tpm) {
       output += `(${tpm}tpm)`;
     }
+    output += stale;
 
     return output;
   }

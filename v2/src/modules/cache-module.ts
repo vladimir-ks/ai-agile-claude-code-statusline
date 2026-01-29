@@ -4,7 +4,8 @@
  * Displays: 💾:16%
  */
 
-import type { DataModule, DataModuleConfig, ValidationResult } from '../types/data-module';
+import type { DataModule, DataModuleConfig } from '../broker/data-broker';
+import type { ValidationResult } from '../types/validation';
 
 interface CacheData {
   cacheRead: number;

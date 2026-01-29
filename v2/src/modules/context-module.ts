@@ -217,15 +217,23 @@ class ContextModule implements DataModule<ContextData> {
   private generateProgressBar(percentUsed: number): string {
     try {
       const totalWidth = 12;
+      const thresholdPct = 78;
       const usedPos = Math.floor(totalWidth * Math.max(0, Math.min(100, percentUsed)) / 100);
+      const markerPos = Math.floor(totalWidth * thresholdPct / 100);  // Position 9 of 12
 
       let bar = '';
       for (let i = 0; i < totalWidth; i++) {
-        bar += i < usedPos ? '=' : '-';
+        if (i === markerPos) {
+          bar += '|';  // Threshold marker at 78%
+        } else if (i < usedPos) {
+          bar += '=';  // Filled
+        } else {
+          bar += '-';  // Empty
+        }
       }
       return bar;
     } catch (error) {
-      return '------------';
+      return '-----------|--';  // Default with marker
     }
   }
 

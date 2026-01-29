@@ -4,7 +4,8 @@
  * Displays: 📁:~/.claude or 📁:~/projects/foo
  */
 
-import type { DataModule, DataModuleConfig, ValidationResult } from '../types/data-module';
+import type { DataModule, DataModuleConfig } from '../broker/data-broker';
+import type { ValidationResult } from '../types/validation';
 import { promisify } from 'util';
 import { exec } from 'child_process';
 
