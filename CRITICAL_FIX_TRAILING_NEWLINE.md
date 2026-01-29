@@ -239,7 +239,7 @@ All tests must pass before deployment.
 
 ## Commit Hash
 
-`<to be added after commit>`
+`a99bd77` - "fix: Critical UI fix - remove trailing newline breaking Claude CLI"
 
 ---
 
