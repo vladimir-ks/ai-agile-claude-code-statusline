@@ -97,7 +97,7 @@ describe('Display-Only Layer', () => {
       const { output } = runDisplay('{}');
 
       expect(output).toContain('🤖:Claude');
-      expect(output).toContain('🕐:');
+      // Time removed - redundant with OS clock
     });
 
     test('outputs minimal statusline when invalid JSON', () => {
@@ -164,7 +164,7 @@ describe('Display-Only Layer', () => {
 
       // HIGH priority - always shown
       expect(output).toContain('🤖:Sonnet4.5');
-      expect(output).toContain('🧠:100kleft');
+      expect(output).toContain('🧠:100kleft[');  // Token count with "left" followed by progress bar
 
       // MEDIUM priority - shown if space (git at least should fit)
       expect(output).toContain('🌿:feature+2-1*3');
@@ -307,6 +307,183 @@ describe('Display-Only Layer', () => {
 
       expect(output).not.toContain('🌿:');  // Git disabled
       expect(output).toContain('🤖:');       // Model enabled
+    });
+  });
+
+  // =========================================================================
+  // Directory Path Tests (CRITICAL - previously broken)
+  // =========================================================================
+  describe('directory path handling', () => {
+    test('extracts directory from stdin start_directory (primary source)', () => {
+      const health = {
+        sessionId: 'dir-test-1',
+        projectPath: '/wrong/daemon/path',  // This should be IGNORED
+        model: { value: 'Claude' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+
+      writeFileSync(
+        '/tmp/test-display-home/.claude/session-health/dir-test-1.json',
+        JSON.stringify(health)
+      );
+
+      // Pass start_directory in stdin JSON (like Claude Code does)
+      const { output } = runDisplay('{"session_id":"dir-test-1","start_directory":"/Users/test/myproject"}');
+
+      // Should show the stdin directory, NOT the health file's projectPath
+      expect(output).toContain('📁:');
+      expect(output).toContain('myproject');
+      expect(output).not.toContain('wrong');
+    });
+
+    test('extracts directory from stdin workspace.current_dir (fallback)', () => {
+      const health = {
+        sessionId: 'dir-test-2',
+        projectPath: '/wrong/path',
+        model: { value: 'Claude' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+
+      writeFileSync(
+        '/tmp/test-display-home/.claude/session-health/dir-test-2.json',
+        JSON.stringify(health)
+      );
+
+      const { output } = runDisplay('{"session_id":"dir-test-2","workspace":{"current_dir":"/Users/test/workspace-dir"}}');
+
+      expect(output).toContain('📁:');
+      expect(output).toContain('workspace-dir');
+    });
+
+    test('extracts directory from stdin cwd (last fallback)', () => {
+      const health = {
+        sessionId: 'dir-test-3',
+        projectPath: '/wrong/path',
+        model: { value: 'Claude' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+
+      writeFileSync(
+        '/tmp/test-display-home/.claude/session-health/dir-test-3.json',
+        JSON.stringify(health)
+      );
+
+      const { output } = runDisplay('{"session_id":"dir-test-3","cwd":"/Users/test/cwd-dir"}');
+
+      expect(output).toContain('📁:');
+      expect(output).toContain('cwd-dir');
+    });
+
+    test('hides directory when no stdin directory available', () => {
+      const health = {
+        sessionId: 'dir-test-4',
+        projectPath: '/daemon/wrong/path',  // Should NOT be used
+        model: { value: 'Claude' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+
+      writeFileSync(
+        '/tmp/test-display-home/.claude/session-health/dir-test-4.json',
+        JSON.stringify(health)
+      );
+
+      // No directory in stdin
+      const { output } = runDisplay('{"session_id":"dir-test-4"}');
+
+      // Should NOT show directory at all (rather than wrong path)
+      expect(output).not.toContain('📁:');
+      expect(output).not.toContain('daemon');
+    });
+
+    test('shortens long paths intelligently', () => {
+      const health = {
+        sessionId: 'dir-test-5',
+        model: { value: 'Claude' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+
+      writeFileSync(
+        '/tmp/test-display-home/.claude/session-health/dir-test-5.json',
+        JSON.stringify(health)
+      );
+
+      // Very long path
+      const { output } = runDisplay('{"session_id":"dir-test-5","start_directory":"/tmp/test-display-home/very/long/nested/path/to/project"}');
+
+      expect(output).toContain('📁:');
+      // Should contain some indication of the path structure
+      expect(output).toContain('project');
+      // Should not exceed reasonable length
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+      expect(stripped.length).toBeLessThan(150);
+    });
+  });
+
+  // =========================================================================
+  // Model Override Tests
+  // =========================================================================
+  describe('model handling', () => {
+    test('prefers stdin model.display_name over cached health', () => {
+      const health = {
+        sessionId: 'model-test-1',
+        model: { value: 'OldCachedModel' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+
+      writeFileSync(
+        '/tmp/test-display-home/.claude/session-health/model-test-1.json',
+        JSON.stringify(health)
+      );
+
+      const { output } = runDisplay('{"session_id":"model-test-1","model":{"display_name":"Opus4.5"}}');
+
+      expect(output).toContain('🤖:Opus4.5');
+      expect(output).not.toContain('OldCachedModel');
+    });
+
+    test('falls back to cached model when stdin has no model', () => {
+      const health = {
+        sessionId: 'model-test-2',
+        model: { value: 'CachedSonnet' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+
+      writeFileSync(
+        '/tmp/test-display-home/.claude/session-health/model-test-2.json',
+        JSON.stringify(health)
+      );
+
+      const { output } = runDisplay('{"session_id":"model-test-2"}');
+
+      expect(output).toContain('🤖:CachedSonnet');
     });
   });
 

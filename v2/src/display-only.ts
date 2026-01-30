@@ -34,9 +34,17 @@ interface SessionHealth {
   projectPath: string;
   gatheredAt?: number;  // Timestamp when health was last gathered
   health: { status: string; issues: string[]; lastUpdate?: number };
-  transcript: { exists: boolean; lastModifiedAgo: string; isSynced: boolean; lastMessagePreview?: string; lastMessageAgo?: string };
+  transcript: {
+    exists: boolean;
+    lastModifiedAgo: string;
+    isSynced: boolean;
+    messageCount?: number;       // Turn count
+    lastMessageTime?: number;    // Unix timestamp ms
+    lastMessagePreview?: string;
+    lastMessageAgo?: string;
+  };
   model: { value: string };
-  context: { tokensLeft: number; percentUsed: number };
+  context: { tokensLeft: number; percentUsed: number; tokensUsed?: number; windowSize?: number };
   git: { branch: string; ahead: number; behind: number; dirty: number };
   billing: { costToday: number; burnRatePerHour: number; budgetRemaining: number; budgetPercentUsed: number; resetTime: string; isFresh: boolean; lastFetched?: number };
   alerts: { secretsDetected: boolean; secretTypes: string[]; transcriptStale: boolean; dataLossRisk: boolean };
@@ -168,30 +176,49 @@ function generateProgressBar(percentUsed: number): string {
   return `[${bar}]`;
 }
 
-function shortenPath(path: string, maxLen: number = 25): string {
+function shortenPath(path: string, maxLen: number = 40): string {
   if (!path) return '?';
   const home = homedir();
-  let shortened = path.startsWith(home) ? '~' + path.slice(home.length) : path;
+  const startsWithHome = path.startsWith(home);
+  let shortened = startsWithHome ? '~' + path.slice(home.length) : path;
 
   if (shortened.length <= maxLen) {
     return shortened;
   }
 
-  // Get last path component
+  // Get path components
   const parts = shortened.split('/').filter(p => p);
   if (parts.length <= 1) {
-    return shortened.slice(0, maxLen - 2) + '..';
+    return shortened.slice(0, maxLen - 1) + '…';
   }
 
+  const hasTilde = parts[0] === '~';
   let lastPart = parts[parts.length - 1];
-  // Remove common prefixes that add noise
-  lastPart = lastPart.replace(/^_+/, ''); // Leading underscores
 
-  if (lastPart.length <= maxLen - 2) {
-    return `~/${lastPart}`;
+  // Try to show last 2 parts with truncation indicator
+  if (parts.length >= 2) {
+    const lastTwo = parts.slice(-2).join('/');
+    const prefix = hasTilde ? '~/…/' : '…/';
+    const candidate = prefix + lastTwo;
+    if (candidate.length <= maxLen) {
+      return candidate;
+    }
   }
-  // Truncate if still too long
-  return `~/${lastPart.slice(0, maxLen - 4)}..`;
+
+  // Show last part only with truncation indicator
+  const prefix = hasTilde ? '~/…/' : '…/';
+  if (prefix.length + lastPart.length <= maxLen) {
+    return prefix + lastPart;
+  }
+
+  // Truncate last part if still too long
+  const available = maxLen - prefix.length - 1;
+  if (available > 3) {
+    return prefix + lastPart.slice(0, available) + '…';
+  }
+
+  // Ultimate fallback
+  return shortened.slice(0, maxLen - 1) + '…';
 }
 
 /**
@@ -212,8 +239,9 @@ function visibleWidth(str: string): number {
 // Component Formatters (each handles its own errors, with colors)
 // ============================================================================
 
-function fmtDirectory(h: SessionHealth): string {
-  return `📁:${c('directory')}${shortenPath(h.projectPath)}${rst()}`;
+function fmtDirectory(path: string | null): string {
+  if (!path) return '';
+  return `📁:${c('directory')}${shortenPath(path)}${rst()}`;
 }
 
 function fmtGit(h: SessionHealth): string {
@@ -225,8 +253,10 @@ function fmtGit(h: SessionHealth): string {
   return result + rst();
 }
 
-function fmtModel(h: SessionHealth): string {
-  return `🤖:${c('model')}${h.model?.value || 'Claude'}${rst()}`;
+function fmtModel(h: SessionHealth, stdinModel: string | null = null): string {
+  // Prefer stdin model (real-time from Claude Code) over cached health data
+  const model = stdinModel || h.model?.value || 'Claude';
+  return `🤖:${c('model')}${model}${rst()}`;
 }
 
 function fmtContext(h: SessionHealth): string {
@@ -257,24 +287,44 @@ function fmtTranscriptSync(h: SessionHealth): string {
   return `📝:${c('transcript')}${ago}${rst()}`;
 }
 
+function fmtMessageCount(h: SessionHealth): string {
+  const count = h.transcript?.messageCount || 0;
+  if (count === 0) return '';
+  return `💬:${c('transcript')}${count}t${rst()}`;
+}
+
 function fmtLastMessage(h: SessionHealth): string {
   if (!h.transcript?.lastMessagePreview) return '';
   const ago = h.transcript.lastMessageAgo || '?';
   const preview = h.transcript.lastMessagePreview;
-  // Compact format: "💬:preview(ago)" saves 1 char vs "💬:ago preview"
-  return `💬:${c('lastMsg')}${preview}(${ago})${rst()}`;
+
+  // V1 format: "💬:HH:MM(Xm) message preview"
+  // Shows actual time + elapsed + preview
+  let timeStr: string;
+  if (h.transcript?.lastMessageTime) {
+    const d = new Date(h.transcript.lastMessageTime);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    timeStr = `${hh}:${mm}(${ago})`;
+  } else {
+    // Fallback when no timestamp available
+    timeStr = `(${ago})`;
+  }
+
+  return `💬:${c('lastMsg')}${timeStr}${rst()} ${preview}`;
 }
 
 function fmtBudget(h: SessionHealth): string {
   if (!h.billing?.budgetRemaining && h.billing?.budgetRemaining !== 0) return '';
-  const mins = h.billing.budgetRemaining || 0;
+  const mins = Math.max(0, h.billing.budgetRemaining || 0);  // Clamp to 0
   const hours = Math.floor(mins / 60);
   const m = mins % 60;
+  const pct = h.billing.budgetPercentUsed || 0;
 
-  // Compact format: "1h53m@14:00" or "1h53m🔴" if stale
+  // V1 format: "XhXm(XX%)HH:MM" or "XhXm(XX%)🔴" if stale
   const stale = !h.billing.isFresh ? `${c('critical')}🔴${rst()}` : '';
-  const reset = h.billing.resetTime && h.billing.isFresh ? `@${h.billing.resetTime}` : '';
-  return `⌛:${c('budget')}${hours}h${m}m${reset}${rst()}${stale}`;
+  const reset = h.billing.resetTime && h.billing.isFresh ? h.billing.resetTime : '';
+  return `⌛:${c('budget')}${hours}h${m}m(${pct}%)${reset}${rst()}${stale}`;
 }
 
 function fmtCost(h: SessionHealth): string {
@@ -313,12 +363,18 @@ function fmtHealthStatus(h: SessionHealth): string {
 
 function display(): void {
   try {
-    // 1. Parse session_id from stdin (minimal parsing, fail-safe)
+    // 1. Parse session_id, start_directory, and model from stdin (minimal parsing, fail-safe)
     let sessionId: string | null = null;
+    let stdinDirectory: string | null = null;
+    let stdinModel: string | null = null;
     try {
       const stdin = require('fs').readFileSync(0, 'utf-8');
       const parsed = JSON.parse(stdin);
       sessionId = parsed?.session_id || null;
+      // Extract directory from Claude Code input (most reliable source)
+      stdinDirectory = parsed?.start_directory || parsed?.workspace?.current_dir || parsed?.cwd || null;
+      // Extract model from stdin (takes priority over cached)
+      stdinModel = parsed?.model?.display_name || parsed?.model?.name || null;
     } catch {
       // Can't parse stdin - will show fallback
     }
@@ -349,10 +405,8 @@ function display(): void {
     const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig> }>(configPath);
     const cfg: ComponentsConfig = { ...DEFAULT_COMPONENTS, ...configRaw?.components };
 
-    // 6. Build SINGLE LINE output with last message at end (truncated to fit)
-    // Format: [alerts] [dir] [git] [model] [context] [cost] [budget] [time] [sync] [lastMsg...]
-    // Terminal width is typically ~120 chars; leave ~15 for Claude Code UI
-
+    // 6. Build output matching V1 format:
+    // 📁:dir 🌿:git 🤖:model 🧠:context 🕐:time ⌛:budget 💰:cost 💬:turns 📝:sync 💬:lastMsg
     const parts: string[] = [];
 
     // Alerts first (critical)
@@ -363,41 +417,52 @@ function display(): void {
     { const hs = fmtHealthStatus(health); if (hs) parts.push(hs); }
     if (cfg.secrets) { const s = fmtSecrets(health); if (s) parts.push(s); }
 
-    // Core info
-    if (cfg.directory) parts.push(fmtDirectory(health));
+    // Core info - ONLY use stdin directory (from Claude Code), never daemon's cached path
+    if (cfg.directory && stdinDirectory) {
+      const dir = fmtDirectory(stdinDirectory);
+      if (dir) parts.push(dir);
+    }
     if (cfg.git) { const g = fmtGit(health); if (g) parts.push(g); }
-    if (cfg.model) parts.push(fmtModel(health));
+    if (cfg.model) parts.push(fmtModel(health, stdinModel));
     if (cfg.context) parts.push(fmtContext(health));
 
-    // Billing info (condensed)
-    if (cfg.cost) { const co = fmtCost(health); if (co) parts.push(co); }
-    if (cfg.budget) { const b = fmtBudget(health); if (b) parts.push(b); }
-
-    // Time and sync (compact)
+    // Time first, then billing
     if (cfg.time) parts.push(fmtTime());
+    if (cfg.budget) { const b = fmtBudget(health); if (b) parts.push(b); }
+    if (cfg.cost) { const co = fmtCost(health); if (co) parts.push(co); }
+
+    // Conversation metrics (message count = turns)
+    { const mc = fmtMessageCount(health); if (mc) parts.push(mc); }
+
+    // Sync status
     if (cfg.transcriptSync) parts.push(fmtTranscriptSync(health));
 
-    // Calculate remaining space for last message
-    const coreLine = parts.join(' ');
-    const coreWidth = visibleWidth(coreLine);
-    const MAX_WIDTH = 115; // Leave room for Claude Code UI
-    const remainingWidth = MAX_WIDTH - coreWidth - 2; // -2 for space and safety
+    // Last message at end (V1 format: HH:MM(elapsed) preview)
+    { const lm = fmtLastMessage(health); if (lm) parts.push(lm); }
 
-    // Last message at end - truncate to fill remaining space
-    if (remainingWidth > 10 && health.transcript?.lastMessagePreview) {
-      const ago = health.transcript.lastMessageAgo || '';
-      const preview = health.transcript.lastMessagePreview;
-      // Calculate how much preview we can fit
-      const agoLen = ago.length + 3; // "(<1m)" format
-      const maxPreviewLen = Math.max(5, remainingWidth - agoLen - 3); // -3 for 💬:
-      const truncatedPreview = preview.length > maxPreviewLen
-        ? preview.slice(0, maxPreviewLen - 2) + '..'
-        : preview;
-      parts.push(`💬:${c('lastMsg')}${truncatedPreview}(${ago})${rst()}`);
+    // 7. Intelligent multi-line wrapping
+    // Claude Code UI has ~75% width available (~85 cols on typical terminal)
+    const MAX_LINE_WIDTH = 85;
+
+    // Build output with intelligent line wrapping
+    const lines: string[] = [];
+    let currentLine = '';
+
+    for (const part of parts) {
+      const testLine = currentLine ? currentLine + ' ' + part : part;
+      if (visibleWidth(testLine) <= MAX_LINE_WIDTH) {
+        currentLine = testLine;
+      } else {
+        // Current line is full, start new line
+        if (currentLine) lines.push(currentLine);
+        currentLine = part;
+      }
     }
+    // Don't forget the last line
+    if (currentLine) lines.push(currentLine);
 
-    // 7. Output SINGLE LINE (NO trailing newline)
-    process.stdout.write(parts.join(' '))
+    // Output with newlines between lines (NO trailing newline)
+    process.stdout.write(lines.join('\n'));
 
   } catch (error) {
     // LAST RESORT: If anything fails, output safe fallback
