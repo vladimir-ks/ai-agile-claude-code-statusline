@@ -139,7 +139,11 @@ describe('Display-Only Layer', () => {
   // Output Format Tests
   // =========================================================================
   describe('output format', () => {
-    test('formats all components correctly', () => {
+    test('formats high-priority components correctly', () => {
+      // Note: Display now uses priority-based width limiting (~80 chars max)
+      // HIGH priority (always shown): model, context
+      // MEDIUM priority (if space): git, cost, budget
+      // LOW priority (if space): directory, time, transcript
       const health = {
         sessionId: 'format-test',
         projectPath: '/Users/test/myproject',
@@ -158,14 +162,16 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"format-test"}');
 
-      expect(output).toContain('📁:');
-      expect(output).toContain('🌿:feature+2/-1*3');
+      // HIGH priority - always shown
       expect(output).toContain('🤖:Sonnet4.5');
       expect(output).toContain('🧠:100kleft');
-      expect(output).toContain('🕐:');
-      expect(output).toContain('📝:1m');
-      expect(output).toContain('⌛:3h0m(25%)14:00');
-      expect(output).toContain('💰:$25.5|$10/h');
+
+      // MEDIUM priority - shown if space (git at least should fit)
+      expect(output).toContain('🌿:feature+2-1*3');
+
+      // Verify output is not too long (width limiting working)
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+      expect(stripped.length).toBeLessThanOrEqual(100); // Allow some margin for emoji widths
     });
 
     test('shows secrets warning when detected', () => {

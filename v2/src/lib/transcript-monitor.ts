@@ -27,6 +27,8 @@ class TranscriptMonitor {
       lastModifiedAgo: 'unknown',
       messageCount: 0,
       lastMessageTime: 0,
+      lastMessagePreview: '',
+      lastMessageAgo: '',
       isSynced: false
     };
 
@@ -54,12 +56,17 @@ class TranscriptMonitor {
       // For large files (>1MB), use estimation and tail reading
       if (stats.size > 1_000_000) {
         result.messageCount = this.estimateMessageCount(stats.size);
-        result.lastMessageTime = this.getLastTimestampFromTail(transcriptPath);
+        const lastMsg = this.getLastUserMessageFromTail(transcriptPath);
+        result.lastMessageTime = lastMsg.timestamp;
+        result.lastMessagePreview = lastMsg.preview;
+        result.lastMessageAgo = lastMsg.timestamp ? this.formatAgo(lastMsg.timestamp) : '';
       } else {
         // Small file: read and parse fully
-        const { messageCount, lastTimestamp } = this.parseTranscript(transcriptPath);
-        result.messageCount = messageCount;
-        result.lastMessageTime = lastTimestamp;
+        const parsed = this.parseTranscript(transcriptPath);
+        result.messageCount = parsed.messageCount;
+        result.lastMessageTime = parsed.lastTimestamp;
+        result.lastMessagePreview = parsed.lastUserMessagePreview;
+        result.lastMessageAgo = parsed.lastTimestamp ? this.formatAgo(parsed.lastTimestamp) : '';
       }
 
       return result;
@@ -79,44 +86,58 @@ class TranscriptMonitor {
   }
 
   /**
-   * Read last ~10KB of file to find most recent timestamp
+   * Read last ~500KB of file to find last user message
+   * (Increased from 50KB to handle sessions with heavy tool activity)
    */
-  private getLastTimestampFromTail(path: string): number {
+  private getLastUserMessageFromTail(path: string): { timestamp: number; preview: string } {
     try {
-      const stats = statSync(path);
-      const readSize = Math.min(10000, stats.size);
-      const fd = Bun.file(path);
-
-      // Read last 10KB
-      const buffer = new Uint8Array(readSize);
-      const file = Bun.file(path);
-
-      // Use sync read for simplicity
       const content = readFileSync(path, 'utf-8');
+      const readSize = Math.min(500000, content.length);
       const lastChunk = content.slice(-readSize);
 
-      return this.extractLastTimestamp(lastChunk);
+      return this.extractLastUserMessage(lastChunk);
     } catch {
-      return 0;
+      return { timestamp: 0, preview: '' };
     }
   }
 
   /**
    * Parse full transcript file
    */
-  private parseTranscript(path: string): { messageCount: number; lastTimestamp: number } {
+  private parseTranscript(path: string): {
+    messageCount: number;
+    lastTimestamp: number;
+    lastUserMessagePreview: string;
+  } {
     try {
       const content = readFileSync(path, 'utf-8');
       const lines = content.split('\n').filter(line => line.trim() !== '');
 
       let lastTimestamp = 0;
+      let lastUserMessagePreview = '';
 
-      // Find last valid timestamp
+      // Find last valid timestamp and last user message
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
           const obj = JSON.parse(lines[i]);
-          if (obj.timestamp) {
+
+          // Get timestamp from any message type
+          if (obj.timestamp && !lastTimestamp) {
             lastTimestamp = new Date(obj.timestamp).getTime();
+          }
+
+          // Get last user message preview (human-readable text only, skip tool_results)
+          if (!lastUserMessagePreview && obj.type === 'user' && obj.message?.content) {
+            const text = this.extractUserText(obj.message.content);
+            // Only use if we found actual text (not empty from tool_result-only messages)
+            if (text) {
+              lastUserMessagePreview = this.truncatePreview(text, 10);
+            }
+            // Continue searching if this was a tool_result-only message
+          }
+
+          // Once we have both, stop searching
+          if (lastTimestamp && lastUserMessagePreview) {
             break;
           }
         } catch {
@@ -126,32 +147,96 @@ class TranscriptMonitor {
 
       return {
         messageCount: lines.length,
-        lastTimestamp
+        lastTimestamp,
+        lastUserMessagePreview
       };
     } catch {
-      return { messageCount: 0, lastTimestamp: 0 };
+      return { messageCount: 0, lastTimestamp: 0, lastUserMessagePreview: '' };
     }
   }
 
   /**
-   * Extract last timestamp from a chunk of text (tail of file)
+   * Extract last user message from a chunk of text (tail of file)
    */
-  private extractLastTimestamp(chunk: string): number {
+  private extractLastUserMessage(chunk: string): { timestamp: number; preview: string } {
     const lines = chunk.split('\n').filter(line => line.trim() !== '');
+    let timestamp = 0;
+    let preview = '';
 
-    // Search from end to find valid JSON with timestamp
+    // Search from end to find user message
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
-        if (obj.timestamp) {
-          return new Date(obj.timestamp).getTime();
+
+        if (!timestamp && obj.timestamp) {
+          timestamp = new Date(obj.timestamp).getTime();
         }
+
+        if (!preview && obj.type === 'user' && obj.message?.content) {
+          const text = this.extractUserText(obj.message.content);
+          // Only use if we found actual text (not empty from tool_result-only messages)
+          if (text) {
+            preview = this.truncatePreview(text, 10);
+          }
+          // Continue searching if this was a tool_result-only message
+        }
+
+        if (timestamp && preview) break;
       } catch {
         // Not valid JSON or partial line, continue
       }
     }
 
-    return 0;
+    return { timestamp, preview };
+  }
+
+  /**
+   * Extract human-readable text from user message content
+   * Content can be: string | array of content blocks
+   *
+   * Content block types:
+   * - { type: 'text', text: '...' } - actual user text (what we want)
+   * - { type: 'tool_result', ... } - tool output (skip these)
+   * - { type: 'image', ... } - image data (skip)
+   */
+  private extractUserText(content: unknown): string {
+    // Simple string content
+    if (typeof content === 'string') {
+      return content;
+    }
+
+    // Array of content blocks (Claude API format)
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === 'object') {
+          // Only accept explicit text blocks, skip tool_result
+          if (block.type === 'text' && typeof block.text === 'string') {
+            return block.text;
+          }
+        }
+      }
+    }
+
+    return '';
+  }
+
+  /**
+   * Check if user message contains actual human text (not just tool results)
+   */
+  private hasUserText(content: unknown): boolean {
+    return this.extractUserText(content) !== '';
+  }
+
+  /**
+   * Truncate message to preview length
+   */
+  private truncatePreview(text: string, maxLen: number): string {
+    // Clean up the text
+    const cleaned = text.replace(/\s+/g, ' ').trim();
+    if (cleaned.length <= maxLen) {
+      return cleaned;
+    }
+    return cleaned.slice(0, maxLen - 2) + '..';
   }
 
   /**

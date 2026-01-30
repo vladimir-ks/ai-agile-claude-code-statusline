@@ -34,7 +34,7 @@ interface SessionHealth {
   projectPath: string;
   gatheredAt?: number;  // Timestamp when health was last gathered
   health: { status: string; issues: string[]; lastUpdate?: number };
-  transcript: { exists: boolean; lastModifiedAgo: string; isSynced: boolean };
+  transcript: { exists: boolean; lastModifiedAgo: string; isSynced: boolean; lastMessagePreview?: string; lastMessageAgo?: string };
   model: { value: string };
   context: { tokensLeft: number; percentUsed: number };
   git: { branch: string; ahead: number; behind: number; dirty: number };
@@ -90,6 +90,7 @@ const COLORS = {
   budget: '\x1b[38;5;189m',       // lavender
   cost: '\x1b[38;5;222m',         // light gold
   burnRate: '\x1b[38;5;220m',     // bright gold
+  lastMsg: '\x1b[38;5;252m',      // white/gray (for message preview)
   // Context colors based on usage
   contextGood: '\x1b[38;5;158m',  // mint green
   contextWarn: '\x1b[38;5;215m',  // peach
@@ -149,28 +150,51 @@ function formatMoney(amount: number): string {
 
 function generateProgressBar(percentUsed: number): string {
   const width = 12;
-  const thresholdPos = 9; // 78% of 12
+  const thresholdPos = 9; // 78% of 12 (position 9 = 75%, close enough)
   const pct = Math.max(0, Math.min(100, percentUsed || 0));
   const usedPos = Math.floor(width * pct / 100);
 
   let bar = '';
   for (let i = 0; i < width; i++) {
-    if (i === thresholdPos) bar += '|';
-    else if (i < usedPos) bar += '=';
-    else bar += '-';
+    // Threshold marker ALWAYS appears at position 9 (highest priority)
+    if (i === thresholdPos) {
+      bar += '|';
+    } else if (i < usedPos) {
+      bar += '=';
+    } else {
+      bar += '-';
+    }
   }
   return `[${bar}]`;
 }
 
-function shortenPath(path: string): string {
+function shortenPath(path: string, maxLen: number = 20): string {
   if (!path) return '?';
   const home = homedir();
   let shortened = path.startsWith(home) ? '~' + path.slice(home.length) : path;
-  if (shortened.length > 35) {
+  if (shortened.length > maxLen) {
     const parts = shortened.split('/');
-    shortened = '~/' + parts[parts.length - 1];
+    // Try to show just the last directory name
+    shortened = parts[parts.length - 1];
+    if (shortened.length > maxLen) {
+      shortened = shortened.slice(0, maxLen - 2) + '..';
+    }
   }
   return shortened;
+}
+
+/**
+ * Strip ANSI escape codes to calculate visible width
+ */
+function stripAnsi(str: string): string {
+  return str.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+/**
+ * Calculate visible width (excluding ANSI codes)
+ */
+function visibleWidth(str: string): number {
+  return stripAnsi(str).length;
 }
 
 // ============================================================================
@@ -185,7 +209,7 @@ function fmtGit(h: SessionHealth): string {
   if (!h.git?.branch) return '';
   let result = `🌿:${c('git')}${h.git.branch}`;
   if (h.git.ahead > 0) result += `+${h.git.ahead}`;
-  if (h.git.behind > 0) result += `/-${h.git.behind}`;
+  if (h.git.behind > 0) result += `-${h.git.behind}`;
   if (h.git.dirty > 0) result += `*${h.git.dirty}`;
   return result + rst();
 }
@@ -220,6 +244,14 @@ function fmtTranscriptSync(h: SessionHealth): string {
   if (h.alerts?.dataLossRisk) return `📝:${c('critical')}${ago}🔴${rst()}`;
   if (h.alerts?.transcriptStale) return `📝:${c('warning')}${ago}⚠${rst()}`;
   return `📝:${c('transcript')}${ago}${rst()}`;
+}
+
+function fmtLastMessage(h: SessionHealth): string {
+  if (!h.transcript?.lastMessagePreview) return '';
+  const ago = h.transcript.lastMessageAgo || '?';
+  const preview = h.transcript.lastMessagePreview;
+  // Compact format: "💬:preview(ago)" saves 1 char vs "💬:ago preview"
+  return `💬:${c('lastMsg')}${preview}(${ago})${rst()}`;
 }
 
 function fmtBudget(h: SessionHealth): string {
@@ -306,27 +338,61 @@ function display(): void {
     const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig> }>(configPath);
     const cfg: ComponentsConfig = { ...DEFAULT_COMPONENTS, ...configRaw?.components };
 
-    // 6. Build output (each formatter handles its own errors)
-    const parts: string[] = [];
+    // 6. Build output with width limiting
+    // Max width ~100 chars - leaves room for Claude Code right-side UI but shows more info
+    const MAX_WIDTH = 100;
 
-    // Stale data indicator (shows first if data is old)
+    // Priority groups: HIGH (always show), MEDIUM (show if space), LOW (show if lots of space)
+    const highPriority: string[] = [];  // Always show
+    const medPriority: string[] = [];   // Show if space
+    const lowPriority: string[] = [];   // Show if lots of space
+
+    // HIGH PRIORITY: Critical indicators first
     if (isStale) {
       const minsOld = Math.floor(healthAge / 60000);
-      parts.push(`${c('stale')}⚠:Stale(${minsOld}m)${rst()}`);
+      highPriority.push(`${c('stale')}⚠${minsOld}m${rst()}`);
+    }
+    { const hs = fmtHealthStatus(health); if (hs) highPriority.push(hs); }
+    if (cfg.secrets) { const s = fmtSecrets(health); if (s) highPriority.push(s); }
+
+    // HIGH PRIORITY: Directory (user wants to know where they are)
+    if (cfg.directory) highPriority.push(fmtDirectory(health));
+
+    // HIGH PRIORITY: Core status
+    if (cfg.git) { const g = fmtGit(health); if (g) highPriority.push(g); }
+    if (cfg.model) highPriority.push(fmtModel(health));
+    if (cfg.context) highPriority.push(fmtContext(health));
+
+    // MEDIUM PRIORITY: Cost and last message (user explicitly wants to see what was asked)
+    if (cfg.cost) { const co = fmtCost(health); if (co) medPriority.push(co); }
+    { const lm = fmtLastMessage(health); if (lm) medPriority.push(lm); }
+
+    // LOW PRIORITY: Nice to have
+    if (cfg.budget) { const b = fmtBudget(health); if (b) lowPriority.push(b); }
+    if (cfg.time) lowPriority.push(fmtTime());
+    if (cfg.transcriptSync) lowPriority.push(fmtTranscriptSync(health));
+
+    // Build output within width limit
+    const parts: string[] = [...highPriority];
+    let currentWidth = visibleWidth(parts.join(' '));
+
+    // Add medium priority if space allows
+    for (const part of medPriority) {
+      const partWidth = visibleWidth(part);
+      if (currentWidth + partWidth + 1 <= MAX_WIDTH) {
+        parts.push(part);
+        currentWidth += partWidth + 1;
+      }
     }
 
-    // Health status indicator (shows if issues exist)
-    { const hs = fmtHealthStatus(health); if (hs) parts.push(hs); }
-
-    if (cfg.directory) parts.push(fmtDirectory(health));
-    if (cfg.git) { const g = fmtGit(health); if (g) parts.push(g); }
-    if (cfg.model) parts.push(fmtModel(health));
-    if (cfg.context) parts.push(fmtContext(health));
-    if (cfg.time) parts.push(fmtTime());
-    if (cfg.transcriptSync) parts.push(fmtTranscriptSync(health));
-    if (cfg.budget) { const b = fmtBudget(health); if (b) parts.push(b); }
-    if (cfg.cost) { const c = fmtCost(health); if (c) parts.push(c); }
-    if (cfg.secrets) { const s = fmtSecrets(health); if (s) parts.push(s); }
+    // Add low priority if space allows
+    for (const part of lowPriority) {
+      const partWidth = visibleWidth(part);
+      if (currentWidth + partWidth + 1 <= MAX_WIDTH) {
+        parts.push(part);
+        currentWidth += partWidth + 1;
+      }
+    }
 
     // 7. Output (NO trailing newline - critical for CLI UI)
     process.stdout.write(parts.join(' '));
