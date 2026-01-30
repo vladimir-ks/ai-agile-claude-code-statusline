@@ -46,8 +46,9 @@ class ModelResolver {
     }
 
     // Source 2: JSON input
+    // FIX: Claude Code provides display_name, id, or model_id - not 'name'
     if (jsonInput?.model) {
-      const modelName = jsonInput.model.name || jsonInput.model.display_name;
+      const modelName = jsonInput.model.display_name || jsonInput.model.id || jsonInput.model.model_id;
       if (modelName) {
         sources.jsonInput = {
           value: this.formatModelName(modelName),

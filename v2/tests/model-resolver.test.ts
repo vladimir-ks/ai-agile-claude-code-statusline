@@ -109,8 +109,9 @@ describe('ModelResolver', () => {
     });
 
     test('uses jsonInput when transcript path is null', () => {
+      // Use display_name (what Claude Code actually provides)
       const jsonInput: ClaudeCodeInput = {
-        model: { name: 'haiku' }
+        model: { display_name: 'Claude Haiku 4.5' }
       };
 
       const result = resolver.resolve(null, jsonInput, null);
@@ -166,8 +167,9 @@ describe('ModelResolver', () => {
       const transcriptPath = join(TEST_DIR, 'disagree.jsonl');
       createTranscript(transcriptPath, 'opus', 1);
 
+      // Use display_name (what Claude Code actually provides)
       const jsonInput: ClaudeCodeInput = {
-        model: { name: 'sonnet' }
+        model: { display_name: 'Claude Sonnet 4.5' }
       };
 
       const result = resolver.resolve(transcriptPath, jsonInput, null);
@@ -185,8 +187,9 @@ describe('ModelResolver', () => {
       const transcriptPath = join(TEST_DIR, 'agree.jsonl');
       createTranscript(transcriptPath, 'sonnet', 1);
 
+      // Use display_name (what Claude Code actually provides)
       const jsonInput: ClaudeCodeInput = {
-        model: { name: 'sonnet' }
+        model: { display_name: 'Claude Sonnet 4.5' }
       };
 
       resolver.resolve(transcriptPath, jsonInput, null);
@@ -237,17 +240,19 @@ describe('ModelResolver', () => {
       expect(result.value).toBe('Opus4.5');
     });
 
-    test('prefers name over display_name', () => {
+    test('prefers display_name over name (Claude Code convention)', () => {
+      // CRITICAL: Claude Code provides display_name as primary, so we should prefer it
       const jsonInput: ClaudeCodeInput = {
         model: {
-          name: 'sonnet',
-          display_name: 'Claude Opus 4.5' // Different!
+          display_name: 'Claude Opus 4.5',
+          name: 'sonnet' // Legacy field, should be ignored
         }
       };
 
       const result = resolver.resolve(null, jsonInput, null);
 
-      expect(result.value).toBe('Sonnet4.5');
+      // Should use display_name (what Claude Code actually provides)
+      expect(result.value).toBe('Opus4.5');
     });
   });
 
@@ -259,8 +264,9 @@ describe('ModelResolver', () => {
       const path = join(TEST_DIR, 'empty.jsonl');
       writeFileSync(path, '');
 
+      // Use display_name (what Claude Code actually provides)
       const jsonInput: ClaudeCodeInput = {
-        model: { name: 'sonnet' }
+        model: { display_name: 'Claude Sonnet 4.5' }
       };
 
       const result = resolver.resolve(path, jsonInput, null);
@@ -278,8 +284,9 @@ describe('ModelResolver', () => {
         timestamp: new Date().toISOString()
       }) + '\n');
 
+      // Use display_name (what Claude Code actually provides)
       const jsonInput: ClaudeCodeInput = {
-        model: { name: 'sonnet' }
+        model: { display_name: 'Claude Sonnet 4.5' }
       };
 
       const result = resolver.resolve(path, jsonInput, null);

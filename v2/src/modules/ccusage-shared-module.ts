@@ -118,7 +118,8 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       }
 
       return {
-        blockId: activeBlock.blockId || '',
+        // FIX: ccusage uses 'id' not 'blockId'
+        blockId: activeBlock.id || '',
         startTime: new Date(startTimeStr),
         endTime: new Date(resetTimeStr),
         isActive: true,

@@ -161,18 +161,43 @@ export interface StatuslineConfig {
 // JSON Input (from Claude Code)
 // ============================================================================
 
+/**
+ * Actual Claude Code JSON input structure.
+ *
+ * CRITICAL: This must match what Claude Code actually provides!
+ *
+ * context_window has NESTED current_usage object:
+ *   context_window.current_usage.input_tokens
+ *   context_window.current_usage.output_tokens
+ *   context_window.current_usage.cache_read_input_tokens
+ *   context_window.current_usage.cache_creation_input_tokens
+ *
+ * model provides:
+ *   model.display_name - human readable ("Claude Opus 4.5")
+ *   model.id - API identifier ("claude-opus-4-5-20251101")
+ *   model.model_id - alternate field in some contexts
+ */
 export interface ClaudeCodeInput {
   session_id?: string;
   transcript_path?: string;
   model?: {
-    name?: string;
     display_name?: string;
+    id?: string;
+    model_id?: string;
+    name?: string;  // Legacy fallback
   };
   context_window?: {
     context_window_size?: number;
-    current_input_tokens?: number;
-    cache_read_input_tokens?: number;
-    current_output_tokens?: number;
+    // Current usage is NESTED (not flat)
+    current_usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
+    // Total tokens (cumulative, for reference)
+    total_input_tokens?: number;
+    total_output_tokens?: number;
   };
   start_directory?: string;
 }

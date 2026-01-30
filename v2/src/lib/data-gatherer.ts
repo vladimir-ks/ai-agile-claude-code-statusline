@@ -115,11 +115,14 @@ class DataGatherer {
       try {
         const billingData = await this.ccusageModule.fetch(sessionId);
         if (billingData) {
+          // CRITICAL FIX: Use correct field names from CCUsageData
+          // CCUsageData has: hoursLeft, minutesLeft, percentageUsed (NOT budgetMinutesLeft, budgetPercentUsed)
+          const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
           health.billing = {
             costToday: billingData.costUSD || 0,
             burnRatePerHour: billingData.costPerHour || 0,
-            budgetRemaining: billingData.budgetMinutesLeft || 0,
-            budgetPercentUsed: billingData.budgetPercentUsed || 0,
+            budgetRemaining: totalMinutes,
+            budgetPercentUsed: billingData.percentageUsed || 0,
             resetTime: billingData.resetTime || '',
             isFresh: billingData.isFresh !== false,
             lastFetched: Date.now()
@@ -203,6 +206,12 @@ class DataGatherer {
 
   /**
    * Calculate context window usage
+   *
+   * CRITICAL: Claude Code provides nested structure:
+   *   context_window.current_usage.input_tokens (NOT context_window.current_input_tokens)
+   *   context_window.current_usage.output_tokens
+   *   context_window.current_usage.cache_read_input_tokens
+   *   context_window.current_usage.cache_creation_input_tokens
    */
   private calculateContext(jsonInput: ClaudeCodeInput | null): ContextInfo {
     const result: ContextInfo = {
@@ -220,18 +229,24 @@ class DataGatherer {
     const ctx = jsonInput.context_window;
     result.windowSize = ctx.context_window_size || 200000;
 
-    // Calculate total tokens used
-    const inputTokens = ctx.current_input_tokens || 0;
-    const cacheTokens = ctx.cache_read_input_tokens || 0;
-    const outputTokens = ctx.current_output_tokens || 0;
-    result.tokensUsed = inputTokens + cacheTokens + outputTokens;
+    // CRITICAL FIX: Use nested current_usage structure (matches V1 and actual Claude Code output)
+    const currentUsage = ctx.current_usage;
+    const inputTokens = currentUsage?.input_tokens || 0;
+    const outputTokens = currentUsage?.output_tokens || 0;
+    const cacheReadTokens = currentUsage?.cache_read_input_tokens || 0;
+    const cacheCreationTokens = currentUsage?.cache_creation_input_tokens || 0;
+
+    // Total tokens = input + output + cache reads (cache creation is separate billing concern)
+    result.tokensUsed = inputTokens + outputTokens + cacheReadTokens;
 
     // Calculate tokens until 78% compaction threshold
     const compactionThreshold = Math.floor(result.windowSize * 0.78);
     result.tokensLeft = Math.max(0, compactionThreshold - result.tokensUsed);
 
     // Calculate percentage used (of compaction threshold, not total window)
-    result.percentUsed = Math.min(100, Math.floor((result.tokensUsed / compactionThreshold) * 100));
+    result.percentUsed = compactionThreshold > 0
+      ? Math.min(100, Math.floor((result.tokensUsed / compactionThreshold) * 100))
+      : 0;
 
     // Near compaction warning
     result.nearCompaction = result.percentUsed >= 70;
@@ -279,9 +294,18 @@ class DataGatherer {
 
   /**
    * Check if session appears to be active
+   *
+   * NOTE: If we're receiving JSON input, the session IS syncing properly.
+   * Data loss risk is when transcript is stale AND we're NOT receiving fresh input.
+   * This means the statusline is being polled but Claude Code may have crashed.
    */
   private isSessionActive(jsonInput: ClaudeCodeInput | null): boolean {
-    // If we received JSON input, session is active
+    // Session is "active" for data loss risk purposes when:
+    // - We received JSON input (session is running)
+    // - Data loss risk = stale transcript + active session
+    //
+    // However, the REAL risk is when transcript is stale and we DON'T have fresh input
+    // For now, keep simple: receiving input = session is running
     return jsonInput !== null && jsonInput.session_id !== undefined;
   }
 
