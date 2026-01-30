@@ -168,19 +168,37 @@ function generateProgressBar(percentUsed: number): string {
   return `[${bar}]`;
 }
 
-function shortenPath(path: string, maxLen: number = 20): string {
+function shortenPath(path: string, maxLen: number = 45): string {
   if (!path) return '?';
   const home = homedir();
   let shortened = path.startsWith(home) ? '~' + path.slice(home.length) : path;
-  if (shortened.length > maxLen) {
-    const parts = shortened.split('/');
-    // Try to show just the last directory name
-    shortened = parts[parts.length - 1];
-    if (shortened.length > maxLen) {
-      shortened = shortened.slice(0, maxLen - 2) + '..';
-    }
+
+  if (shortened.length <= maxLen) {
+    return shortened;
   }
-  return shortened;
+
+  // Show: ~/.../<parent>/<current>
+  const parts = shortened.split('/').filter(p => p);
+  if (parts.length <= 2) {
+    // Just truncate if only 1-2 parts
+    return shortened.slice(0, maxLen - 2) + '..';
+  }
+
+  // Keep ~ or first part, ..., and last 2 parts
+  const first = parts[0] === '~' ? '~' : parts[0];
+  const last2 = parts.slice(-2).join('/');
+  const result = `${first}/.../${last2}`;
+
+  if (result.length <= maxLen) {
+    return result;
+  }
+
+  // Still too long - just show last part
+  const lastPart = parts[parts.length - 1];
+  if (lastPart.length <= maxLen) {
+    return lastPart;
+  }
+  return lastPart.slice(0, maxLen - 2) + '..';
 }
 
 /**
@@ -338,64 +356,53 @@ function display(): void {
     const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig> }>(configPath);
     const cfg: ComponentsConfig = { ...DEFAULT_COMPONENTS, ...configRaw?.components };
 
-    // 6. Build output with width limiting
-    // Max width ~100 chars - leaves room for Claude Code right-side UI but shows more info
-    const MAX_WIDTH = 100;
+    // 6. Build TWO-LINE output
+    // Line 1: Core info (alerts, directory, git, model, context, cost)
+    // Line 2: Extras (last message, budget, time, transcript sync)
+    // This prevents wrapping and leaves room for Claude Code UI
 
-    // Priority groups: HIGH (always show), MEDIUM (show if space), LOW (show if lots of space)
-    const highPriority: string[] = [];  // Always show
-    const medPriority: string[] = [];   // Show if space
-    const lowPriority: string[] = [];   // Show if lots of space
+    const line1Parts: string[] = [];
+    const line2Parts: string[] = [];
 
-    // HIGH PRIORITY: Critical indicators first
+    // LINE 1: Core information
+
+    // Alerts first (critical)
     if (isStale) {
       const minsOld = Math.floor(healthAge / 60000);
-      highPriority.push(`${c('stale')}⚠${minsOld}m${rst()}`);
+      line1Parts.push(`${c('stale')}⚠${minsOld}m${rst()}`);
     }
-    { const hs = fmtHealthStatus(health); if (hs) highPriority.push(hs); }
-    if (cfg.secrets) { const s = fmtSecrets(health); if (s) highPriority.push(s); }
+    { const hs = fmtHealthStatus(health); if (hs) line1Parts.push(hs); }
+    if (cfg.secrets) { const s = fmtSecrets(health); if (s) line1Parts.push(s); }
 
-    // HIGH PRIORITY: Directory (user wants to know where they are)
-    if (cfg.directory) highPriority.push(fmtDirectory(health));
+    // Directory with better path
+    if (cfg.directory) line1Parts.push(fmtDirectory(health));
 
-    // HIGH PRIORITY: Core status
-    if (cfg.git) { const g = fmtGit(health); if (g) highPriority.push(g); }
-    if (cfg.model) highPriority.push(fmtModel(health));
-    if (cfg.context) highPriority.push(fmtContext(health));
+    // Core status
+    if (cfg.git) { const g = fmtGit(health); if (g) line1Parts.push(g); }
+    if (cfg.model) line1Parts.push(fmtModel(health));
+    if (cfg.context) line1Parts.push(fmtContext(health));
+    if (cfg.cost) { const co = fmtCost(health); if (co) line1Parts.push(co); }
 
-    // MEDIUM PRIORITY: Cost and last message (user explicitly wants to see what was asked)
-    if (cfg.cost) { const co = fmtCost(health); if (co) medPriority.push(co); }
-    { const lm = fmtLastMessage(health); if (lm) medPriority.push(lm); }
+    // LINE 2: Extra information (last message, budget, time, transcript)
 
-    // LOW PRIORITY: Nice to have
-    if (cfg.budget) { const b = fmtBudget(health); if (b) lowPriority.push(b); }
-    if (cfg.time) lowPriority.push(fmtTime());
-    if (cfg.transcriptSync) lowPriority.push(fmtTranscriptSync(health));
+    // Last message (user's primary request)
+    { const lm = fmtLastMessage(health); if (lm) line2Parts.push(lm); }
 
-    // Build output within width limit
-    const parts: string[] = [...highPriority];
-    let currentWidth = visibleWidth(parts.join(' '));
+    // Budget and time
+    if (cfg.budget) { const b = fmtBudget(health); if (b) line2Parts.push(b); }
+    if (cfg.time) line2Parts.push(fmtTime());
+    if (cfg.transcriptSync) line2Parts.push(fmtTranscriptSync(health));
 
-    // Add medium priority if space allows
-    for (const part of medPriority) {
-      const partWidth = visibleWidth(part);
-      if (currentWidth + partWidth + 1 <= MAX_WIDTH) {
-        parts.push(part);
-        currentWidth += partWidth + 1;
-      }
+    // Build final output
+    const line1 = line1Parts.join(' ');
+    const line2 = line2Parts.join(' ');
+
+    // 7. Output TWO LINES (newline between, NO trailing newline)
+    if (line2) {
+      process.stdout.write(`${line1}\n${line2}`);
+    } else {
+      process.stdout.write(line1);
     }
-
-    // Add low priority if space allows
-    for (const part of lowPriority) {
-      const partWidth = visibleWidth(part);
-      if (currentWidth + partWidth + 1 <= MAX_WIDTH) {
-        parts.push(part);
-        currentWidth += partWidth + 1;
-      }
-    }
-
-    // 7. Output (NO trailing newline - critical for CLI UI)
-    process.stdout.write(parts.join(' '));
 
   } catch (error) {
     // LAST RESORT: If anything fails, output safe fallback

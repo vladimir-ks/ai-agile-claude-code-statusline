@@ -169,9 +169,13 @@ describe('Display-Only Layer', () => {
       // MEDIUM priority - shown if space (git at least should fit)
       expect(output).toContain('🌿:feature+2-1*3');
 
-      // Verify output is not too long (width limiting working)
+      // Verify each line is not too long (two-line format)
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
-      expect(stripped.length).toBeLessThanOrEqual(100); // Allow some margin for emoji widths
+      const lines = stripped.split('\n');
+      // Each line should fit comfortably
+      for (const line of lines) {
+        expect(line.length).toBeLessThanOrEqual(120); // Allow margin for long paths
+      }
     });
 
     test('shows secrets warning when detected', () => {

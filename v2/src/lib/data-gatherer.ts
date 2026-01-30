@@ -71,7 +71,8 @@ class DataGatherer {
 
     // Set paths
     health.transcriptPath = transcriptPath || '';
-    health.projectPath = this.extractProjectPath(transcriptPath);
+    // Priority: 1) start_directory from JSON, 2) cwd from environment, 3) decoded transcript path
+    health.projectPath = jsonInput?.start_directory || process.cwd() || this.extractProjectPath(transcriptPath);
 
     // 1. Transcript health (critical for data loss detection)
     if (transcriptPath) {
