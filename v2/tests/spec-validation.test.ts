@@ -338,7 +338,7 @@ describe('SPEC: Output Format', () => {
   // SPEC: Transcript Sync Component
   // =========================================================================
   describe('Transcript Sync Component (📝)', () => {
-    test('shows time when fresh', () => {
+    test('hidden when fresh (no need to show "everything ok")', () => {
       createHealthFile('sync-fresh', {
         sessionId: 'sync-fresh',
         model: { value: 'Claude' },
@@ -351,9 +351,8 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"sync-fresh"}');
 
-      expect(output).toContain('📝:2m');
-      expect(output).not.toContain('⚠');
-      expect(output).not.toContain('🔴');
+      // Transcript sync is now hidden when fresh - only shows when there's a problem
+      expect(output).not.toContain('📝:');
     });
 
     test('shows ⚠ when transcript stale', () => {

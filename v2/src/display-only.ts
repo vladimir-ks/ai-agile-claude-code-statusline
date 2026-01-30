@@ -257,7 +257,9 @@ function fmtGit(h: SessionHealth): string {
 
 function fmtModel(h: SessionHealth, stdinModel: string | null = null): string {
   // Prefer stdin model (real-time from Claude Code) over cached health data
-  const model = stdinModel || h.model?.value || 'Claude';
+  let model = stdinModel || h.model?.value || 'Claude';
+  // Remove spaces for compact display (e.g., "Opus 4.5" → "Opus4.5")
+  model = model.replace(/\s+/g, '');
   return `🤖:${c('model')}${model}${rst()}`;
 }
 
@@ -282,11 +284,12 @@ function fmtTime(): string {
 }
 
 function fmtTranscriptSync(h: SessionHealth): string {
+  // Only show when there's something to worry about
   if (!h.transcript?.exists) return `📝:${c('warning')}⚠${rst()}`;
-  const ago = h.transcript.lastModifiedAgo || '?';
-  if (h.alerts?.dataLossRisk) return `📝:${c('critical')}${ago}🔴${rst()}`;
-  if (h.alerts?.transcriptStale) return `📝:${c('warning')}${ago}⚠${rst()}`;
-  return `📝:${c('transcript')}${ago}${rst()}`;
+  if (h.alerts?.dataLossRisk) return `📝:${c('critical')}${h.transcript.lastModifiedAgo}🔴${rst()}`;
+  if (h.alerts?.transcriptStale) return `📝:${c('warning')}${h.transcript.lastModifiedAgo}⚠${rst()}`;
+  // Hide when recent (< 2 min) - no need to show "everything is fine"
+  return '';
 }
 
 function fmtMessageCount(h: SessionHealth): string {
@@ -299,21 +302,8 @@ function fmtLastMessage(h: SessionHealth): string {
   if (!h.transcript?.lastMessagePreview) return '';
   const ago = h.transcript.lastMessageAgo || '?';
   const preview = h.transcript.lastMessagePreview;
-
-  // V1 format: "💬:HH:MM(Xm) message preview"
-  // Shows actual time + elapsed + preview
-  let timeStr: string;
-  if (h.transcript?.lastMessageTime) {
-    const d = new Date(h.transcript.lastMessageTime);
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    timeStr = `${hh}:${mm}(${ago})`;
-  } else {
-    // Fallback when no timestamp available
-    timeStr = `(${ago})`;
-  }
-
-  return `💬:${c('lastMsg')}${timeStr}${rst()} ${preview}`;
+  // Simple format: just elapsed time + preview (no clock time)
+  return `💬:${c('lastMsg')}(${ago})${rst()} ${preview}`;
 }
 
 function fmtBudget(h: SessionHealth): string {
