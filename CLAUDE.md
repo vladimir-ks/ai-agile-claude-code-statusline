@@ -1,215 +1,139 @@
----
-metadata:
-  status: approved
-  purpose: "aigile - Real-time status monitoring for Claude Code sessions"
-  version: "1.0.0"
-  author: "Vladimir K.S."
-  last_updated: "2026-01-15"
-  requires:
-    - bash 4.0+
-    - jq
-    - ccusage
-    - git
----
+# Claude Code Statusline V2
 
-# aigile - Claude Code Status Line
-
-A production-ready status line for Claude Code displaying real-time session metrics, costs, context usage, and git status.
+Real-time cost tracking and session monitoring for Claude Code.
 
 **Display Example:**
 ```
-📁:~/.claude 🌿:main+12/-0*1 🤖:Haiku4.5 📟:v1.0 🧠:154kleft [---------|--]
-🕐:12:06 ⌛:1h53m(62%)14:00 💰:$40.3|$15.1/h 📊:83.4Mtok(521ktpm) 💾:16%
+📁:~/project 🌿:main+12*3 🤖:Opus4.5 🧠:154kleft[---------|--] 🕐:12:06
+⌛:1h53m(62%)14:00 💰:$40.3|$15.1/h 📊:83.4Mtok(521ktpm) 💾:16% 💬:42t
+💬:(<5m) What does the main function do in this file?
 ```
-
----
-
-## Quick Start
-
-### Install
-```bash
-cp scripts/statusline.sh ~/.claude/statusline.sh
-chmod +x ~/.claude/statusline.sh
-```
-
-### Configure
-Add to `~/.claude/settings.json`:
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline.sh",
-    "padding": 0
-  }
-}
-```
-
-### Optional Environment Variables
-```bash
-export WEEKLY_BUDGET=500                    # Set your weekly budget (default $456)
-export STATUSLINE_FORCE_REFRESH=1          # Force cache refresh (bypasses all caches)
-export NO_COLOR=1                          # Disable colored output
-
-~/.claude/statusline.sh --debug            # Enable debug logs
-```
-
----
-
-## Display Components
-
-| Component | Format | Meaning |
-|-----------|--------|---------|
-| 📁 | `~/.claude` | Current directory |
-| 🌿 | `main+12/-0*1` | Git branch, ahead/behind, dirty files |
-| 🤖 | `Haiku4.5` | Active model |
-| 📟 | `v1.0` | Claude Code version |
-| 🧠 | `154kleft [---\|--]` | Tokens until compact (78% threshold) |
-| 🕐 | `12:06` | Current time |
-| ⌛ | `1h53m(62%)14:00` | Hours left, session %, reset time (UTC) |
-| 💰 | `$40.3\|$15.1/h` | Daily cost \| hourly burn rate |
-| 📊 | `83.4Mtok(521ktpm)` | Total tokens (tokens per minute) |
-| 💾 | `16%` | Cache hit ratio |
-| 💬 | `14:30(2h43m) What is...` | Last message time (elapsed), preview |
-
-**Staleness Indicator:** 🔴 appears when ccusage data >1 hour old (Note: Only ccusage tracked, not git/weekly)
 
 ---
 
 ## Architecture
 
-### Data Sources
-See **[DATA_SOURCES.md](DATA_SOURCES.md)** for complete documentation of all data sources.
+V2 uses a **decoupled architecture** for reliability:
 
-**Quick Reference - Priority Order:**
+### Display Layer (`v2/src/display-only.ts`)
+- **Fast** - <50ms, read-only
+- Reads from JSON health files
+- Never makes network calls or spawns processes
+- Always outputs something (graceful degradation)
 
-1. **JSON input** (real-time): Model, context window, session data
-2. **Git cache** (10s TTL): Branch, commits, dirty files
-3. **Transcript** (real-time, with 1-hour TTL): Last message, model fallback
-4. **ccusage cache** (15 min TTL): Costs, tokens, burn rate
-5. **settings.json**: Global defaults only (NOT for current model)
-6. **Default values**: Safety fallback
+### Data Daemon (`v2/src/data-daemon.ts`)
+- Runs in background AFTER display
+- Updates health files for next invocation
+- Handles: ccusage, git, transcript monitoring
 
-**Critical: Model Detection** (Corrected Priority)
-- **PRIMARY:** Transcript `.message.model` (actual model from API responses, <1hr old)
-- **FALLBACK:** JSON `model.display_name` (if transcript stale/missing)
-- **NEVER:** settings.json `.model` (global default only, not current session)
-- Use `STATUSLINE_FORCE_REFRESH=1` to clear caches
-- **Rationale:** Transcript reflects actual conversation history, more accurate than JSON config
+### Shared Billing (`~/.claude/session-health/billing-shared.json`)
+- Any successful ccusage fetch writes here
+- All sessions read from shared cache
+- Eliminates lock contention issues
 
-### Cache Files
-| File | TTL | Purpose |
-|------|-----|---------|
-| `.ccusage_cache.json` | Same-day* | Billing data (valid if block started today) |
-| `.git_status_cache` | 10 sec | Git status (refreshes frequently) |
-| `.last_model_name` | ∞ (monitored) | Model name for change detection |
-| `.data_freshness.json` | — | Fetch timestamps (ccusage only) |
-| `.statusline.hash` | ∞ | Output deduplication (prevents duplicate redraws) |
-| `.statusline.last_print_time` | — | Rate limiting (500ms for identical output) |
+---
 
-*ccusage cache TTL: Valid if block started today AND block hasn't ended. Fresh fetch if block ended >5min ago OR different block detected. Effective TTL is "until UTC midnight" for same-day blocks.
+## Components
 
-**Note:** Transcript data has implicit 1-hour TTL (not a file—validation at runtime)
+| Symbol | Example | Meaning |
+|--------|---------|---------|
+| 📁 | ~/project | Current directory |
+| 🌿 | main+12*3 | Git branch, ahead, dirty files |
+| 🤖 | Opus4.5 | Active model (no spaces) |
+| 🧠 | 154kleft | Tokens until auto-compact |
+| [---\|--] | Progress bar | Context usage (\| at 78% threshold) |
+| 🕐 | 12:06 | Current time |
+| ⌛ | 1h53m(62%)14:00 | Budget remaining, %, reset time |
+| 💰 | $40.3\|$15.1/h | Daily cost \| hourly burn rate |
+| 📊 | 83.4Mtok(521ktpm) | Total tokens (tokens per minute) |
+| 💾 | 16% | Cache hit ratio |
+| 💬 | 42t | Turn count |
+| 💬 | (<5m) msg | Last message elapsed + preview |
 
-### Safety
-- No background processes (100% synchronous)
-- Timeouts: ccusage (20s), jq (2s), git (implicit)
-- Atomic writes: temp file → rename
-- Error suppression with sensible fallbacks
+### Indicators
+
+| Indicator | Meaning |
+|-----------|---------|
+| 🔴 | Billing data stale (after budget/cost) |
+| ⏳ | Health data loading (new session) |
+| 📝:5m⚠ | Transcript not saved in 5+ minutes |
+
+---
+
+## Data Flow
+
+```
+Claude Code → stdin JSON → display-only.ts → stdout
+                              ↓
+                     health files (read)
+                              ↑
+             data-daemon.ts (background write)
+                     ↑
+            ccusage, git, transcript
+```
+
+### Health Files (`~/.claude/session-health/`)
+
+| File | Purpose |
+|------|---------|
+| `{session-id}.json` | Per-session health data |
+| `billing-shared.json` | Shared billing cache (cross-session) |
+| `daemon.log` | Daemon activity log |
 
 ---
 
 ## Troubleshooting
 
-### Statusline is blank
-Check dependencies: `jq --version`, `ccusage --version`, `git --version`
-
-### Old costs displayed
-Cache not invalidating:
+### Check daemon log
 ```bash
-rm ~/.claude/.ccusage_cache.json
-rm ~/.claude/.data_freshness.json
+tail ~/.claude/session-health/daemon.log
 ```
 
-### Red dot (🔴) appears
-Data >1 hour stale:
+### Force refresh billing
 ```bash
-ccusage blocks --json          # Check ccusage works
-~/.claude/statusline.sh --debug # Enable debug logs
+rm ~/.claude/session-health/billing-shared.json
 ```
 
-### 20 second freeze on startup
-First ccusage fetch (happens once daily at UTC midnight). Expected behavior.
-
-### Model switching slow or not updating
-The statusline now intelligently prioritizes model data sources:
-1. **JSON input** (if Claude Code provides it - most current)
-2. **settings.json** (stable global config - default fallback)
-3. **Transcript** (only if file modified <1 hour ago)
-4. **Default** ("Claude" as last resort)
-
-If you see stale model data, trigger a force refresh:
+### View session health
 ```bash
-STATUSLINE_FORCE_REFRESH=1 claude ask "hello"
+cat ~/.claude/session-health/*.json | jq '.billing'
 ```
 
-Or temporarily in settings.json:
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "STATUSLINE_FORCE_REFRESH=1 /Users/vmks/_dev_tools/ai-agile-claude-code-statusline/scripts/statusline.sh",
-    "padding": 0
-  }
-}
-```
+### Billing shows 🔴 (stale)
+ccusage lock contention - another session is fetching. Data will appear when fetch completes.
 
-**Auto-Healing:** Transcript data automatically expires after 1 hour. Stale cache won't persist indefinitely.
-
-### Rapid blinking/flickering
-Rate-limited to 100ms minimum between updates. If still blinking:
-- Enable debug: `~/.claude/statusline.sh --debug`
-- Check: Which field is changing rapidly?
-- Verify: `~/.claude/.statusline.hash` exists and updates
-
----
-
-## Performance
-
-**Normal (cache hit):** ~10-15ms
-**First fetch (cache miss):** ~17-20s (expected at UTC midnight)
-**Resource usage:** <5 MB memory, <1% CPU (I/O bound)
+### New session shows ⏳
+Normal - health file being created. Full display on next interaction.
 
 ---
 
 ## Development
 
-### Test syntax
+### Run tests
 ```bash
-bash -n ~/.claude/statusline.sh
+cd v2 && bun test
 ```
 
-### Debug output
+### Test display manually
 ```bash
-~/.claude/statusline.sh --debug
-tail ~/.claude/statusline.log
+echo '{"session_id":"test","start_directory":"~/project"}' | bun v2/src/display-only.ts
 ```
 
-### Requirements for changes
-- All changes pass: `bash -n statusline.sh`
-- No background processes
-- All external commands have timeouts
-- All file writes must be atomic
-- Add tests to `examples/test.sh`
+### Key files
+- `v2/src/display-only.ts` - Display layer
+- `v2/src/data-daemon.ts` - Background data gathering
+- `v2/src/statusline-bulletproof.sh` - Wrapper script
+- `v2/src/lib/data-gatherer.ts` - Data orchestration
 
 ---
 
-## Links
+## Documentation
 
-- **Source:** `scripts/statusline.sh`
-- **Examples:** `examples/sample-input.json`
-- **Tests:** `examples/test.sh`
-- **License:** Respects licenses of dependencies (ccusage: MIT, jq: CC0, Bash: GPL v3)
+- `v2/docs/ARCHITECTURE.md` - Detailed architecture
+- `v2/docs/VALIDATION.md` - Multi-source validation
+- `v2/docs/MEMORY.md` - Memory optimization
+- `DATA_SOURCES.md` - Data source priority
 
 ---
 
-**Version:** 1.0.0 | **Author:** Vladimir K.S. | **Status:** Production Ready ✅
+**Version:** 2.0.0 | **Status:** Production Ready

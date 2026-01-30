@@ -1,180 +1,126 @@
-# aigile - Claude Code Status Line
+# Claude Code Statusline V2
 
-![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-![Version: 1.0.1](https://img.shields.io/badge/Version-1.0.1-green.svg)
-![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-brightgreen.svg)
+Real-time cost tracking and session monitoring for Claude Code. See your hourly burn rate, daily spend, token usage, and git status—all in one compact statusline.
 
-Real-time cost tracking and session monitoring for Claude Code. See your hourly burn rate, daily spend, token usage, and git status—all in one compact line. No flickering. Sub-100ms response time.
+## Features
+
+- **Real-time cost tracking** - Cost, burn rate, tokens from ccusage
+- **tmux-aware** - Auto-detects pane width for optimal display
+- **Shared billing** - All sessions share billing data (no lock contention issues)
+- **Fast** - Display layer is <50ms (read-only, no network calls)
+- **Decoupled architecture** - Display never blocked by data gathering
 
 ## Quick Start
 
 ### Install
+
 ```bash
-git clone https://github.com/anthropics/aigile ~/_dev_tools/aigile
-cp ~/_dev_tools/aigile/scripts/statusline.sh ~/.claude/statusline.sh
-chmod +x ~/.claude/statusline.sh
+# Clone the repo
+git clone https://github.com/anthropics/claude-code-statusline ~/.claude/statusline
+
+# Deploy V2
+cp ~/.claude/statusline/v2/src/statusline-bulletproof.sh ~/.claude/statusline-v2.sh
+chmod +x ~/.claude/statusline-v2.sh
 ```
 
 ### Configure
+
 Add to `~/.claude/settings.json`:
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/statusline.sh",
+    "command": "~/.claude/statusline-v2.sh",
     "padding": 0
   }
 }
 ```
 
 ### Requirements
-- **bash** 4.0+
-- **jq** - `brew install jq`
-- **ccusage** - `npm install -g @anthropic-sdk/ccusage`
-- **git** (for status tracking)
 
-### Verify
-```bash
-bash -n ~/.claude/statusline.sh
-cat ~/_dev_tools/aigile/examples/sample-input.json | ~/.claude/statusline.sh
-```
+- **bun** - `brew install oven-sh/bun/bun`
+- **ccusage** - `npm install -g @anthropic-sdk/ccusage`
+- **tmux** (optional, for width detection)
 
 ## Display Example
 
 ```
-📁:~/.claude 🌿:main+12/-0*1 🤖:Haiku4.5 📟:v1.0 🧠:154kleft [---------|--]
-🕐:12:06 ⌛:1h53m(62%)14:00 💰:$40.3|$15.1/h 📊:83.4Mtok(521ktpm) 💾:16%
+📁:~/project 🌿:main+12*3 🤖:Opus4.5 🧠:154kleft[---------|--] 🕐:12:06
+⌛:1h53m(62%)14:00 💰:$40.3|$15.1/h 📊:83.4Mtok(521ktpm) 💾:16% 💬:42t
+💬:(<5m) What does the main function do in this file?
 ```
 
-### What Each Component Shows
+### Components
 
 | Symbol | Example | Meaning |
 |--------|---------|---------|
-| 📁 | ~/.claude | Current directory |
-| 🌿 | main+12/-0*1 | Git branch, ahead/behind, dirty files |
-| 🤖 | Haiku4.5 | Active model |
-| 📟 | v1.0 | Claude Code version |
-| 🧠 | 154kleft | Tokens until auto-compact (78% threshold) |
-| [---\|--] | Progress bar | Position towards compact trigger |
+| 📁 | ~/project | Current directory |
+| 🌿 | main+12*3 | Git branch, ahead, dirty files |
+| 🤖 | Opus4.5 | Active model |
+| 🧠 | 154kleft | Tokens until auto-compact |
+| [---\|--] | Progress bar | Context usage (| at 78% threshold) |
 | 🕐 | 12:06 | Current time |
-| ⌛ | 1h53m(62%)14:00 | Hours left, session %, reset time (UTC) |
-| 💰 | $40.3\|$15.1/h | Daily spend \| hourly burn rate |
-| 📊 | 83.4Mtok(521ktpm) | Total tokens, tokens per minute |
+| ⌛ | 1h53m(62%)14:00 | Budget remaining, %, reset time |
+| 💰 | $40.3\|$15.1/h | Daily cost \| hourly burn rate |
+| 📊 | 83.4Mtok | Total tokens (tokens per minute) |
 | 💾 | 16% | Cache hit ratio |
-| 🔴 | (red dot) | Data >1 hour stale |
+| 💬 | 42t | Turn count |
+| 💬 | (<5m) msg | Last message (elapsed time) + preview |
 
-## Features
+### Indicators
 
-- ✅ **Real-time cost tracking** - Burn rate updates every interaction
-- ✅ **No flicker** - Hash-based deduplication (only updates on data changes)
-- ✅ **Fast** - Sub-100ms on cache hits, ~20s first fetch per day
-- ✅ **Safe** - 100% synchronous, atomic writes, no background processes
-- ✅ **Cross-platform** - macOS, Linux, BSD support
+| Indicator | Meaning |
+|-----------|---------|
+| 🔴 | Billing data is stale (ccusage not fresh) |
+| ⏳ | Health data loading (new session) |
+| 📝:5m⚠ | Transcript not saved in 5 minutes |
 
-## Configuration
+## Architecture
 
-### Budget Tracking
-```bash
-export WEEKLY_BUDGET=500  # Set your weekly budget (default $456)
-```
+V2 uses a **decoupled architecture**:
 
-### Debug Mode
-```bash
-~/.claude/statusline.sh --debug
-tail ~/.claude/statusline.log
-```
+1. **Display layer** (`display-only.ts`) - Fast, read-only, <50ms
+   - Reads from JSON health files
+   - Never makes network calls or spawns processes
+   - Always outputs something (graceful degradation)
+
+2. **Data daemon** (`data-daemon.ts`) - Background, async
+   - Runs AFTER display completes
+   - Updates health files for next invocation
+   - Handles ccusage, git, transcript monitoring
+
+3. **Shared billing cache** - Cross-session
+   - Any successful ccusage fetch writes to shared cache
+   - All sessions read from shared cache
+   - Eliminates lock contention issues
 
 ## Troubleshooting
 
-### Statusline is blank
+### Check daemon log
 ```bash
-# Check dependencies
-jq --version
-ccusage --version
-git --version
+tail ~/.claude/session-health/daemon.log
 ```
 
-### Old cost still showing
+### Force refresh billing
 ```bash
-rm ~/.claude/.ccusage_cache.json
-rm ~/.claude/.data_freshness.json
+rm ~/.claude/session-health/billing-shared.json
 ```
 
-### Red dot (🔴) appears
-Data is >1 hour stale. Check if ccusage is working:
+### Verify health file
 ```bash
-ccusage blocks --json
+cat ~/.claude/session-health/*.json | jq '.billing'
 ```
-
-### Model switching is slow
-Clear model cache:
-```bash
-rm ~/.claude/.last_model_name
-```
-
-### Rapid blinking/flickering
-Rate-limited to 100ms. Enable debug mode to see which field is changing.
-
-### 20-second freeze on startup
-Normal - first ccusage fetch of the day (happens once at UTC midnight).
-
-## Testing
-
-```bash
-# Run syntax check
-bash -n ~/.claude/statusline.sh
-
-# Test with sample input
-cat ~/_dev_tools/aigile/examples/sample-input.json | ~/.claude/statusline.sh
-
-# Full test suite
-~/_dev_tools/aigile/examples/test.sh
-```
-
-## Performance
-
-| Scenario | Time |
-|----------|------|
-| Normal (cache hit) | ~10-15ms |
-| First fetch (cache miss) | ~17-20s |
-| Memory | <5 MB |
-| CPU | <1% (I/O bound) |
 
 ## Documentation
 
-- **[CLAUDE.md](CLAUDE.md)** - Complete technical reference
-- See subdirectory `docs/` for architecture, cache management, process safety, and additional troubleshooting
-
-## Contributing
-
-All changes must:
-- Pass: `bash -n statusline.sh`
-- No background processes
-- Use timeouts on external commands
-- Use atomic file writes
-- Include tests in `examples/test.sh`
-
-## Process Safety
-
-✅ No background processes
-✅ All commands have timeouts
-✅ Atomic file operations
-✅ No orphaned processes
-✅ Safe error handling
-
-Verify:
-```bash
-ps aux | grep statusline | grep -v grep  # Should be empty
-ps aux | grep ccusage | grep -v grep     # Should be empty
-```
+- `v2/docs/ARCHITECTURE.md` - System architecture
+- `v2/docs/VALIDATION.md` - Multi-source validation
+- `v2/docs/MEMORY.md` - Memory optimization
 
 ## License
 
-Dependencies:
-- **ccusage** - MIT License
-- **jq** - CC0 1.0 Universal
-- **Bash** - GPL v3
+MIT
 
 ---
 
-**Version:** 1.0.1 | **Status:** Production Ready ✅ | **Updated:** 2026-01-15
+**Version:** 2.0.0 | **Status:** Production Ready
