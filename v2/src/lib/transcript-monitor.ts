@@ -86,13 +86,13 @@ class TranscriptMonitor {
   }
 
   /**
-   * Read last ~500KB of file to find last user message
-   * (Increased from 50KB to handle sessions with heavy tool activity)
+   * Read last ~2MB of file to find last user message
+   * (Large size needed for sessions with heavy tool activity)
    */
   private getLastUserMessageFromTail(path: string): { timestamp: number; preview: string } {
     try {
       const content = readFileSync(path, 'utf-8');
-      const readSize = Math.min(500000, content.length);
+      const readSize = Math.min(2_000_000, content.length);
       const lastChunk = content.slice(-readSize);
 
       return this.extractLastUserMessage(lastChunk);
