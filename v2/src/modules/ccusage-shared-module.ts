@@ -87,13 +87,24 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         return this.getDefaultData();
       }
 
-      // Extract all data from single ccusage call
-      const costUSD = Math.max(0, activeBlock.costUSD || 0);
-      const costPerHour = activeBlock.burnRate?.costPerHour || null;
+      // VALIDATION: Ensure required fields exist and are correct types
+      if (typeof activeBlock.costUSD !== 'number' && activeBlock.costUSD !== undefined) {
+        console.error('[CCUsageSharedModule] costUSD is not a number:', typeof activeBlock.costUSD);
+        return this.getDefaultData();
+      }
 
-      const totalTokens = Math.max(0, activeBlock.totalTokens || 0);
-      const tokensPerMinute = activeBlock.burnRate?.tokensPerMinute || null;
+      // Extract all data from single ccusage call (with validation)
+      const costUSD = Math.max(0, Number(activeBlock.costUSD) || 0);
+      const costPerHour = activeBlock.burnRate?.costPerHour != null
+        ? Math.max(0, Number(activeBlock.burnRate.costPerHour))
+        : null;
 
+      const totalTokens = Math.max(0, Number(activeBlock.totalTokens) || 0);
+      const tokensPerMinute = activeBlock.burnRate?.tokensPerMinute != null
+        ? Math.max(0, Number(activeBlock.burnRate.tokensPerMinute))
+        : null;
+
+      // NOTE: usageLimitResetTime is often null in ccusage output, fallback to endTime
       const resetTimeStr = activeBlock.usageLimitResetTime || activeBlock.endTime;
       const startTimeStr = activeBlock.startTime;
 
@@ -107,13 +118,24 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         const endTime = new Date(resetTimeStr);
         const now = new Date();
 
+        // VALIDATION: Check for valid dates
+        if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
+          console.error('[CCUsageSharedModule] Invalid date strings:', { startTimeStr, resetTimeStr });
+          return this.getDefaultData();
+        }
+
         const totalMs = endTime.getTime() - startTime.getTime();
         const elapsedMs = now.getTime() - startTime.getTime();
         const remainingMs = Math.max(0, endTime.getTime() - now.getTime());
 
-        percentageUsed = Math.min(100, Math.floor((elapsedMs / totalMs) * 100));
-        hoursLeft = Math.floor(remainingMs / (1000 * 60 * 60));
-        minutesLeft = Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60));
+        // VALIDATION: Prevent division by zero and cap percentage
+        if (totalMs > 0) {
+          percentageUsed = Math.min(100, Math.max(0, Math.floor((elapsedMs / totalMs) * 100)));
+        }
+
+        // VALIDATION: Ensure non-negative time values
+        hoursLeft = Math.max(0, Math.floor(remainingMs / (1000 * 60 * 60)));
+        minutesLeft = Math.max(0, Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60)));
         resetTime = `${String(endTime.getUTCHours()).padStart(2, '0')}:${String(endTime.getUTCMinutes()).padStart(2, '0')}`;
       }
 
@@ -134,6 +156,8 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         isFresh: true
       };
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('[CCUsageSharedModule] Parse error:', msg);
       return this.getDefaultData();
     }
   }

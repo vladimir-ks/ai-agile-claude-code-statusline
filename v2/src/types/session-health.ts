@@ -15,6 +15,8 @@ export interface TranscriptHealth {
   lastModifiedAgo: string;     // "2m", "1h", etc.
   messageCount: number;
   lastMessageTime: number;     // Unix timestamp ms
+  lastMessagePreview: string;  // Truncated preview of last user message
+  lastMessageAgo: string;      // "2m", "1h", etc. since last message
   isSynced: boolean;           // mtime < 60s = synced
 }
 
@@ -223,6 +225,8 @@ export function createDefaultHealth(sessionId: string): SessionHealth {
       lastModifiedAgo: 'unknown',
       messageCount: 0,
       lastMessageTime: 0,
+      lastMessagePreview: '',
+      lastMessageAgo: '',
       isSynced: false
     },
     model: {

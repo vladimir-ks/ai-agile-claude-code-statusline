@@ -101,20 +101,21 @@ class DataGatherer {
       // Git not available - keep defaults
     }
 
-    // 5. Billing data (global, cached - only fetch if stale >2 min)
-    // First check if we have existing billing data that's fresh
+    // 5. Billing data (global, cached - only fetch if stale >2 min AND was successful)
+    // First check if we have existing billing data that's fresh AND valid
     const existingHealth = this.healthStore.readSessionHealth(sessionId);
     const billingFresh = existingHealth?.billing?.lastFetched &&
+                        existingHealth?.billing?.isFresh === true &&  // Must have been a successful fetch
                         (Date.now() - existingHealth.billing.lastFetched) < 120000;
 
     if (billingFresh && existingHealth?.billing) {
-      // Reuse existing billing data
+      // Reuse existing billing data (only if it was a successful fetch)
       health.billing = existingHealth.billing;
     } else {
       // Fetch fresh billing data
       try {
         const billingData = await this.ccusageModule.fetch(sessionId);
-        if (billingData) {
+        if (billingData && billingData.isFresh) {
           // CRITICAL FIX: Use correct field names from CCUsageData
           // CCUsageData has: hoursLeft, minutesLeft, percentageUsed (NOT budgetMinutesLeft, budgetPercentUsed)
           const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
@@ -124,12 +125,25 @@ class DataGatherer {
             budgetRemaining: totalMinutes,
             budgetPercentUsed: billingData.percentageUsed || 0,
             resetTime: billingData.resetTime || '',
-            isFresh: billingData.isFresh !== false,
+            isFresh: true,
             lastFetched: Date.now()
           };
+        } else if (existingHealth?.billing?.isFresh) {
+          // Failed fetch but we have old valid data - keep it but mark as stale
+          health.billing = {
+            ...existingHealth.billing,
+            isFresh: false  // Mark as stale but keep the real values
+          };
         }
+        // If no valid data at all, defaults remain (0 values with isFresh: false)
       } catch {
-        // Billing not available - keep defaults
+        // Billing not available - keep existing if valid, otherwise defaults
+        if (existingHealth?.billing?.costToday > 0) {
+          health.billing = {
+            ...existingHealth.billing,
+            isFresh: false
+          };
+        }
       }
     }
 
@@ -212,6 +226,10 @@ class DataGatherer {
    *   context_window.current_usage.output_tokens
    *   context_window.current_usage.cache_read_input_tokens
    *   context_window.current_usage.cache_creation_input_tokens
+   *
+   * SEMANTICS:
+   *   percentUsed = percentage of COMPACTION THRESHOLD (78%), not total window
+   *   tokensLeft = tokens until compaction triggers, not until window full
    */
   private calculateContext(jsonInput: ClaudeCodeInput | null): ContextInfo {
     const result: ContextInfo = {
@@ -229,15 +247,27 @@ class DataGatherer {
     const ctx = jsonInput.context_window;
     result.windowSize = ctx.context_window_size || 200000;
 
+    // VALIDATION: Ensure window size is reasonable (10k - 500k tokens)
+    if (result.windowSize < 10000 || result.windowSize > 500000) {
+      result.windowSize = 200000; // Default to standard window
+    }
+
     // CRITICAL FIX: Use nested current_usage structure (matches V1 and actual Claude Code output)
     const currentUsage = ctx.current_usage;
-    const inputTokens = currentUsage?.input_tokens || 0;
-    const outputTokens = currentUsage?.output_tokens || 0;
-    const cacheReadTokens = currentUsage?.cache_read_input_tokens || 0;
-    const cacheCreationTokens = currentUsage?.cache_creation_input_tokens || 0;
+
+    // VALIDATION: Extract and validate token counts (must be non-negative numbers)
+    const inputTokens = Math.max(0, Number(currentUsage?.input_tokens) || 0);
+    const outputTokens = Math.max(0, Number(currentUsage?.output_tokens) || 0);
+    const cacheReadTokens = Math.max(0, Number(currentUsage?.cache_read_input_tokens) || 0);
 
     // Total tokens = input + output + cache reads (cache creation is separate billing concern)
     result.tokensUsed = inputTokens + outputTokens + cacheReadTokens;
+
+    // VALIDATION: tokensUsed cannot exceed window size (would indicate bad data)
+    if (result.tokensUsed > result.windowSize * 1.5) {
+      // Likely bad data - cap at window size
+      result.tokensUsed = result.windowSize;
+    }
 
     // Calculate tokens until 78% compaction threshold
     const compactionThreshold = Math.floor(result.windowSize * 0.78);
