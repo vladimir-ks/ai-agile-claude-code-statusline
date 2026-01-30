@@ -152,14 +152,12 @@ class DataGatherer {
     // 9. Write to health store
     this.healthStore.writeSessionHealth(sessionId, health);
 
-    // 10. Update global summary (non-blocking)
-    setTimeout(() => {
-      try {
-        this.healthStore.updateSessionsSummary();
-      } catch {
-        // Ignore summary update errors
-      }
-    }, 0);
+    // 10. Update global summary (synchronous - we're already in background daemon)
+    try {
+      this.healthStore.updateSessionsSummary();
+    } catch {
+      // Ignore summary update errors
+    }
 
     return health;
   }

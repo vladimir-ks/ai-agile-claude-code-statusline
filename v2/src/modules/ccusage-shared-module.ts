@@ -61,12 +61,16 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
     const result = await ccusageLock.withLock(async () => {
       try {
         const { stdout } = await execAsync('ccusage blocks --json --active', {
-          timeout: this.config.timeout
+          timeout: this.config.timeout,
+          killSignal: 'SIGKILL',  // Force kill on timeout to prevent orphans
+          maxBuffer: 1024 * 1024  // 1MB max output
         });
 
         return JSON.parse(stdout);
       } catch (error) {
-        console.error('[CCUsageSharedModule] ccusage execution failed:', error);
+        // Log to daemon log for observability
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[CCUsageSharedModule] ccusage failed: ${msg}`);
         return null;
       }
     });

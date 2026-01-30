@@ -23,16 +23,17 @@ class GitModule implements DataModule<GitData> {
   config: DataModuleConfig = { timeout: 2000, cacheTTL: 10000 };  // 10s cache
 
   async fetch(sessionId: string): Promise<GitData> {
-    try {
-      const { stdout: branch } = await execAsync('git branch --show-current', {
-        timeout: 1000,
-        cwd: process.cwd()
-      });
+    // Common exec options with proper cleanup
+    const execOpts = {
+      timeout: 1000,
+      killSignal: 'SIGKILL' as const,  // Force kill on timeout
+      maxBuffer: 512 * 1024,  // 512KB max
+      cwd: process.cwd()
+    };
 
-      const { stdout: status } = await execAsync('git status --porcelain', {
-        timeout: 1000,
-        cwd: process.cwd()
-      });
+    try {
+      const { stdout: branch } = await execAsync('git branch --show-current', execOpts);
+      const { stdout: status } = await execAsync('git status --porcelain', execOpts);
 
       const dirty = status.trim().split('\n').filter(l => l.trim()).length;
 
@@ -41,20 +42,14 @@ class GitModule implements DataModule<GitData> {
       let behind = 0;
 
       try {
-        const { stdout: aheadStr } = await execAsync('git rev-list --count @{u}..HEAD', {
-          timeout: 1000,
-          cwd: process.cwd()
-        });
+        const { stdout: aheadStr } = await execAsync('git rev-list --count @{u}..HEAD', execOpts);
         ahead = parseInt(aheadStr.trim(), 10) || 0;
       } catch {
         // No upstream or error, default to 0
       }
 
       try {
-        const { stdout: behindStr } = await execAsync('git rev-list --count HEAD..@{u}', {
-          timeout: 1000,
-          cwd: process.cwd()
-        });
+        const { stdout: behindStr } = await execAsync('git rev-list --count HEAD..@{u}', execOpts);
         behind = parseInt(behindStr.trim(), 10) || 0;
       } catch {
         // No upstream or error, default to 0
