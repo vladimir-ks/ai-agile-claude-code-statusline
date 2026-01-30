@@ -38,6 +38,20 @@ DAEMON_SCRIPT="$SCRIPT_DIR/data-daemon.ts"
 JSON_INPUT=$(cat)
 
 # ============================================================================
+# DETECT PANE WIDTH (tmux-aware)
+# ============================================================================
+
+# If running in tmux, get the actual pane width
+# This allows the display to format output correctly for the available space
+if [ -n "${TMUX:-}" ]; then
+  STATUSLINE_WIDTH=$(tmux display -p '#{pane_width}' 2>/dev/null || echo "120")
+else
+  # Fallback: try terminal columns, or default to 120
+  STATUSLINE_WIDTH="${COLUMNS:-120}"
+fi
+export STATUSLINE_WIDTH
+
+# ============================================================================
 # LAYER 1: DISPLAY (synchronous, fast, guaranteed to complete)
 # ============================================================================
 

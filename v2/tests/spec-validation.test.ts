@@ -496,22 +496,7 @@ describe('SPEC: Output Format', () => {
       expect(output).toContain('API Key');
     });
 
-    test('stale indicator shows minutes old', () => {
-      const oldTimestamp = Date.now() - (10 * 60 * 1000);  // 10 minutes ago
-      createHealthFile('alert-stale', {
-        sessionId: 'alert-stale',
-        gatheredAt: oldTimestamp,
-        model: { value: 'Claude' },
-        context: { tokensLeft: 100000, percentUsed: 25 },
-        git: { branch: '', ahead: 0, behind: 0, dirty: 0 },
-        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-        billing: { isFresh: true },
-        alerts: {}
-      });
-
-      const output = runDisplay('{"session_id":"alert-stale"}');
-
-      expect(output).toMatch(/⚠\d+m/);  // Warning with minutes
-    });
+    // Note: Stale indicator (⚠Xm) was removed as it was confusing to users
+    // Staleness is now only shown via 🔴 on billing data
   });
 });

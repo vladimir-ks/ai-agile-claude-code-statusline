@@ -443,11 +443,6 @@ function display(): void {
       return;
     }
 
-    // 4b. Check if health data is stale (>5 minutes old)
-    const healthAge = health.gatheredAt ? Date.now() - health.gatheredAt : 0;
-    const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes
-    const isStale = healthAge > STALE_THRESHOLD;
-
     // 5. Read config (safe, use defaults on error)
     const configPath = `${HEALTH_DIR}/config.json`;
     const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig> }>(configPath);
@@ -457,11 +452,7 @@ function display(): void {
     // 📁:dir 🌿:git 🤖:model 🧠:context 🕐:time ⌛:budget 💰:cost 💬:turns 📝:sync 💬:lastMsg
     const parts: string[] = [];
 
-    // Alerts first (critical)
-    if (isStale) {
-      const minsOld = Math.floor(healthAge / 60000);
-      parts.push(`${c('stale')}⚠${minsOld}m${rst()}`);
-    }
+    // Critical alerts only (secrets, health issues)
     { const hs = fmtHealthStatus(health); if (hs) parts.push(hs); }
     if (cfg.secrets) { const s = fmtSecrets(health); if (s) parts.push(s); }
 
@@ -495,8 +486,8 @@ function display(): void {
     { const lm = fmtLastMessage(health); if (lm) parts.push(lm); }
 
     // 7. Intelligent multi-line wrapping
-    // Claude Code UI has ~75% width available (~85 cols on typical terminal)
-    const MAX_LINE_WIDTH = 85;
+    // Use tmux pane width if available (set by wrapper script), else default
+    const MAX_LINE_WIDTH = parseInt(process.env.STATUSLINE_WIDTH || '120', 10);
 
     // Build output with intelligent line wrapping
     const lines: string[] = [];

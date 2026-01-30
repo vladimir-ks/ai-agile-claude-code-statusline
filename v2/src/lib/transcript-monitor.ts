@@ -131,7 +131,7 @@ class TranscriptMonitor {
             const text = this.extractUserText(obj.message.content);
             // Only use if we found actual text (not empty from tool_result-only messages)
             if (text) {
-              lastUserMessagePreview = this.truncatePreview(text, 40);
+              lastUserMessagePreview = this.truncatePreview(text, 80);
             }
             // Continue searching if this was a tool_result-only message
           }
@@ -176,7 +176,7 @@ class TranscriptMonitor {
           const text = this.extractUserText(obj.message.content);
           // Only use if we found actual text (not empty from tool_result-only messages)
           if (text) {
-            preview = this.truncatePreview(text, 40);
+            preview = this.truncatePreview(text, 80);
           }
           // Continue searching if this was a tool_result-only message
         }
