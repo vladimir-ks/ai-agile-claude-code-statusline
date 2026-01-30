@@ -126,6 +126,8 @@ class DataGatherer {
             budgetRemaining: totalMinutes,
             budgetPercentUsed: billingData.percentageUsed || 0,
             resetTime: billingData.resetTime || '',
+            totalTokens: billingData.totalTokens || 0,
+            tokensPerMinute: billingData.tokensPerMinute || null,
             isFresh: true,
             lastFetched: Date.now()
           };

@@ -46,7 +46,7 @@ interface SessionHealth {
   model: { value: string };
   context: { tokensLeft: number; percentUsed: number; tokensUsed?: number; windowSize?: number };
   git: { branch: string; ahead: number; behind: number; dirty: number };
-  billing: { costToday: number; burnRatePerHour: number; budgetRemaining: number; budgetPercentUsed: number; resetTime: string; isFresh: boolean; lastFetched?: number };
+  billing: { costToday: number; burnRatePerHour: number; budgetRemaining: number; budgetPercentUsed: number; resetTime: string; totalTokens?: number; tokensPerMinute?: number | null; isFresh: boolean; lastFetched?: number };
   alerts: { secretsDetected: boolean; secretTypes: string[]; transcriptStale: boolean; dataLossRisk: boolean };
 }
 
@@ -98,6 +98,8 @@ const COLORS = {
   budget: '\x1b[38;5;189m',       // lavender
   cost: '\x1b[38;5;222m',         // light gold
   burnRate: '\x1b[38;5;220m',     // bright gold
+  usage: '\x1b[38;5;222m',        // light gold (same as cost)
+  cache: '\x1b[38;5;156m',        // light green (same as V1)
   lastMsg: '\x1b[38;5;252m',      // white/gray (for message preview)
   // Context colors based on usage
   contextGood: '\x1b[38;5;158m',  // mint green
@@ -337,6 +339,41 @@ function fmtCost(h: SessionHealth): string {
   return `💰:${c('cost')}${cost}${rst()}`;
 }
 
+function fmtCache(cacheRatio: number | null): string {
+  if (cacheRatio === null) return '';
+  return `💾:${c('cache')}${cacheRatio}%${rst()}`;
+}
+
+function fmtUsage(h: SessionHealth): string {
+  // 📊:130.0Mtok(951ktpm) format from V1
+  const tokens = h.billing?.totalTokens;
+  if (!tokens || tokens <= 0) return '';
+
+  // Format tokens (same logic as V1)
+  let tokStr: string;
+  if (tokens >= 1000000) {
+    tokStr = `${(tokens / 1000000).toFixed(1)}M`;
+  } else if (tokens >= 1000) {
+    tokStr = `${Math.floor(tokens / 1000)}k`;
+  } else {
+    tokStr = String(tokens);
+  }
+
+  // Add TPM if available
+  const tpm = h.billing?.tokensPerMinute;
+  if (tpm && tpm > 0) {
+    let tpmStr: string;
+    if (tpm >= 1000) {
+      tpmStr = `${Math.floor(tpm / 1000)}k`;
+    } else {
+      tpmStr = String(Math.floor(tpm));
+    }
+    return `📊:${c('usage')}${tokStr}tok(${tpmStr}tpm)${rst()}`;
+  }
+
+  return `📊:${c('usage')}${tokStr}tok${rst()}`;
+}
+
 function fmtSecrets(h: SessionHealth): string {
   if (!h.alerts?.secretsDetected) return '';
   const count = h.alerts.secretTypes?.length || 0;
@@ -363,10 +400,11 @@ function fmtHealthStatus(h: SessionHealth): string {
 
 function display(): void {
   try {
-    // 1. Parse session_id, start_directory, and model from stdin (minimal parsing, fail-safe)
+    // 1. Parse stdin JSON from Claude Code (contains real-time data)
     let sessionId: string | null = null;
     let stdinDirectory: string | null = null;
     let stdinModel: string | null = null;
+    let cacheRatio: number | null = null;  // Cache hit ratio from JSON input
     try {
       const stdin = require('fs').readFileSync(0, 'utf-8');
       const parsed = JSON.parse(stdin);
@@ -375,6 +413,16 @@ function display(): void {
       stdinDirectory = parsed?.start_directory || parsed?.workspace?.current_dir || parsed?.cwd || null;
       // Extract model from stdin (takes priority over cached)
       stdinModel = parsed?.model?.display_name || parsed?.model?.name || null;
+
+      // Calculate cache hit ratio from context_window data (V1 parity)
+      const currentInput = parsed?.context_window?.current_usage?.input_tokens || 0;
+      const cacheRead = parsed?.context_window?.current_usage?.cache_read_input_tokens || 0;
+      if (currentInput > 0 || cacheRead > 0) {
+        const totalEligible = currentInput + cacheRead;
+        if (totalEligible > 0) {
+          cacheRatio = Math.round((cacheRead * 100) / totalEligible);
+        }
+      }
     } catch {
       // Can't parse stdin - will show fallback
     }
@@ -430,6 +478,12 @@ function display(): void {
     if (cfg.time) parts.push(fmtTime());
     if (cfg.budget) { const b = fmtBudget(health); if (b) parts.push(b); }
     if (cfg.cost) { const co = fmtCost(health); if (co) parts.push(co); }
+
+    // Usage metrics (📊 total tokens + TPM from ccusage)
+    { const u = fmtUsage(health); if (u) parts.push(u); }
+
+    // Cache ratio (from stdin JSON context_window data)
+    { const ca = fmtCache(cacheRatio); if (ca) parts.push(ca); }
 
     // Conversation metrics (message count = turns)
     { const mc = fmtMessageCount(health); if (mc) parts.push(mc); }
