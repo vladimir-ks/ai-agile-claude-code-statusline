@@ -168,7 +168,7 @@ function generateProgressBar(percentUsed: number): string {
   return `[${bar}]`;
 }
 
-function shortenPath(path: string, maxLen: number = 30): string {
+function shortenPath(path: string, maxLen: number = 25): string {
   if (!path) return '?';
   const home = homedir();
   let shortened = path.startsWith(home) ? '~' + path.slice(home.length) : path;
@@ -177,19 +177,21 @@ function shortenPath(path: string, maxLen: number = 30): string {
     return shortened;
   }
 
-  // Show: ~/../<current> (just last part with ~ prefix)
+  // Get last path component
   const parts = shortened.split('/').filter(p => p);
   if (parts.length <= 1) {
     return shortened.slice(0, maxLen - 2) + '..';
   }
 
-  // Show just the last directory name with ~/ prefix to indicate it's under home
-  const lastPart = parts[parts.length - 1];
-  if (lastPart.length <= maxLen - 4) {
-    return `~/..${lastPart}`;
+  let lastPart = parts[parts.length - 1];
+  // Remove common prefixes that add noise
+  lastPart = lastPart.replace(/^_+/, ''); // Leading underscores
+
+  if (lastPart.length <= maxLen - 2) {
+    return `~/${lastPart}`;
   }
-  // Truncate the last part if still too long
-  return `~/..${lastPart.slice(0, maxLen - 6)}..`;
+  // Truncate if still too long
+  return `~/${lastPart.slice(0, maxLen - 4)}..`;
 }
 
 /**
@@ -293,20 +295,16 @@ function fmtSecrets(h: SessionHealth): string {
 }
 
 function fmtHealthStatus(h: SessionHealth): string {
-  // Show health issues ONLY for critical (secrets, missing transcript)
-  // Stale billing is shown via 🔴 on budget - no need to duplicate here
-  const status = h.health?.status;
-  const issues = h.health?.issues || [];
-
-  if (!status || status === 'healthy' || status === 'warning') return '';
-
-  // Only show for critical issues (secrets, missing transcript)
-  const criticalIssues = issues.filter(i =>
-    i.includes('Secrets') || i.includes('Transcript')
-  );
-  if (criticalIssues.length === 0) return '';
-
-  return `${c('critical')}🔴${criticalIssues.length}!${rst()}`;
+  // Only show for TRULY critical issues (secrets detected, transcript missing)
+  // Context warnings are already visible in the progress bar
+  // Billing staleness is shown via 🔴 on budget
+  if (h.alerts?.secretsDetected) {
+    return `${c('critical')}🔴SEC${rst()}`;
+  }
+  if (!h.transcript?.exists && h.transcriptPath) {
+    return `${c('critical')}🔴TXN${rst()}`;
+  }
+  return '';
 }
 
 // ============================================================================
