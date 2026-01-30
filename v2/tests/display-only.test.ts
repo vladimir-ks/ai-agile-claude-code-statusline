@@ -169,13 +169,10 @@ describe('Display-Only Layer', () => {
       // MEDIUM priority - shown if space (git at least should fit)
       expect(output).toContain('🌿:feature+2-1*3');
 
-      // Verify each line is not too long (two-line format)
+      // Verify output is single line and fits
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
-      const lines = stripped.split('\n');
-      // Each line should fit comfortably
-      for (const line of lines) {
-        expect(line.length).toBeLessThanOrEqual(120); // Allow margin for long paths
-      }
+      // Single line format - should be under 130 chars (allows for dynamic last message)
+      expect(stripped.length).toBeLessThanOrEqual(130);
     });
 
     test('shows secrets warning when detected', () => {
