@@ -175,7 +175,8 @@ describe('Safety: Error Indicators', () => {
   test('display shows warning for missing health data', () => {
     const output = execSync(`echo '{"session_id":"nonexistent-session-xyz"}' | bun ${join(SCRIPT_DIR, 'display-only.ts')}`, {
       encoding: 'utf-8',
-      timeout: 2000
+      timeout: 2000,
+      env: { ...process.env, NO_COLOR: '1' }  // Disable colors for test
     });
 
     expect(output).toContain('⚠');
@@ -185,7 +186,8 @@ describe('Safety: Error Indicators', () => {
   test('display shows warning for invalid JSON', () => {
     const output = execSync(`echo 'not json' | bun ${join(SCRIPT_DIR, 'display-only.ts')}`, {
       encoding: 'utf-8',
-      timeout: 2000
+      timeout: 2000,
+      env: { ...process.env, NO_COLOR: '1' }  // Disable colors for test
     });
 
     // Should output minimal fallback, not crash
@@ -198,6 +200,30 @@ describe('Safety: Error Indicators', () => {
     const script = readFileSync(BULLETPROOF_SCRIPT, 'utf-8');
     expect(script).toContain('timeout');
     expect(script).toContain('⚠:timeout');
+  });
+});
+
+describe('Safety: Color Support', () => {
+  test('colors are enabled by default', () => {
+    const output = execSync(`echo '{}' | bun ${join(SCRIPT_DIR, 'display-only.ts')}`, {
+      encoding: 'utf-8',
+      timeout: 2000,
+      env: { ...process.env, NO_COLOR: undefined }  // Ensure NO_COLOR is not set
+    });
+
+    // Should contain ANSI escape codes
+    expect(output).toContain('\x1b[');
+  });
+
+  test('colors are disabled with NO_COLOR=1', () => {
+    const output = execSync(`echo '{}' | bun ${join(SCRIPT_DIR, 'display-only.ts')}`, {
+      encoding: 'utf-8',
+      timeout: 2000,
+      env: { ...process.env, NO_COLOR: '1' }
+    });
+
+    // Should NOT contain ANSI escape codes
+    expect(output).not.toContain('\x1b[');
   });
 });
 

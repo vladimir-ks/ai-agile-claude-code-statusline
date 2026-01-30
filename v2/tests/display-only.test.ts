@@ -18,12 +18,13 @@ function runDisplay(stdin: string, healthDir: string = TEST_HEALTH_DIR): { outpu
   const start = Date.now();
   try {
     // Set HOME to redirect health dir lookups
+    // Set NO_COLOR=1 to disable ANSI colors for consistent test output
     const output = execSync(
       `echo '${stdin.replace(/'/g, "'\\''")}' | bun ${DISPLAY_SCRIPT}`,
       {
         encoding: 'utf-8',
         timeout: 1000,  // 1 second max (should be <50ms)
-        env: { ...process.env, HOME: '/tmp/test-display-home' }
+        env: { ...process.env, HOME: '/tmp/test-display-home', NO_COLOR: '1' }
       }
     );
     return { output, time: Date.now() - start };

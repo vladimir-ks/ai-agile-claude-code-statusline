@@ -72,6 +72,46 @@ const DEFAULT_COMPONENTS: ComponentsConfig = {
 };
 
 // ============================================================================
+// Color System (respects NO_COLOR environment variable)
+// ============================================================================
+
+const USE_COLOR = !process.env.NO_COLOR;
+
+// ANSI 256-color codes (matching V1 palette)
+const COLORS = {
+  reset: '\x1b[0m',
+  // Component colors
+  directory: '\x1b[38;5;117m',    // sky blue
+  git: '\x1b[38;5;150m',          // soft green
+  model: '\x1b[38;5;147m',        // light purple
+  version: '\x1b[38;5;180m',      // soft yellow
+  time: '\x1b[38;5;249m',         // light gray
+  transcript: '\x1b[38;5;156m',   // light green
+  budget: '\x1b[38;5;189m',       // lavender
+  cost: '\x1b[38;5;222m',         // light gold
+  burnRate: '\x1b[38;5;220m',     // bright gold
+  // Context colors based on usage
+  contextGood: '\x1b[38;5;158m',  // mint green
+  contextWarn: '\x1b[38;5;215m',  // peach
+  contextCrit: '\x1b[38;5;203m',  // coral red
+  // Alert colors
+  warning: '\x1b[38;5;215m',      // peach/orange
+  critical: '\x1b[38;5;203m',     // coral red
+  secrets: '\x1b[38;5;196m',      // bright red
+  stale: '\x1b[38;5;208m',        // orange
+};
+
+function c(colorName: keyof typeof COLORS): string {
+  if (!USE_COLOR) return '';
+  return COLORS[colorName] || '';
+}
+
+function rst(): string {
+  if (!USE_COLOR) return '';
+  return COLORS.reset;
+}
+
+// ============================================================================
 // Safe File Reading (never throws)
 // ============================================================================
 
@@ -134,45 +174,52 @@ function shortenPath(path: string): string {
 }
 
 // ============================================================================
-// Component Formatters (each handles its own errors)
+// Component Formatters (each handles its own errors, with colors)
 // ============================================================================
 
 function fmtDirectory(h: SessionHealth): string {
-  return `📁:${shortenPath(h.projectPath)}`;
+  return `📁:${c('directory')}${shortenPath(h.projectPath)}${rst()}`;
 }
 
 function fmtGit(h: SessionHealth): string {
   if (!h.git?.branch) return '';
-  let result = `🌿:${h.git.branch}`;
+  let result = `🌿:${c('git')}${h.git.branch}`;
   if (h.git.ahead > 0) result += `+${h.git.ahead}`;
   if (h.git.behind > 0) result += `/-${h.git.behind}`;
   if (h.git.dirty > 0) result += `*${h.git.dirty}`;
-  return result;
+  return result + rst();
 }
 
 function fmtModel(h: SessionHealth): string {
-  return `🤖:${h.model?.value || 'Claude'}`;
+  return `🤖:${c('model')}${h.model?.value || 'Claude'}${rst()}`;
 }
 
 function fmtContext(h: SessionHealth): string {
   const left = formatTokens(h.context?.tokensLeft || 0);
   const bar = generateProgressBar(h.context?.percentUsed || 0);
-  return `🧠:${left}left${bar}`;
+  const pct = h.context?.percentUsed || 0;
+
+  // Color based on context usage
+  let colorName: keyof typeof COLORS = 'contextGood';
+  if (pct >= 95) colorName = 'contextCrit';
+  else if (pct >= 80) colorName = 'contextWarn';
+
+  return `🧠:${c(colorName)}${left}left${bar}${rst()}`;
 }
 
 function fmtTime(): string {
   const now = new Date();
   const hours = String(now.getHours()).padStart(2, '0');
   const mins = String(now.getMinutes()).padStart(2, '0');
-  return `🕐:${hours}:${mins}`;
+  return `🕐:${c('time')}${hours}:${mins}${rst()}`;
 }
 
 function fmtTranscriptSync(h: SessionHealth): string {
-  if (!h.transcript?.exists) return '📝:⚠';
+  if (!h.transcript?.exists) return `📝:${c('warning')}⚠${rst()}`;
   const ago = h.transcript.lastModifiedAgo || '?';
-  if (h.alerts?.dataLossRisk) return `📝:${ago}🔴`;
-  if (h.alerts?.transcriptStale) return `📝:${ago}⚠`;
-  return `📝:${ago}`;
+  if (h.alerts?.dataLossRisk) return `📝:${c('critical')}${ago}🔴${rst()}`;
+  if (h.alerts?.transcriptStale) return `📝:${c('warning')}${ago}⚠${rst()}`;
+  return `📝:${c('transcript')}${ago}${rst()}`;
 }
 
 function fmtBudget(h: SessionHealth): string {
@@ -181,9 +228,11 @@ function fmtBudget(h: SessionHealth): string {
   const hours = Math.floor(mins / 60);
   const m = mins % 60;
   const pct = h.billing.budgetPercentUsed || 0;
-  let result = `⌛:${hours}h${m}m(${pct}%)`;
+
+  let result = `⌛:${c('budget')}${hours}h${m}m(${pct}%)`;
   if (h.billing.resetTime) result += h.billing.resetTime;
-  if (!h.billing.isFresh) result += '🔴';
+  result += rst();
+  if (!h.billing.isFresh) result += `${c('critical')}🔴${rst()}`;
   return result;
 }
 
@@ -192,16 +241,16 @@ function fmtCost(h: SessionHealth): string {
   const cost = formatMoney(h.billing.costToday);
   if (h.billing.burnRatePerHour > 0) {
     const rate = formatMoney(h.billing.burnRatePerHour);
-    return `💰:${cost}|${rate}/h`;
+    return `💰:${c('cost')}${cost}${rst()}|${c('burnRate')}${rate}/h${rst()}`;
   }
-  return `💰:${cost}`;
+  return `💰:${c('cost')}${cost}${rst()}`;
 }
 
 function fmtSecrets(h: SessionHealth): string {
   if (!h.alerts?.secretsDetected) return '';
   const count = h.alerts.secretTypes?.length || 0;
-  if (count === 1) return `🔐SECRETS!(${h.alerts.secretTypes[0]})`;
-  return `🔐SECRETS!(${count} types)`;
+  if (count === 1) return `${c('secrets')}🔐SECRETS!(${h.alerts.secretTypes[0]})${rst()}`;
+  return `${c('secrets')}🔐SECRETS!(${count} types)${rst()}`;
 }
 
 function fmtHealthStatus(h: SessionHealth): string {
@@ -210,8 +259,8 @@ function fmtHealthStatus(h: SessionHealth): string {
   const issues = h.health?.issues?.length || 0;
 
   if (!status || status === 'healthy') return '';
-  if (status === 'critical') return `🔴${issues}issue${issues > 1 ? 's' : ''}`;
-  if (status === 'warning') return `🟡${issues}issue${issues > 1 ? 's' : ''}`;
+  if (status === 'critical') return `${c('critical')}🔴${issues}issue${issues > 1 ? 's' : ''}${rst()}`;
+  if (status === 'warning') return `${c('warning')}🟡${issues}issue${issues > 1 ? 's' : ''}${rst()}`;
   return '';
 }
 
@@ -233,7 +282,7 @@ function display(): void {
 
     // 2. If no session, output minimal and exit
     if (!sessionId) {
-      process.stdout.write(`🤖:Claude 🕐:${fmtTime().slice(3)}`);
+      process.stdout.write(`🤖:${c('model')}Claude${rst()} ${fmtTime()}`);
       return;
     }
 
@@ -243,7 +292,7 @@ function display(): void {
 
     // 4. If no health data, output minimal with warning
     if (!health) {
-      process.stdout.write(`⚠:NoData 🤖:Claude ${fmtTime()} (check: tail ~/.claude/session-health/daemon.log)`);
+      process.stdout.write(`${c('warning')}⚠:NoData${rst()} 🤖:${c('model')}Claude${rst()} ${fmtTime()} ${c('stale')}(check: tail ~/.claude/session-health/daemon.log)${rst()}`);
       return;
     }
 
@@ -263,7 +312,7 @@ function display(): void {
     // Stale data indicator (shows first if data is old)
     if (isStale) {
       const minsOld = Math.floor(healthAge / 60000);
-      parts.push(`⚠:Stale(${minsOld}m)`);
+      parts.push(`${c('stale')}⚠:Stale(${minsOld}m)${rst()}`);
     }
 
     // Health status indicator (shows if issues exist)
