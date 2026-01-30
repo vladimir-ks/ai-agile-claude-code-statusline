@@ -23,7 +23,7 @@ import {
   BillingInfo,
   createDefaultHealth
 } from '../types/session-health';
-import { existsSync, readFileSync, statSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, statSync } from 'fs';
 import { basename, dirname } from 'path';
 import { homedir } from 'os';
 import { execSync } from 'child_process';
@@ -102,23 +102,31 @@ class DataGatherer {
       // Git not available - keep defaults
     }
 
-    // 5. Billing data (global, cached - only fetch if stale >2 min AND was successful)
-    // First check if we have existing billing data that's fresh AND valid
+    // 5. Billing data - SHARED across all sessions (billing is global, not per-session)
+    // Use a shared cache file so lock contention doesn't leave sessions without data
+    const sharedBillingPath = `${homedir()}/.claude/session-health/billing-shared.json`;
     const existingHealth = this.healthStore.readSessionHealth(sessionId);
-    const billingFresh = existingHealth?.billing?.lastFetched &&
-                        existingHealth?.billing?.isFresh === true &&  // Must have been a successful fetch
-                        (Date.now() - existingHealth.billing.lastFetched) < 120000;
 
-    if (billingFresh && existingHealth?.billing) {
-      // Reuse existing billing data (only if it was a successful fetch)
-      health.billing = existingHealth.billing;
+    // Read shared billing cache (available to all sessions)
+    let sharedBilling: any = null;
+    try {
+      if (existsSync(sharedBillingPath)) {
+        sharedBilling = JSON.parse(readFileSync(sharedBillingPath, 'utf-8'));
+      }
+    } catch { /* ignore read errors */ }
+
+    // Check if shared billing is fresh enough (< 2 minutes old)
+    const sharedFresh = sharedBilling?.lastFetched &&
+                       (Date.now() - sharedBilling.lastFetched) < 120000;
+
+    if (sharedFresh && sharedBilling?.isFresh) {
+      // Use shared billing data (another session fetched it recently)
+      health.billing = { ...sharedBilling };
     } else {
-      // Fetch fresh billing data
+      // Try to fetch fresh billing data
       try {
         const billingData = await this.ccusageModule.fetch(sessionId);
         if (billingData && billingData.isFresh) {
-          // CRITICAL FIX: Use correct field names from CCUsageData
-          // CCUsageData has: hoursLeft, minutesLeft, percentageUsed (NOT budgetMinutesLeft, budgetPercentUsed)
           const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
           health.billing = {
             costToday: billingData.costUSD || 0,
@@ -131,21 +139,25 @@ class DataGatherer {
             isFresh: true,
             lastFetched: Date.now()
           };
-        } else if (existingHealth?.billing?.isFresh) {
-          // Failed fetch but we have old valid data - keep it but mark as stale
-          health.billing = {
-            ...existingHealth.billing,
-            isFresh: false  // Mark as stale but keep the real values
-          };
+
+          // CRITICAL: Write to shared cache so other sessions can use it
+          try {
+            writeFileSync(sharedBillingPath, JSON.stringify(health.billing), { mode: 0o600 });
+          } catch { /* ignore write errors */ }
+
+        } else if (sharedBilling?.costToday > 0) {
+          // Lock failed but we have shared data - use it (mark as slightly stale)
+          health.billing = { ...sharedBilling, isFresh: sharedBilling.isFresh };
+        } else if (existingHealth?.billing?.costToday > 0) {
+          // Fallback to session's own old data
+          health.billing = { ...existingHealth.billing, isFresh: false };
         }
-        // If no valid data at all, defaults remain (0 values with isFresh: false)
       } catch {
-        // Billing not available - keep existing if valid, otherwise defaults
-        if (existingHealth?.billing?.costToday > 0) {
-          health.billing = {
-            ...existingHealth.billing,
-            isFresh: false
-          };
+        // ccusage failed - use shared or existing data
+        if (sharedBilling?.costToday > 0) {
+          health.billing = { ...sharedBilling, isFresh: false };
+        } else if (existingHealth?.billing?.costToday > 0) {
+          health.billing = { ...existingHealth.billing, isFresh: false };
         }
       }
     }

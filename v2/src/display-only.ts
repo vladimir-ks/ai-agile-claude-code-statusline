@@ -487,7 +487,9 @@ function display(): void {
 
     // 7. Intelligent multi-line wrapping
     // Use tmux pane width if available (set by wrapper script), else default
-    const MAX_LINE_WIDTH = parseInt(process.env.STATUSLINE_WIDTH || '120', 10);
+    // Use 80% of width to leave room for Claude's messages on the right
+    const paneWidth = parseInt(process.env.STATUSLINE_WIDTH || '120', 10);
+    const MAX_LINE_WIDTH = Math.floor(paneWidth * 0.8);
 
     // Build output with intelligent line wrapping
     const lines: string[] = [];
