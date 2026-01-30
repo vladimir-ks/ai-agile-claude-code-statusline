@@ -172,15 +172,16 @@ describe('Safety: Resource Limits', () => {
 });
 
 describe('Safety: Error Indicators', () => {
-  test('display shows warning for missing health data', () => {
+  test('display shows loading indicator for missing health data', () => {
     const output = execSync(`echo '{"session_id":"nonexistent-session-xyz"}' | bun ${join(SCRIPT_DIR, 'display-only.ts')}`, {
       encoding: 'utf-8',
       timeout: 2000,
       env: { ...process.env, NO_COLOR: '1' }  // Disable colors for test
     });
 
-    expect(output).toContain('⚠');
-    expect(output).toContain('NoData');
+    // New behavior: shows ⏳ (loading) instead of scary ⚠:NoData message
+    expect(output).toContain('⏳');
+    expect(output).toContain('🤖:Claude');
   });
 
   test('display shows warning for invalid JSON', () => {

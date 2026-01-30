@@ -106,13 +106,15 @@ describe('Display-Only Layer', () => {
       expect(output).toContain('🤖:Claude');
     });
 
-    test('outputs warning when health file missing', () => {
+    test('shows loading indicator when health file missing', () => {
       const { output } = runDisplay('{"session_id":"no-health-file"}');
 
-      expect(output).toContain('⚠');
+      // New behavior: shows ⏳ (loading) instead of scary ⚠:NoData message
+      expect(output).toContain('⏳');
+      expect(output).toContain('🤖:Claude');
     });
 
-    test('outputs warning when health file is corrupt', () => {
+    test('shows loading indicator when health file is corrupt', () => {
       writeFileSync(
         '/tmp/test-display-home/.claude/session-health/corrupt.json',
         'not valid json {{'
@@ -120,10 +122,10 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"corrupt"}');
 
-      expect(output).toContain('⚠');
+      expect(output).toContain('⏳');
     });
 
-    test('outputs warning when health file is empty', () => {
+    test('shows loading indicator when health file is empty', () => {
       writeFileSync(
         '/tmp/test-display-home/.claude/session-health/empty.json',
         ''
@@ -131,7 +133,7 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"empty"}');
 
-      expect(output).toContain('⚠');
+      expect(output).toContain('⏳');
     });
   });
 

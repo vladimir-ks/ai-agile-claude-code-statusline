@@ -404,9 +404,10 @@ describe('SPEC: Output Format', () => {
       expect(output).toMatch(/🕐:\d{2}:\d{2}/);
     });
 
-    test('no health file → shows ⚠:NoData 🤖:Claude', () => {
+    test('no health file → shows loading indicator with model', () => {
       const output = runDisplay('{"session_id":"nonexistent"}');
-      expect(output).toContain('⚠:NoData');
+      // New behavior: shows ⏳ (loading) instead of scary ⚠:NoData message
+      expect(output).toContain('⏳');
       expect(output).toContain('🤖:Claude');
     });
   });

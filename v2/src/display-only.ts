@@ -427,9 +427,37 @@ function display(): void {
     const healthPath = `${HEALTH_DIR}/${sessionId}.json`;
     const health = safeReadJson<SessionHealth>(healthPath);
 
-    // 4. If no health data, output minimal with warning
+    // 4. If no health data, show what we have from stdin (new session)
     if (!health) {
-      process.stdout.write(`${c('warning')}⚠:NoData${rst()} 🤖:${c('model')}Claude${rst()} ${fmtTime()} ${c('stale')}(check: tail ~/.claude/session-health/daemon.log)${rst()}`);
+      const parts: string[] = [];
+
+      // Use data from stdin that we DO have
+      if (stdinDirectory) {
+        parts.push(fmtDirectory(stdinDirectory));
+      }
+
+      // Model from stdin or default
+      const model = (stdinModel || 'Claude').replace(/\s+/g, '');
+      parts.push(`🤖:${c('model')}${model}${rst()}`);
+
+      parts.push(fmtTime());
+
+      // Try to get billing from shared cache (available even for new sessions)
+      try {
+        const sharedBillingPath = `${HEALTH_DIR}/billing-shared.json`;
+        if (existsSync(sharedBillingPath)) {
+          const billing = JSON.parse(readFileSync(sharedBillingPath, 'utf-8'));
+          if (billing?.costToday > 0) {
+            const cost = formatMoney(billing.costToday);
+            parts.push(`💰:${c('cost')}${cost}${rst()}`);
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Small indicator that health is loading (not scary error message)
+      parts.push(`${c('stale')}⏳${rst()}`);
+
+      process.stdout.write(parts.join(' '));
       return;
     }
 
