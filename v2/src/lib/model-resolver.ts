@@ -109,23 +109,23 @@ class ModelResolver {
     const jsonInput = sources.jsonInput;
     const settings = sources.settings;
 
-    // Priority 1: Fresh transcript (<1 hour = 3600 seconds)
-    if (transcript && transcript.age < 3600) {
-      return {
-        source: 'transcript',
-        value: transcript.value,
-        confidence: transcript.confidence,
-        reason: `Fresh transcript (${this.formatAge(transcript.age)} old)`
-      };
-    }
-
-    // Priority 2: JSON input (current session)
+    // Priority 1: JSON input (real-time, current session) - ALWAYS wins if available
     if (jsonInput) {
       return {
         source: 'jsonInput',
         value: jsonInput.value,
         confidence: jsonInput.confidence,
         reason: 'Current session JSON input'
+      };
+    }
+
+    // Priority 2: Fresh transcript (<5 minutes = 300 seconds) - only if no JSON
+    if (transcript && transcript.age < 300) {
+      return {
+        source: 'transcript',
+        value: transcript.value,
+        confidence: transcript.confidence,
+        reason: `Fresh transcript (${this.formatAge(transcript.age)} old)`
       };
     }
 

@@ -142,14 +142,14 @@ function safeReadJson<T>(path: string): T | null {
 // ============================================================================
 
 function formatTokens(tokens: number): string {
-  if (!tokens || tokens < 0) return '0';
+  if (typeof tokens !== 'number' || !isFinite(tokens) || tokens < 0) return '0';
   if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`;
   if (tokens >= 1000) return `${Math.floor(tokens / 1000)}k`;
-  return String(tokens);
+  return String(Math.floor(tokens));
 }
 
 function formatMoney(amount: number): string {
-  if (!amount || amount < 0) return '$0';
+  if (typeof amount !== 'number' || !isFinite(amount) || amount < 0) return '$0';
   if (amount >= 100) return `$${Math.floor(amount)}`;
   // For values 10-99, show integer if whole number, otherwise one decimal
   if (amount >= 10) {
@@ -402,7 +402,7 @@ function display(): void {
       // Extract directory from Claude Code input (most reliable source)
       stdinDirectory = parsed?.start_directory || parsed?.workspace?.current_dir || parsed?.cwd || null;
       // Extract model from stdin (takes priority over cached)
-      stdinModel = parsed?.model?.display_name || parsed?.model?.name || null;
+      stdinModel = parsed?.model?.display_name || parsed?.model?.id || parsed?.model?.model_id || parsed?.model?.name || null;
 
       // Calculate cache hit ratio from context_window data (V1 parity)
       const currentInput = parsed?.context_window?.current_usage?.input_tokens || 0;

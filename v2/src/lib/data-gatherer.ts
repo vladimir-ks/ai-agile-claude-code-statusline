@@ -23,7 +23,7 @@ import {
   BillingInfo,
   createDefaultHealth
 } from '../types/session-health';
-import { existsSync, readFileSync, writeFileSync, statSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, statSync, renameSync } from 'fs';
 import { basename, dirname } from 'path';
 import { homedir } from 'os';
 import { execSync } from 'child_process';
@@ -140,9 +140,11 @@ class DataGatherer {
             lastFetched: Date.now()
           };
 
-          // CRITICAL: Write to shared cache so other sessions can use it
+          // CRITICAL: Write to shared cache so other sessions can use it (atomic write)
           try {
-            writeFileSync(sharedBillingPath, JSON.stringify(health.billing), { mode: 0o600 });
+            const tempPath = `${sharedBillingPath}.tmp`;
+            writeFileSync(tempPath, JSON.stringify(health.billing), { encoding: 'utf-8', mode: 0o600 });
+            renameSync(tempPath, sharedBillingPath);
           } catch { /* ignore write errors */ }
 
         } else if (sharedBilling?.costToday > 0) {
@@ -319,7 +321,7 @@ class DataGatherer {
         { name: 'API Key', regex: /sk-[a-zA-Z0-9]{20,}/g },
         { name: 'AWS Key', regex: /AKIA[0-9A-Z]{16}/g },
         { name: 'GitHub Token', regex: /gh[ps]_[a-zA-Z0-9]{36}/g },
-        { name: 'Private Key', regex: /-----BEGIN.*PRIVATE KEY-----/g },
+        { name: 'Private Key', regex: /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]{50,}?-----END[A-Z ]*PRIVATE KEY-----/g },
         { name: 'DB Connection', regex: /(postgres|mongodb|mysql):\/\/[^:]+:[^@]+@/gi }
       ];
 

@@ -48,7 +48,7 @@ describe('ModelResolver', () => {
   // UT-3.1: Fresh Transcript Wins
   // =========================================================================
   describe('source priority', () => {
-    test('fresh transcript wins over jsonInput', () => {
+    test('jsonInput wins over transcript (real-time priority)', () => {
       const transcriptPath = join(TEST_DIR, 'transcript.jsonl');
       createTranscript(transcriptPath, 'opus', 1); // 1 min ago
 
@@ -58,19 +58,20 @@ describe('ModelResolver', () => {
 
       const result = resolver.resolve(transcriptPath, jsonInput, null);
 
-      expect(result.value).toBe('Opus4.5');
-      expect(result.source).toBe('transcript');
-      expect(result.confidence).toBeGreaterThanOrEqual(90);
+      expect(result.value).toBe('Sonnet4.5');
+      expect(result.source).toBe('jsonInput');
+      expect(result.confidence).toBe(80);
     });
 
-    test('fresh transcript wins over settings', () => {
+    test('fresh transcript wins over settings (when no jsonInput)', () => {
       const transcriptPath = join(TEST_DIR, 'transcript.jsonl');
-      createTranscript(transcriptPath, 'opus', 30); // 30 min ago
+      createTranscript(transcriptPath, 'opus', 3); // 3 min ago (within 5min threshold)
 
       const result = resolver.resolve(transcriptPath, null, 'haiku');
 
       expect(result.value).toBe('Opus4.5');
       expect(result.source).toBe('transcript');
+      expect(result.confidence).toBeGreaterThanOrEqual(90);
     });
   });
 
@@ -174,8 +175,9 @@ describe('ModelResolver', () => {
 
       const result = resolver.resolve(transcriptPath, jsonInput, null);
 
-      // Result should use transcript (fresh)
-      expect(result.value).toBe('Opus4.5');
+      // Result should use jsonInput (real-time priority)
+      expect(result.value).toBe('Sonnet4.5');
+      expect(result.source).toBe('jsonInput');
 
       // But disagreement should be detected
       const lastDisagreement = resolver.getLastDisagreement();

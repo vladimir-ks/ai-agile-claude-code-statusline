@@ -38,10 +38,10 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { name: 'Slack Token', pattern: /xox[baprs]-[a-zA-Z0-9-]+/g, severity: 'high' },
   { name: 'Discord Token', pattern: /[MN][A-Za-z\d]{23,}\.[\w-]{6}\.[\w-]{27}/g, severity: 'high' },
 
-  // Private Keys - HIGH severity
-  { name: 'Private Key', pattern: /-----BEGIN[A-Z ]*PRIVATE KEY-----/g, severity: 'high' },
-  { name: 'RSA Private Key', pattern: /-----BEGIN RSA PRIVATE KEY-----/g, severity: 'high' },
-  { name: 'SSH Private Key', pattern: /-----BEGIN OPENSSH PRIVATE KEY-----/g, severity: 'high' },
+  // Private Keys - HIGH severity (must have BEGIN/END pair with content)
+  { name: 'Private Key', pattern: /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]{50,}?-----END[A-Z ]*PRIVATE KEY-----/g, severity: 'high' },
+  { name: 'RSA Private Key', pattern: /-----BEGIN RSA PRIVATE KEY-----[\s\S]{50,}?-----END RSA PRIVATE KEY-----/g, severity: 'high' },
+  { name: 'SSH Private Key', pattern: /-----BEGIN OPENSSH PRIVATE KEY-----[\s\S]{50,}?-----END OPENSSH PRIVATE KEY-----/g, severity: 'high' },
 
   // Database Connection Strings - HIGH severity
   { name: 'PostgreSQL Connection', pattern: /postgres(ql)?:\/\/[^:]+:[^@]+@/gi, severity: 'high' },

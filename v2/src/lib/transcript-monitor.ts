@@ -12,7 +12,7 @@
  * (indicates potential data loss risk)
  */
 
-import { existsSync, statSync, readFileSync } from 'fs';
+import { existsSync, statSync, readFileSync, openSync, closeSync, readSync, fstatSync } from 'fs';
 import { TranscriptHealth } from '../types/session-health';
 
 class TranscriptMonitor {
@@ -88,14 +88,20 @@ class TranscriptMonitor {
   /**
    * Read last ~2MB of file to find last user message
    * (Large size needed for sessions with heavy tool activity)
+   * Uses seeked read to avoid loading entire file into memory
    */
   private getLastUserMessageFromTail(path: string): { timestamp: number; preview: string } {
     try {
-      const content = readFileSync(path, 'utf-8');
-      const readSize = Math.min(2_000_000, content.length);
-      const lastChunk = content.slice(-readSize);
+      const fd = openSync(path, 'r');
+      const stats = fstatSync(fd);
+      const readSize = Math.min(2_000_000, stats.size);
+      const buffer = Buffer.alloc(readSize);
+      const startPos = Math.max(0, stats.size - readSize);
+      readSync(fd, buffer, 0, readSize, startPos);
+      closeSync(fd);
 
-      return this.extractLastUserMessage(lastChunk);
+      const content = buffer.toString('utf-8');
+      return this.extractLastUserMessage(content);
     } catch {
       return { timestamp: 0, preview: '' };
     }
