@@ -367,8 +367,21 @@ function fmtUsage(h: SessionHealth): string {
 function fmtSecrets(h: SessionHealth): string {
   if (!h.alerts?.secretsDetected) return '';
   const count = h.alerts.secretTypes?.length || 0;
-  if (count === 1) return `${c('secrets')}🔐SECRETS!(${h.alerts.secretTypes[0]})${rst()}`;
-  return `${c('secrets')}🔐SECRETS!(${count} types)${rst()}`;
+
+  // Short name mapping for compact display
+  const shortName = (type: string): string => {
+    if (type.includes('Private Key') || type === 'Private Key') return 'Key';
+    if (type.includes('API Key')) return 'API';
+    if (type.includes('GitHub')) return 'GH';
+    if (type.includes('AWS')) return 'AWS';
+    if (type.includes('GitLab')) return 'GL';
+    if (type.includes('Slack')) return 'Slack';
+    if (type.includes('DB') || type.includes('Connection')) return 'DB';
+    return type.slice(0, 6); // Fallback: first 6 chars
+  };
+
+  if (count === 1) return `${c('secrets')}🔐${shortName(h.alerts.secretTypes[0])}${rst()}`;
+  return `${c('secrets')}🔐${count}types${rst()}`;
 }
 
 function fmtHealthStatus(h: SessionHealth): string {
@@ -470,9 +483,8 @@ function display(): void {
     // 📁:dir 🌿:git 🤖:model 🧠:context 🕐:time ⌛:budget 💰:cost 💬:turns 📝:sync 💬:lastMsg
     const parts: string[] = [];
 
-    // Critical alerts only (secrets, health issues)
+    // Critical alerts only (health issues - secrets moved to end)
     { const hs = fmtHealthStatus(health); if (hs) parts.push(hs); }
-    if (cfg.secrets) { const s = fmtSecrets(health); if (s) parts.push(s); }
 
     // Core info - ONLY use stdin directory (from Claude Code), never daemon's cached path
     if (cfg.directory && stdinDirectory) {
@@ -502,6 +514,9 @@ function display(): void {
 
     // Last message at end (V1 format: HH:MM(elapsed) preview)
     { const lm = fmtLastMessage(health); if (lm) parts.push(lm); }
+
+    // Secrets alert at very end (user requested position)
+    if (cfg.secrets) { const s = fmtSecrets(health); if (s) parts.push(s); }
 
     // 7. Intelligent multi-line wrapping
     // Use tmux pane width if available (set by wrapper script), else default

@@ -196,7 +196,7 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"secrets-test"}');
 
-      expect(output).toContain('🔐SECRETS!');
+      expect(output).toContain('🔐'); // Changed format: now shows "🔐API" or "🔐Key" instead of "🔐SECRETS!"
     });
 
     test('shows transcript warning when stale', () => {

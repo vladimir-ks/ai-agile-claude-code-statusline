@@ -492,8 +492,8 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"alert-secrets"}');
 
-      expect(output).toContain('🔐SECRETS!');
-      expect(output).toContain('API Key');
+      // New format: 🔐API instead of 🔐SECRETS!(API Key)
+      expect(output).toContain('🔐API');
     });
 
     // Note: Stale indicator (⚠Xm) was removed as it was confusing to users

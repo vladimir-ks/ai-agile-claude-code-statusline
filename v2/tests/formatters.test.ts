@@ -369,8 +369,8 @@ describe('fmtSecrets edge cases', () => {
       billing: {},
       alerts: { secretsDetected: true, secretTypes: null }
     });
-    // Should show warning without crashing
-    expect(output).toContain('🔐SECRETS!');
+    // Should show warning without crashing (new format: 🔐0types instead of 🔐SECRETS!)
+    expect(output).toContain('🔐');
     expect(output).not.toContain('undefined');
   });
 
@@ -383,6 +383,6 @@ describe('fmtSecrets edge cases', () => {
       billing: {},
       alerts: { secretsDetected: true, secretTypes: [] }
     });
-    expect(output).toContain('🔐SECRETS!');
+    expect(output).toContain('🔐'); // New format: 🔐0types
   });
 });

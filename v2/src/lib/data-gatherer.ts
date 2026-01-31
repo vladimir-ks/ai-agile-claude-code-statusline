@@ -321,7 +321,7 @@ class DataGatherer {
         { name: 'API Key', regex: /sk-[a-zA-Z0-9]{20,}/g },
         { name: 'AWS Key', regex: /AKIA[0-9A-Z]{16}/g },
         { name: 'GitHub Token', regex: /gh[ps]_[a-zA-Z0-9]{36}/g },
-        { name: 'Private Key', regex: /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]{50,}?-----END[A-Z ]*PRIVATE KEY-----/g },
+        { name: 'Private Key', regex: /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]{50,4096}?-----END[A-Z ]*PRIVATE KEY-----/g },
         { name: 'DB Connection', regex: /(postgres|mongodb|mysql):\/\/[^:]+:[^@]+@/gi }
       ];
 
