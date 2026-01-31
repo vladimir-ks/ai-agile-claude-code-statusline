@@ -141,6 +141,21 @@ class SecretsDetectorModule {
 
         const matches = content.match(pattern.pattern);
         if (matches && matches.length > 0) {
+          // Additional validation for private keys: require base64-like content
+          if (pattern.name.includes('Private Key')) {
+            // Real private keys have continuous base64 content (A-Za-z0-9+/=)
+            // Code snippets or discussions have: quotes, regex markers, spaces, newlines
+            const hasRealKeyContent = matches.some(match => {
+              // Extract content between BEGIN and END
+              const inner = match.replace(/-----BEGIN[^-]*-----/, '').replace(/-----END[^-]*-----/, '');
+              // Real keys: mostly base64 chars, minimal whitespace
+              const base64Chars = (inner.match(/[A-Za-z0-9+\/=]/g) || []).length;
+              const totalChars = inner.length;
+              // Real key should be >80% base64 characters and >200 chars total
+              return base64Chars > totalChars * 0.8 && totalChars > 200;
+            });
+            if (!hasRealKeyContent) continue; // Skip false positive
+          }
           secretTypes.push(pattern.name);
         }
       }
