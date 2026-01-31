@@ -7,6 +7,8 @@
  * - UsageModule (📊)
  *
  * This prevents 3 concurrent ccusage calls!
+ *
+ * Optimization: 2min cooldown to skip ccusage entirely if fresh data available
  */
 
 import type { DataModule, DataModuleConfig } from '../broker/data-broker';
@@ -14,6 +16,7 @@ import type { ValidationResult } from '../types/validation';
 import { promisify } from 'util';
 import { exec } from 'child_process';
 import ProcessLock from '../lib/process-lock';
+import CooldownManager from '../lib/cooldown-manager';
 
 const execAsync = promisify(exec);
 const ccusageLock = new ProcessLock({
@@ -50,13 +53,29 @@ interface CCUsageData {
 
 class CCUsageSharedModule implements DataModule<CCUsageData> {
   readonly moduleId = 'ccusage';  // Single module ID
+  private cooldownManager: CooldownManager;
 
   config: DataModuleConfig = {
     timeout: 35000,      // 35s (ccusage can take 20-30s)
-    cacheTTL: 900000     // 15 min cache
+    cacheTTL: 120000     // 2min cooldown (was 15min)
   };
 
+  constructor(config?: Partial<DataModuleConfig>) {
+    if (config) {
+      this.config = { ...this.config, ...config };
+    }
+    this.cooldownManager = new CooldownManager();
+  }
+
   async fetch(sessionId: string): Promise<CCUsageData> {
+    // OPTIMIZATION: Check cooldown BEFORE trying to acquire lock
+    // If another session fetched recently, skip entirely
+    if (!this.cooldownManager.shouldRun('billing')) {
+      // Cooldown active - return stale data indicator
+      // Caller (data-gatherer) will use shared billing cache
+      return this.getDefaultData();
+    }
+
     // CRITICAL: Acquire system-wide lock to prevent concurrent ccusage spawns
     const result = await ccusageLock.withLock(async () => {
       try {
@@ -139,7 +158,7 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         resetTime = `${String(endTime.getUTCHours()).padStart(2, '0')}:${String(endTime.getUTCMinutes()).padStart(2, '0')}`;
       }
 
-      return {
+      const ccusageData = {
         // FIX: ccusage uses 'id' not 'blockId'
         blockId: activeBlock.id || '',
         startTime: new Date(startTimeStr),
@@ -155,6 +174,11 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         tokensPerMinute,
         isFresh: true
       };
+
+      // Mark cooldown to prevent duplicate ccusage calls for 2 minutes
+      this.cooldownManager.markComplete('billing', { dataAvailable: true });
+
+      return ccusageData;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error('[CCUsageSharedModule] Parse error:', msg);
