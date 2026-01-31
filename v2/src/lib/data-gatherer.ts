@@ -32,11 +32,15 @@ import { execSync } from 'child_process';
 import GitModule from '../modules/git-module';
 import CCUsageSharedModule from '../modules/ccusage-shared-module';
 import IncrementalTranscriptScanner from './incremental-transcript-scanner';
+import GitLeaksScanner from './gitleaks-scanner';
+import CleanupManager from './cleanup-manager';
 
 class DataGatherer {
   private healthStore: HealthStore;
   private transcriptMonitor: TranscriptMonitor;
   private incrementalScanner: IncrementalTranscriptScanner;
+  private gitleaksScanner: GitLeaksScanner;
+  private cleanupManager: CleanupManager;
   private modelResolver: ModelResolver;
   private gitModule: GitModule;
   private ccusageModule: CCUsageSharedModule;
@@ -45,6 +49,8 @@ class DataGatherer {
     this.healthStore = new HealthStore(healthStorePath);
     this.transcriptMonitor = new TranscriptMonitor();
     this.incrementalScanner = new IncrementalTranscriptScanner();
+    this.gitleaksScanner = new GitLeaksScanner();
+    this.cleanupManager = new CleanupManager(healthStorePath);
     this.modelResolver = new ModelResolver();
     this.gitModule = new GitModule({
       id: 'git',
@@ -169,10 +175,18 @@ class DataGatherer {
     }
 
     // 6. Secrets scan (if transcript exists)
+    // OPTIMIZATION: Use gitleaks for professional secret detection (if installed)
     if (health.transcript.exists && transcriptPath) {
-      const secrets = this.scanForSecrets(transcriptPath);
-      health.alerts.secretsDetected = secrets.hasSecrets;
-      health.alerts.secretTypes = secrets.types;
+      try {
+        const gitleaksResult = await this.gitleaksScanner.scan(sessionId, transcriptPath);
+        health.alerts.secretsDetected = gitleaksResult.hasSecrets;
+        health.alerts.secretTypes = gitleaksResult.secretTypes;
+      } catch {
+        // GitLeaks failed - fall back to regex scan
+        const secrets = this.scanForSecrets(transcriptPath);
+        health.alerts.secretsDetected = secrets.hasSecrets;
+        health.alerts.secretTypes = secrets.types;
+      }
     }
 
     // 7. Data loss risk detection
@@ -195,6 +209,13 @@ class DataGatherer {
       this.healthStore.updateSessionsSummary();
     } catch {
       // Ignore summary update errors
+    }
+
+    // 11. Cleanup old files (runs max once per 24h via cooldown)
+    try {
+      await this.cleanupManager.cleanupIfNeeded();
+    } catch {
+      // Cleanup failed - not critical
     }
 
     return health;
