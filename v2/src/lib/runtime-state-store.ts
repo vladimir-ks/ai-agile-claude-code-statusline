@@ -167,12 +167,24 @@ class RuntimeStateStore {
     }
 
     // Group by tmux context (if available)
+    // IMPORTANT: Use Map to deduplicate by tmux key (most recent session wins)
     const tmuxSessions = state.sessions.filter(s => s.tmux && s.formattedStrings);
     if (tmuxSessions.length > 0) {
       lines.push('');
       lines.push('  byTmux:');
+
+      // Deduplicate by tmux key - keep only the most recent session for each tmux context
+      const tmuxMap = new Map<string, RuntimeSession>();
       for (const session of tmuxSessions) {
         const tmuxKey = `${session.tmux!.session}:${session.tmux!.window}.${session.tmux!.pane}`;
+        const existing = tmuxMap.get(tmuxKey);
+        // Keep the session with the most recent activity
+        if (!existing || (session.metadata?.lastActivity || 0) > (existing.metadata?.lastActivity || 0)) {
+          tmuxMap.set(tmuxKey, session);
+        }
+      }
+
+      for (const [tmuxKey, session] of tmuxMap) {
         lines.push(`    "${tmuxKey}": # Session: ${session.sessionId.substring(0, 8)}...`);
         lines.push(`      # Project: ${session.projectPath}`);
         lines.push(`      width120: |`);
