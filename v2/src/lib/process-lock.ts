@@ -29,9 +29,9 @@ class ProcessLock {
   constructor(options: Partial<LockOptions> = {}) {
     this.options = {
       lockPath: options.lockPath || `${process.env.HOME}/.claude/.ccusage.lock`,
-      timeout: options.timeout || 35000,  // 35s (ccusage timeout)
-      retryInterval: options.retryInterval || 100,  // 100ms
-      maxRetries: options.maxRetries || 3  // Only retry 3 times (300ms total)
+      timeout: options.timeout || 60000,  // 60s timeout (ccusage can take 25-35s, allow buffer for lock holder)
+      retryInterval: options.retryInterval || 5000,  // 5s between retries
+      maxRetries: options.maxRetries || 15  // Total ~75s of attempts
     };
   }
 
@@ -65,9 +65,14 @@ class ProcessLock {
         const lockAge = Date.now() - statSync(this.options.lockPath).mtimeMs;
         const lockPid = this.getLockHolder();
 
-        // Check if lock is stale
-        if (lockAge > this.options.timeout) {
-          // Lock is stale, check if process still exists
+        // CRITICAL: First check if the process holding the lock is still alive
+        // This handles the case where a process crashes without releasing the lock
+        if (lockPid && !this.isProcessAlive(lockPid)) {
+          // Process is dead, release its lock
+          console.warn(`[ProcessLock] Lock held by dead process ${lockPid}, releasing`);
+          this.forceRelease();
+        } else if (lockAge > this.options.timeout) {
+          // Lock is stale by time, check if process still exists
           if (lockPid && this.isProcessAlive(lockPid)) {
             // Process exists but lock is old - force release
             console.warn(`[ProcessLock] Stale lock detected (${lockAge}ms old), PID ${lockPid} still alive, forcing release`);
@@ -76,7 +81,7 @@ class ProcessLock {
           // Remove stale lock
           this.forceRelease();
         } else {
-          // Lock is fresh, someone else is using it
+          // Lock is fresh AND process is alive - someone else is using it
           return {
             acquired: false,
             reason: `Lock held by PID ${lockPid} (age: ${lockAge}ms)`,

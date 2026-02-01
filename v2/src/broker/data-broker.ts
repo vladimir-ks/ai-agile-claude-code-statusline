@@ -185,21 +185,25 @@ class DataBroker extends EventEmitter {
   }
 
   private enforceMaxCacheSize(): void {
-    if (this.cache.size <= this.config.maxCacheSize) return;
+    // Loop until cache is within bounds (not just once)
+    while (this.cache.size > this.config.maxCacheSize) {
+      let lruKey: string | null = null;
+      let lruTime = Infinity;
 
-    let lruKey: string | null = null;
-    let lruTime = Infinity;
-
-    for (const [key, entry] of this.cache.entries()) {
-      if (entry.lastAccessedAt < lruTime) {
-        lruTime = entry.lastAccessedAt;
-        lruKey = key;
+      for (const [key, entry] of this.cache.entries()) {
+        if (entry.lastAccessedAt < lruTime) {
+          lruTime = entry.lastAccessedAt;
+          lruKey = key;
+        }
       }
-    }
 
-    if (lruKey) {
-      this.cache.delete(lruKey);
-      this.emit('cache:evicted', { key: lruKey, reason: 'LRU' });
+      if (lruKey) {
+        this.cache.delete(lruKey);
+        this.emit('cache:evicted', { key: lruKey, reason: 'LRU' });
+      } else {
+        // No LRU found (shouldn't happen) - break to prevent infinite loop
+        break;
+      }
     }
   }
 

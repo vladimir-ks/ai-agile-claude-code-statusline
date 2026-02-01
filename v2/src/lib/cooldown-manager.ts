@@ -27,8 +27,9 @@ export interface CooldownData {
 
 export const COOLDOWN_SPECS: Record<string, CooldownSpec> = {
   'git-status': { name: 'git-status', ttlMs: 30000, sharedAcrossSessions: true },      // 30s
-  'billing': { name: 'billing', ttlMs: 120000, sharedAcrossSessions: true },           // 2min
+  'billing': { name: 'billing', ttlMs: 120000, sharedAcrossSessions: true },           // 2min (matches ccusage-shared-module constructor)
   'secrets-scan': { name: 'secrets-scan', ttlMs: 300000, sharedAcrossSessions: false }, // 5min per session
+  'cleanup': { name: 'cleanup', ttlMs: 86400000, sharedAcrossSessions: true },         // 24h
 };
 
 class CooldownManager {
@@ -43,15 +44,18 @@ class CooldownManager {
 
   /**
    * Check if operation should run (cooldown expired or doesn't exist)
+   * @param name - Cooldown name (e.g., 'git-status', 'billing')
+   * @param sessionId - Optional session ID for per-session cooldowns
+   * @param contextKey - Optional context key for scoping (e.g., repoPath for git)
    */
-  shouldRun(name: string, sessionId?: string): boolean {
+  shouldRun(name: string, sessionId?: string, contextKey?: string): boolean {
     const spec = COOLDOWN_SPECS[name];
     if (!spec) {
       // Unknown operation - allow it to run
       return true;
     }
 
-    const path = this.getCooldownPath(name, sessionId);
+    const path = this.getCooldownPath(name, sessionId, contextKey);
     if (!existsSync(path)) {
       return true;  // No cooldown file - run
     }
@@ -68,9 +72,13 @@ class CooldownManager {
 
   /**
    * Mark operation as complete, preventing duplicate work during cooldown period
+   * @param name - Cooldown name (e.g., 'git-status', 'billing')
+   * @param data - Additional data to store with cooldown
+   * @param sessionId - Optional session ID for per-session cooldowns
+   * @param contextKey - Optional context key for scoping (e.g., repoPath for git)
    */
-  markComplete(name: string, data: Partial<CooldownData>, sessionId?: string): void {
-    const path = this.getCooldownPath(name, sessionId);
+  markComplete(name: string, data: Partial<CooldownData>, sessionId?: string, contextKey?: string): void {
+    const path = this.getCooldownPath(name, sessionId, contextKey);
     const cooldownData: CooldownData = {
       ...data,
       lastChecked: Date.now()
@@ -101,9 +109,12 @@ class CooldownManager {
 
   /**
    * Read cooldown data (for debugging/inspection)
+   * @param name - Cooldown name
+   * @param sessionId - Optional session ID
+   * @param contextKey - Optional context key for scoping
    */
-  read(name: string, sessionId?: string): CooldownData | null {
-    const path = this.getCooldownPath(name, sessionId);
+  read(name: string, sessionId?: string, contextKey?: string): CooldownData | null {
+    const path = this.getCooldownPath(name, sessionId, contextKey);
     if (!existsSync(path)) {
       return null;
     }
@@ -117,9 +128,12 @@ class CooldownManager {
 
   /**
    * Force expire a cooldown (for testing or manual refresh)
+   * @param name - Cooldown name
+   * @param sessionId - Optional session ID
+   * @param contextKey - Optional context key for scoping
    */
-  expire(name: string, sessionId?: string): void {
-    const path = this.getCooldownPath(name, sessionId);
+  expire(name: string, sessionId?: string, contextKey?: string): void {
+    const path = this.getCooldownPath(name, sessionId, contextKey);
     try {
       require('fs').unlinkSync(path);
     } catch {
@@ -129,17 +143,32 @@ class CooldownManager {
 
   /**
    * Get cooldown file path
+   * @param name - Cooldown name
+   * @param sessionId - Optional session ID for per-session cooldowns
+   * @param contextKey - Optional context key for scoping (e.g., repoPath for git)
    */
-  private getCooldownPath(name: string, sessionId?: string): string {
+  private getCooldownPath(name: string, sessionId?: string, contextKey?: string): string {
     const spec = COOLDOWN_SPECS[name];
     if (!spec) {
       throw new Error(`Unknown cooldown: ${name}`);
     }
 
-    // Shared cooldowns use simple name, per-session use session-id prefix
-    const filename = spec.sharedAcrossSessions
-      ? `${name}.cooldown`
-      : `${sessionId}-${name}.cooldown`;
+    // Build filename based on scope
+    let filename: string;
+    if (spec.sharedAcrossSessions) {
+      // Shared cooldown - use context key if provided (e.g., per-repo git status)
+      if (contextKey) {
+        // Hash context key to avoid filesystem issues with long paths
+        const crypto = require('crypto');
+        const hash = crypto.createHash('md5').update(contextKey).digest('hex').substring(0, 8);
+        filename = `${name}-${hash}.cooldown`;
+      } else {
+        filename = `${name}.cooldown`;
+      }
+    } else {
+      // Per-session cooldown
+      filename = `${sessionId}-${name}.cooldown`;
+    }
 
     return join(this.cooldownDir, filename);
   }

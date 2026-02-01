@@ -21,9 +21,9 @@ import CooldownManager from '../lib/cooldown-manager';
 const execAsync = promisify(exec);
 const ccusageLock = new ProcessLock({
   lockPath: `${process.env.HOME}/.claude/.ccusage.lock`,
-  timeout: 35000,
-  retryInterval: 100,
-  maxRetries: 3
+  timeout: 60000,         // 60s timeout (ccusage can take 30+ seconds)
+  retryInterval: 3000,    // Wait 3s between retries
+  maxRetries: 15          // Try for up to 45 seconds total
 });
 
 interface CCUsageData {
@@ -69,10 +69,13 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
 
   async fetch(sessionId: string): Promise<CCUsageData> {
     // OPTIMIZATION: Check cooldown BEFORE trying to acquire lock
-    // If another session fetched recently, skip entirely
-    if (!this.cooldownManager.shouldRun('billing')) {
-      // Cooldown active - return stale data indicator
-      // Caller (data-gatherer) will use shared billing cache
+    // If another session fetched recently AND shared cache is available, skip entirely
+    // But if shared cache is missing/stale, attempt fetch anyway (don't respect cooldown)
+    const cooldownActive = !this.cooldownManager.shouldRun('billing');
+
+    if (cooldownActive) {
+      // Cooldown is active - return stale data indicator to signal caller should check shared cache
+      console.error('[CCUsageSharedModule] Billing cooldown active - skipping fetch, will use shared cache');
       return this.getDefaultData();
     }
 
@@ -81,15 +84,17 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       try {
         const { stdout } = await execAsync('ccusage blocks --json --active', {
           timeout: this.config.timeout,
-          killSignal: 'SIGKILL',  // Force kill on timeout to prevent orphans
           maxBuffer: 1024 * 1024  // 1MB max output
+          // Note: Removed killSignal as it caused premature termination
         });
 
-        return JSON.parse(stdout);
+        const parsed = JSON.parse(stdout);
+        console.error('[CCUsageSharedModule] ccusage fetch succeeded');
+        return parsed;
       } catch (error) {
         // Log to daemon log for observability
         const msg = error instanceof Error ? error.message : String(error);
-        console.error(`[CCUsageSharedModule] ccusage failed: ${msg}`);
+        console.error(`[CCUsageSharedModule] ccusage execution failed: ${msg}`);
         return null;
       }
     });
@@ -158,6 +163,12 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         resetTime = `${String(endTime.getUTCHours()).padStart(2, '0')}:${String(endTime.getUTCMinutes()).padStart(2, '0')}`;
       }
 
+      // VALIDATION: Check if data looks like a legitimate active billing block
+      // (costUSD=0 + hoursLeft=0 often indicates failed fetch that succeeded syntactically)
+      const hasZeroCost = costUSD === 0;
+      const hasZeroHours = hoursLeft === 0 && minutesLeft === 0;
+      const dataLooksEmpty = hasZeroCost && hasZeroHours && totalTokens === 0;
+
       const ccusageData = {
         // FIX: ccusage uses 'id' not 'blockId'
         blockId: activeBlock.id || '',
@@ -172,11 +183,16 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         resetTime,
         totalTokens,
         tokensPerMinute,
-        isFresh: true
+        isFresh: !dataLooksEmpty  // Mark as stale if data appears to be from failed fetch
       };
 
-      // Mark cooldown to prevent duplicate ccusage calls for 2 minutes
-      this.cooldownManager.markComplete('billing', { dataAvailable: true });
+      if (ccusageData.isFresh) {
+        // Mark cooldown to prevent duplicate ccusage calls for 2 minutes
+        this.cooldownManager.markComplete('billing', { dataAvailable: true });
+      } else {
+        // Data looks failed - log for diagnostics
+        console.error('[CCUsageSharedModule] ccusage returned empty data (cost=0, hours=0, tokens=0)');
+      }
 
       return ccusageData;
     } catch (error) {

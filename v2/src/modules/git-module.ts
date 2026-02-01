@@ -34,13 +34,25 @@ class GitModule implements DataModule<GitData> {
   }
 
   async fetch(sessionId: string): Promise<GitData> {
-    // Check cooldown - skip if another session checked recently
-    if (!this.cooldownManager.shouldRun('git-status')) {
-      // Return cached result if available
-      if (this.lastResult) {
-        return this.lastResult;
+    const repoPath = process.cwd();
+
+    // Check cooldown - skip if another session checked recently (per-repo)
+    if (!this.cooldownManager.shouldRun('git-status', undefined, repoPath)) {
+      // Try to read cached result from cooldown file
+      const cooldownData = this.cooldownManager.read('git-status', undefined, repoPath);
+      if (cooldownData) {
+        // Extract git data from cooldown (it stores the full result)
+        const cached: GitData = {
+          branch: (cooldownData as any).branch || '',
+          ahead: (cooldownData as any).ahead || 0,
+          behind: (cooldownData as any).behind || 0,
+          dirty: (cooldownData as any).dirty || 0,
+          isRepo: (cooldownData as any).isRepo || false
+        };
+        this.lastResult = cached;
+        return cached;
       }
-      // No cache but cooldown active - use default
+      // No cache in cooldown file - return default
       return { branch: '', ahead: 0, behind: 0, dirty: 0, isRepo: false };
     }
 
@@ -49,7 +61,7 @@ class GitModule implements DataModule<GitData> {
       timeout: 1000,
       killSignal: 'SIGKILL' as const,  // Force kill on timeout
       maxBuffer: 512 * 1024,  // 512KB max
-      cwd: process.cwd()
+      cwd: repoPath
     };
 
     try {
@@ -84,9 +96,13 @@ class GitModule implements DataModule<GitData> {
         isRepo: true
       };
 
-      // Cache result and mark cooldown
+      // Cache result and mark cooldown (per-repo using contextKey)
+      // Store full result in cooldown file so other sessions can use it
       this.lastResult = result;
-      this.cooldownManager.markComplete('git-status', { repoPath: process.cwd() });
+      this.cooldownManager.markComplete('git-status', {
+        repoPath,
+        ...result  // Store all git data in cooldown file
+      }, undefined, repoPath);
 
       return result;
     } catch (error) {

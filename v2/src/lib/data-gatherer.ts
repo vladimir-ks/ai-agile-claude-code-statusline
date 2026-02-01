@@ -169,9 +169,10 @@ class DataGatherer {
       }
     } catch { /* ignore read errors */ }
 
-    // Check if shared billing is fresh enough (< 2 minutes old)
+    // Check if shared billing is fresh enough (< 2 minutes old AND has valid cost data)
     const sharedFresh = sharedBilling?.lastFetched &&
-                       (Date.now() - sharedBilling.lastFetched) < 120000;
+                       (Date.now() - sharedBilling.lastFetched) < 120000 &&
+                       sharedBilling?.costToday > 0;  // Validate has actual cost data (prevents using empty/failed data)
 
     if (sharedFresh && sharedBilling?.isFresh) {
       // Use shared billing data (another session fetched it recently)
