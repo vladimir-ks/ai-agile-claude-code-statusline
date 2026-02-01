@@ -573,17 +573,24 @@ export class StatuslineFormatter {
       let mins = health.billing.budgetRemaining;
 
       // Client-side time adjustment based on data age
-      mins = Math.max(0, mins - ageMinutes);
+      // But cap adjustment to avoid showing 0m when data is extremely stale
+      const adjustedMins = Math.max(0, mins - ageMinutes);
 
-      const hours = Math.floor(mins / 60);
-      const m = mins % 60;
+      // If adjustment drove budget to 0 but original wasn't near 0,
+      // data is too stale to be meaningful - show original with stronger warning
+      const showOriginal = adjustedMins === 0 && mins > 10 && ageMinutes > mins;
+      const displayMins = showOriginal ? mins : adjustedMins;
+
+      const hours = Math.floor(displayMins / 60);
+      const m = displayMins % 60;
       const pct = Math.max(0, Math.min(100, health.billing.budgetPercentUsed || 0));
 
       // Omit hours if 0
       const timeStr = hours > 0 ? `${hours}h${m}m` : `${m}m`;
 
-      // Add ⚠ if billing data is stale
-      parts.push(`⌛:${c('budget')}${timeStr}(${pct}%)${rst()}${staleMarker}`);
+      // Add ⚠ if billing data is stale, stronger warning if very stale
+      const marker = showOriginal ? `${c('critical')}⚠⚠${rst()}` : staleMarker;
+      parts.push(`⌛:${c('budget')}${timeStr}(${pct}%)${rst()}${marker}`);
     }
 
     // Weekly (if available) - check for undefined/null, NOT falsy (0 is valid!)

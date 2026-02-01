@@ -499,6 +499,7 @@ function display(): void {
     let sessionId: string | null = null;
     let stdinDirectory: string | null = null;
     let stdinModel: string | null = null;
+    let stdinContext: { tokensUsed: number; tokensLeft: number; percentUsed: number } | null = null;
     let cacheRatio: number | null = null;  // Cache hit ratio from JSON input
     try {
       const stdin = require('fs').readFileSync(0, 'utf-8');
@@ -512,11 +513,24 @@ function display(): void {
       // Calculate cache hit ratio from context_window data (V1 parity)
       const currentInput = parsed?.context_window?.current_usage?.input_tokens || 0;
       const cacheRead = parsed?.context_window?.current_usage?.cache_read_input_tokens || 0;
+      const outputTokens = parsed?.context_window?.current_usage?.output_tokens || 0;
       if (currentInput > 0 || cacheRead > 0) {
         const totalEligible = currentInput + cacheRead;
         if (totalEligible > 0) {
           cacheRatio = Math.round((cacheRead * 100) / totalEligible);
         }
+      }
+
+      // Extract context window data for accurate display (CRITICAL for fresh data)
+      const windowSize = parsed?.context_window?.context_window_size || 200000;
+      const tokensUsed = currentInput + outputTokens + cacheRead;
+      if (tokensUsed > 0) {
+        const compactionThreshold = Math.floor(windowSize * 0.78);
+        stdinContext = {
+          tokensUsed,
+          tokensLeft: Math.max(0, compactionThreshold - tokensUsed),
+          percentUsed: compactionThreshold > 0 ? Math.min(100, Math.floor((tokensUsed / compactionThreshold) * 100)) : 0
+        };
       }
     } catch {
       // Can't parse stdin - will show fallback
@@ -582,9 +596,11 @@ function display(): void {
 
     let variant: string[];
 
-    // Check if stdin has overrides (directory or model) that differ from cached health
+    // Check if stdin has overrides (directory, model, or context) that differ from cached health
+    // If stdin has fresh context data, ALWAYS regenerate to show accurate token counts
     const hasStdinOverrides = (stdinDirectory && stdinDirectory !== health.projectPath) ||
-                               (stdinModel && stdinModel !== health.model?.value);
+                               (stdinModel && stdinModel !== health.model?.value) ||
+                               (stdinContext && stdinContext.tokensUsed > 0);
 
     // Helper to select variant based on width
     const selectVariant = (variants: any): string[] => {
@@ -606,7 +622,7 @@ function display(): void {
       variant = selectVariant(health.formattedOutput);
     } else {
       // Fallback: Generate on-the-fly (backwards compatibility until daemon runs)
-      // Merge stdin data (start_directory, model) into health before formatting
+      // Merge stdin data (start_directory, model, context) into health before formatting
       const healthWithStdin = { ...health } as any;
       if (stdinDirectory) {
         healthWithStdin.projectPath = stdinDirectory;
@@ -614,6 +630,13 @@ function display(): void {
       if (stdinModel) {
         healthWithStdin.model = healthWithStdin.model || {};
         healthWithStdin.model.value = stdinModel;
+      }
+      // CRITICAL: Use fresh context data from stdin (most accurate)
+      if (stdinContext) {
+        healthWithStdin.context = healthWithStdin.context || {};
+        healthWithStdin.context.tokensUsed = stdinContext.tokensUsed;
+        healthWithStdin.context.tokensLeft = stdinContext.tokensLeft;
+        healthWithStdin.context.percentUsed = stdinContext.percentUsed;
       }
 
       const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin);
