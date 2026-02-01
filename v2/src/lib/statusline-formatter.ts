@@ -158,7 +158,8 @@ export class StatuslineFormatter {
   /**
    * Format statusline for specific terminal width (multi-line mode)
    *
-   * Uses 80% of terminal width to avoid rendering issues with tmux corner text.
+   * Uses 75% of terminal width to avoid rendering issues with tmux corner text.
+   * Tmux often reserves right margin for clock, notifications, or other overlays.
    *
    * Adaptive overflow rules:
    * - Line 1: Directory + Git (ALWAYS), Model + Context (if they fit)
@@ -166,8 +167,9 @@ export class StatuslineFormatter {
    * - Line 3: Last message preview
    */
   private static formatForWidth(health: SessionHealth, width: number): string[] {
-    // Use only 80% of terminal width to prevent rendering issues
-    const effectiveWidth = Math.floor(width * 0.80);
+    // Use only 75% of terminal width to prevent rendering issues
+    // 75% leaves enough margin for tmux clock, notifications, corner text
+    const effectiveWidth = Math.floor(width * 0.75);
     const lines: string[] = [];
 
     // Build Line 1 with overflow tracking
@@ -372,9 +374,9 @@ export class StatuslineFormatter {
       ? `📊:${c('usage')}${tokens}tok${tpm}${rst()}`
       : '';
 
-    // Turns: only show if >= 1000 (significant), format as "1.2k" if >= 1000
+    // Turns: only show if >= 1000 (significant), format as "6.4kt" (thousands)
     const turnsComp = (turns >= 1000)
-      ? `💬:${c('turns')}${turns >= 1000 ? this.formatTokens(turns) : turns}t${rst()}`
+      ? `💬:${c('turns')}${this.formatTokens(turns)}t${rst()}`
       : '';
 
     // STEP 4: Fit optional components based on available space
@@ -416,12 +418,22 @@ export class StatuslineFormatter {
 
   /**
    * Build Line 3: Last message (hard truncate)
+   *
+   * Filters out system messages (XML tags, task notifications) to show only
+   * meaningful user content.
    */
   private static buildLine3(health: SessionHealth, width: number): string {
     if (!health.transcript?.lastMessagePreview) return '';
 
     const elapsed = health.transcript.lastModifiedAgo || '';
-    const preview = health.transcript.lastMessagePreview;
+    let preview = health.transcript.lastMessagePreview;
+
+    // Filter out system/XML content - these aren't useful to display
+    // Examples: <task-notification>, <task-id>, <system-reminder>, etc.
+    if (preview.startsWith('<') && preview.includes('>')) {
+      // This looks like XML/system content - skip or show placeholder
+      preview = '(system message)';
+    }
 
     const prefix = `💬:${c('lastMessage')}(${elapsed}) `;
     const prefixWidth = this.visibleWidth(prefix);
@@ -680,8 +692,16 @@ export class StatuslineFormatter {
   }
 
   private static visibleWidth(text: string): number {
-    // Remove ANSI escape codes to calculate visible width
-    return text.replace(/\x1b\[[0-9;]*m/g, '').length;
+    // Remove ANSI escape codes
+    let clean = text.replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Count emojis (they take 2 columns in most terminals)
+    const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{2300}-\u{23FF}]/gu;
+    const emojiMatches = clean.match(emojiRegex) || [];
+    const emojiCount = emojiMatches.length;
+
+    // Total width = string length + extra column per emoji (emoji counted once, needs 2)
+    return clean.length + emojiCount;
   }
 
   private static truncateString(text: string, maxLen: number): string {

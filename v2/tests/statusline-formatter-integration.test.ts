@@ -560,14 +560,15 @@ describe('Context Shrink Cascade', () => {
     const variants = StatuslineFormatter.formatAllVariants(health);
 
     // Check various widths - narrow ones should NOT have -free
-    const narrow = variants.width80[0].replace(/\x1b\[[0-9;]*m/g, '');
-    const wide = variants.width200[0].replace(/\x1b\[[0-9;]*m/g, '');
+    // Join all lines since context might move to L2 at narrow widths
+    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    const wide = variants.width200.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 
     // Wide should have -free
     expect(wide).toContain('-free');
 
-    // Narrow might or might not depending on exact layout
-    // At minimum, brain emoji should be present
+    // Narrow might have context on L2 due to overflow
+    // At minimum, brain emoji should be present somewhere
     expect(narrow).toContain('🧠:');
   });
 

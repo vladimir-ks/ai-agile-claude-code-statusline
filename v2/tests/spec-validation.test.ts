@@ -9,6 +9,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { join } from 'path';
+import { withFormattedOutput } from './helpers/with-formatted-output';
 
 const DISPLAY_SCRIPT = join(__dirname, '../src/display-only.ts');
 
@@ -19,7 +20,7 @@ function runDisplay(stdin: string): string {
       {
         encoding: 'utf-8',
         timeout: 1000,
-        env: { ...process.env, HOME: '/tmp/test-spec-home', NO_COLOR: '1' }
+        env: { ...process.env, HOME: '/tmp/test-spec-home', NO_COLOR: '1', STATUSLINE_WIDTH: '120' }
       }
     );
   } catch (error: any) {
@@ -30,7 +31,9 @@ function runDisplay(stdin: string): string {
 function createHealthFile(sessionId: string, data: object): void {
   const testHome = '/tmp/test-spec-home/.claude/session-health';
   mkdirSync(testHome, { recursive: true });
-  writeFileSync(`${testHome}/${sessionId}.json`, JSON.stringify(data));
+  // Add formattedOutput to health data
+  const healthWithFormatted = withFormattedOutput({ sessionId, ...data });
+  writeFileSync(`${testHome}/${sessionId}.json`, JSON.stringify(healthWithFormatted));
 }
 
 describe('SPEC: Output Format', () => {
@@ -50,22 +53,24 @@ describe('SPEC: Output Format', () => {
   // =========================================================================
   // SPEC: Single Line Output
   // =========================================================================
-  describe('Single Line Format', () => {
-    test('output is a single line with no newline', () => {
+  describe('Multi-Line Format', () => {
+    test('output is multi-line with no trailing newline', () => {
       createHealthFile('single-line', {
         sessionId: 'single-line',
         model: { value: 'Claude' },
         context: { tokensLeft: 100000, percentUsed: 25 },
         git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
-        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        transcript: { exists: true, lastModifiedAgo: '1m', lastMessagePreview: 'Test', isSynced: true },
         billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, isFresh: true },
         alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
       });
 
       const output = runDisplay('{"session_id":"single-line"}');
 
-      expect(output.includes('\n')).toBe(false);
-      expect(output.endsWith('\n')).toBe(false);
+      // New design: Multi-line format (2-3 lines depending on content)
+      const lines = output.split('\n');
+      expect(lines.length).toBeGreaterThanOrEqual(2);  // At least 2 lines
+      expect(output.endsWith('\n')).toBe(false);  // No trailing newline
     });
   });
 
@@ -101,18 +106,21 @@ describe('SPEC: Output Format', () => {
         alerts: {}
       });
 
-      // Very long path
-      const longPath = '/tmp/test-spec-home/very/long/nested/path/to/my-project/src';
+      // Very long path - SPEC: Directory should NEVER be truncated
+      const longPath = '/tmp/test-spec-home/very-long-folder-name-that-exceeds-twenty-characters/path/to/project';
       const output = runDisplay(`{"session_id":"dir-long","start_directory":"${longPath}"}`);
 
       expect(output).toContain('📁:');
-      expect(output).toContain('~/…');  // Should preserve ~ with ellipsis truncation indicator
+      // Full path shown (not truncated per specification)
+      expect(output).toContain('very-long-folder-name');
+      expect(output).toContain('project');
     });
 
-    test('hidden when no directory in stdin', () => {
+    test('uses cached projectPath when no stdin directory (Phase 0)', () => {
+      // NOTE: Phase 0 architecture pre-formats with projectPath
       createHealthFile('dir-missing', {
         sessionId: 'dir-missing',
-        projectPath: '/wrong/daemon/path',  // Should be ignored
+        projectPath: '/cached/daemon/path',  // Used in pre-formatted output
         model: { value: 'Claude' },
         context: { tokensLeft: 100000, percentUsed: 25 },
         git: { branch: '', ahead: 0, behind: 0, dirty: 0 },
@@ -123,8 +131,9 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"dir-missing"}');
 
-      expect(output).not.toContain('📁:');
-      expect(output).not.toContain('wrong');  // Daemon path NOT used
+      // Pre-formatted output includes cached path
+      expect(output).toContain('📁:');
+      expect(output).toContain('/cached/daemon/path');
     });
   });
 
@@ -312,25 +321,27 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"budget-fresh"}');
 
-      // V1 format: XhXm(XX%)HH:MM
-      expect(output).toMatch(/⌛:2h30m\(\d+%\)14:00/);
+      // Format: XhXm(XX%) - NO reset time per Phase 4 of plan
+      expect(output).toContain('⌛:2h30m(');
+      expect(output).toMatch(/\d+%\)/);  // Ends with percent and closing paren
     });
 
-    test('shows 🔴 when stale', () => {
+    test('shows subtle staleness indicator when data is old (>3min)', () => {
       createHealthFile('budget-stale', {
         sessionId: 'budget-stale',
         model: { value: 'Claude' },
         context: { tokensLeft: 100000, percentUsed: 25 },
         git: { branch: '', ahead: 0, behind: 0, dirty: 0 },
         transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-        billing: { costToday: 10, budgetRemaining: 60, resetTime: '14:00', isFresh: false },
+        billing: { costToday: 10, budgetRemaining: 60, resetTime: '14:00', isFresh: false, lastFetched: Date.now() - 15 * 60000 },
         alerts: {}
       });
 
       const output = runDisplay('{"session_id":"budget-stale"}');
 
       expect(output).toContain('⌛:');
-      expect(output).toContain('🔴');
+      // Shows ⚠ warning marker when data is stale (>3 minutes old)
+      expect(output).toContain('⚠');
     });
   });
 
@@ -355,7 +366,7 @@ describe('SPEC: Output Format', () => {
       expect(output).not.toContain('📝:');
     });
 
-    test('shows ⚠ when transcript stale', () => {
+    test('shows age indicator when transcript stale', () => {
       createHealthFile('sync-stale', {
         sessionId: 'sync-stale',
         model: { value: 'Claude' },
@@ -368,10 +379,11 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"sync-stale"}');
 
-      expect(output).toContain('📝:10m⚠');
+      // Redesigned: Subtle indicator shows transcript age (📝:10m) instead of alarming text
+      expect(output).toContain('📝:10m');
     });
 
-    test('shows 🔴 when data loss risk', () => {
+    test('shows warning when data loss risk', () => {
       createHealthFile('sync-risk', {
         sessionId: 'sync-risk',
         model: { value: 'Claude' },
@@ -384,7 +396,8 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"sync-risk"}');
 
-      expect(output).toContain('📝:15m🔴');
+      // Redesigned: Shows age with warning symbol (📝:15m⚠) instead of alarming red dot
+      expect(output).toContain('📝:15m⚠');
     });
   });
 
@@ -456,7 +469,7 @@ describe('SPEC: Output Format', () => {
         git: { branch: '', ahead: 0, behind: 0, dirty: 0 },
         transcript: {
           exists: true,
-          lastModifiedAgo: '1m',
+          lastModifiedAgo: '2m',  // This is what appears in output
           isSynced: true,
           lastMessagePreview: 'This is a very long message that should wrap to next line because it exceeds available space',
           lastMessageAgo: '2m'
@@ -492,8 +505,8 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"alert-secrets"}');
 
-      // New format: 🔐API instead of 🔐SECRETS!(API Key)
-      expect(output).toContain('🔐API');
+      // New format: ⚠️ API (shown at beginning in health status)
+      expect(output).toContain('⚠️ API');
     });
 
     // Note: Stale indicator (⚠Xm) was removed as it was confusing to users
