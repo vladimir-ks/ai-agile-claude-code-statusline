@@ -69,14 +69,20 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
 
   async fetch(sessionId: string): Promise<CCUsageData> {
     // OPTIMIZATION: Check cooldown BEFORE trying to acquire lock
-    // If another session fetched recently AND shared cache is available, skip entirely
-    // But if shared cache is missing/stale, attempt fetch anyway (don't respect cooldown)
+    // If another session fetched recently, return "cooldown active" indicator
+    // Caller (data-gatherer) should check shared billing cache for fresh data
     const cooldownActive = !this.cooldownManager.shouldRun('billing');
 
     if (cooldownActive) {
-      // Cooldown is active - return stale data indicator to signal caller should check shared cache
-      console.error('[CCUsageSharedModule] Billing cooldown active - skipping fetch, will use shared cache');
-      return this.getDefaultData();
+      // Cooldown is active - signal to caller that we intentionally skipped
+      // Caller should use shared billing cache (which has fresh data from recent fetch)
+      // Return special marker: isFresh: false but costUSD: -1 means "check shared cache"
+      console.error('[CCUsageSharedModule] Billing cooldown active - caller should use shared cache');
+      return {
+        ...this.getDefaultData(),
+        costUSD: -1,  // Special marker: -1 means "cooldown, use shared cache"
+        isFresh: false
+      };
     }
 
     // CRITICAL: Acquire system-wide lock to prevent concurrent ccusage spawns

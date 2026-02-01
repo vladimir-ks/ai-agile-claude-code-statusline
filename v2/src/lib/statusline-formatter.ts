@@ -562,10 +562,11 @@ export class StatuslineFormatter {
     const timeMins = String(now.getMinutes()).padStart(2, '0');
     parts.push(`🕐:${c('time')}${timeHours}:${timeMins}${rst()}`);
 
-    // Check data staleness (>3 minutes = stale, add ⚠ to affected data)
+    // Check data staleness (>4 minutes = stale, add ⚠ to affected data)
+    // Note: cooldown is 2min, fresh window is 3min, so 4min threshold avoids false positives
     const lastFetched = health.billing?.lastFetched || health.gatheredAt || Date.now();
     const ageMinutes = Math.floor((Date.now() - lastFetched) / 60000);
-    const isStale = ageMinutes >= 3;
+    const isStale = ageMinutes >= 4;
     const staleMarker = isStale ? `${c('critical')}⚠${rst()}` : '';
 
     // Budget

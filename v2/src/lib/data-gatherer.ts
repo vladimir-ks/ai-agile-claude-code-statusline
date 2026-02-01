@@ -208,7 +208,20 @@ class DataGatherer {
         // OAuth failed - fallback to ccusage (legacy, no weekly quota)
         try {
           const billingData = await this.ccusageModule.fetch(sessionId);
-          if (billingData && billingData.isFresh) {
+
+          // Check for cooldown marker (costUSD: -1 means "cooldown active, use shared cache")
+          if (billingData && billingData.costUSD === -1) {
+            // Cooldown active - use shared cache as fresh data (it was fetched recently)
+            if (sharedBilling?.costToday > 0 && sharedBilling?.lastFetched) {
+              const ageMs = Date.now() - sharedBilling.lastFetched;
+              // If shared cache is < 3 minutes old, treat as fresh (cooldown is 2min)
+              const stillFresh = ageMs < 180000;
+              health.billing = { ...sharedBilling, isFresh: stillFresh };
+              console.error(`[DataGatherer] Using shared cache (age: ${Math.floor(ageMs/1000)}s, fresh: ${stillFresh})`);
+            } else if (existingHealth?.billing?.costToday > 0) {
+              health.billing = { ...existingHealth.billing, isFresh: false };
+            }
+          } else if (billingData && billingData.isFresh) {
             const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
             health.billing = {
               costToday: billingData.costUSD || 0,
