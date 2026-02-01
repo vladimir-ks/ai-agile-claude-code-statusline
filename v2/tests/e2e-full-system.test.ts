@@ -77,7 +77,7 @@ describe('E2E: Full System Integration', () => {
 
     // 5. Test display-only-v2 with this session
     const output = execSync(
-      `echo '{"session_id":"test-session-full"}' | bun src/display-only-v2.ts`,
+      `echo '{"session_id":"test-session-full"}' | bun ${__dirname}/../src/display-only-v2.ts`,
       {
         encoding: 'utf-8',
         env: { ...process.env, HOME: TEST_HOME, STATUSLINE_WIDTH: '120' }
@@ -96,7 +96,7 @@ describe('E2E: Full System Integration', () => {
     const widths = [40, 60, 80, 100, 120, 150, 200];
     for (const width of widths) {
       const widthOutput = execSync(
-        `echo '{"session_id":"test-session-full"}' | bun src/display-only-v2.ts`,
+        `echo '{"session_id":"test-session-full"}' | bun ${__dirname}/../src/display-only-v2.ts`,
         {
           encoding: 'utf-8',
           env: { ...process.env, HOME: TEST_HOME, STATUSLINE_WIDTH: String(width) }
@@ -130,7 +130,7 @@ describe('E2E: Full System Integration', () => {
     // Verify each session can be displayed
     for (const sessionId of sessionIds) {
       const output = execSync(
-        `echo '{"session_id":"${sessionId}"}' | bun src/display-only-v2.ts`,
+        `echo '{"session_id":"${sessionId}"}' | bun ${__dirname}/../src/display-only-v2.ts`,
         {
           encoding: 'utf-8',
           env: { ...process.env, HOME: TEST_HOME }
@@ -149,7 +149,7 @@ describe('E2E: Full System Integration', () => {
     for (let i = 0; i < iterations; i++) {
       const start = performance.now();
       execSync(
-        `echo '{"session_id":"test-session-full"}' | bun src/display-only-v2.ts`,
+        `echo '{"session_id":"test-session-full"}' | bun ${__dirname}/../src/display-only-v2.ts`,
         {
           encoding: 'utf-8',
           env: { ...process.env, HOME: TEST_HOME }

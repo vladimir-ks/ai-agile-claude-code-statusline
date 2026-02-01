@@ -181,7 +181,7 @@ describe('E2E: YAML-based Display System', () => {
 
     for (const width of testWidths) {
       const output = execSync(
-        `echo '{"session_id":"test-e2e-123"}' | bun src/display-only-v2.ts`,
+        `echo '{"session_id":"test-e2e-123"}' | bun ${join(__dirname, '../src/display-only-v2.ts')}`,
         {
           encoding: 'utf-8',
           env: { ...process.env, HOME: TEST_HOME, STATUSLINE_WIDTH: String(width) }
@@ -217,7 +217,7 @@ describe('E2E: YAML-based Display System', () => {
 
     // Request non-existent session
     const output = execSync(
-      `echo '{"session_id":"missing-session"}' | bun src/display-only-v2.ts`,
+      `echo '{"session_id":"missing-session"}' | bun ${join(__dirname, '../src/display-only-v2.ts')}`,
       {
         encoding: 'utf-8',
         env: { ...process.env, HOME: TEST_HOME }
@@ -234,7 +234,7 @@ describe('E2E: YAML-based Display System', () => {
     }
 
     const output = execSync(
-      `echo '{"session_id":"any-session"}' | bun src/display-only-v2.ts`,
+      `echo '{"session_id":"any-session"}' | bun ${join(__dirname, '../src/display-only-v2.ts')}`,
       {
         encoding: 'utf-8',
         env: { ...process.env, HOME: TEST_HOME }
@@ -249,7 +249,7 @@ describe('E2E: YAML-based Display System', () => {
     writeFileSync(RUNTIME_STATE_PATH, 'invalid: yaml: content: [[[', 'utf-8');
 
     const output = execSync(
-      `echo '{"session_id":"any-session"}' | bun src/display-only-v2.ts`,
+      `echo '{"session_id":"any-session"}' | bun ${join(__dirname, '../src/display-only-v2.ts')}`,
       {
         encoding: 'utf-8',
         env: { ...process.env, HOME: TEST_HOME }
@@ -281,7 +281,7 @@ describe('E2E: YAML-based Display System', () => {
     // Measure execution time
     const start = performance.now();
     execSync(
-      `echo '{"session_id":"speed-test"}' | bun src/display-only-v2.ts`,
+      `echo '{"session_id":"speed-test"}' | bun ${join(__dirname, '../src/display-only-v2.ts')}`,
       {
         encoding: 'utf-8',
         env: { ...process.env, HOME: TEST_HOME }
