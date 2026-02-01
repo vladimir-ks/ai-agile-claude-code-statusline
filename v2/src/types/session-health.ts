@@ -140,6 +140,7 @@ export interface SessionHealth {
     width120: string[];    // Lines for 120-char terminal (default)
     width150: string[];    // Lines for 150-char terminal
     width200: string[];    // Lines for 200-char terminal
+    singleLine: string[];  // Single line for no-tmux (max 240 chars)
   };
 }
 

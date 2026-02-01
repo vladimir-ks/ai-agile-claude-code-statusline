@@ -741,3 +741,132 @@ describe('Staleness Indicator', () => {
     expect(output).toContain(`🕐:${currentHour}:${currentMin}`);
   });
 });
+
+describe('Model Abbreviations', () => {
+  test('Opus4.5 abbreviates to o-4.5', () => {
+    const health = createDefaultHealth('opus-abbrev');
+    health.projectPath = '~/very/long/path/that/forces/abbreviation';
+    health.git = { branch: 'long-branch-name', ahead: 5, behind: 2, dirty: 10, lastChecked: Date.now() };
+    health.model = { value: 'Opus4.5', isFresh: true };
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Should abbreviate to o-4.5 when tight
+    expect(narrow).toContain('o-4.5');
+  });
+
+  test('Sonnet4.5 abbreviates to s-4.5', () => {
+    const health = createDefaultHealth('sonnet-abbrev');
+    health.projectPath = '~/very/long/path/that/forces/abbreviation';
+    health.git = { branch: 'long-branch-name', ahead: 5, behind: 2, dirty: 10, lastChecked: Date.now() };
+    health.model = { value: 'Sonnet4.5', isFresh: true };
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Should abbreviate to s-4.5 when tight
+    expect(narrow).toContain('s-4.5');
+  });
+
+  test('Haiku4.5 abbreviates to h-4.5', () => {
+    const health = createDefaultHealth('haiku-abbrev');
+    health.projectPath = '~/very/long/path/that/forces/abbreviation';
+    health.git = { branch: 'long-branch-name', ahead: 5, behind: 2, dirty: 10, lastChecked: Date.now() };
+    health.model = { value: 'Haiku4.5', isFresh: true };
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Should abbreviate to h-4.5 when tight
+    expect(narrow).toContain('h-4.5');
+  });
+
+  test('Unknown models keep full name', () => {
+    const health = createDefaultHealth('unknown-model');
+    health.projectPath = '~/project';
+    health.model = { value: 'GPT-4-turbo', isFresh: true };
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width200.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Unknown model should keep full name
+    expect(output).toContain('GPT-4-turbo');
+  });
+});
+
+describe('Single Line Mode (No Tmux)', () => {
+  test('singleLine variant is generated', () => {
+    const health = createDefaultHealth('single-line');
+    health.projectPath = '~/project';
+    health.billing = {
+      costToday: 50,
+      burnRatePerHour: 20,
+      budgetRemaining: 60,
+      budgetPercentUsed: 50,
+      resetTime: '14:00',
+      totalTokens: 500000,
+      tokensPerMinute: 10000,
+      isFresh: true,
+      lastFetched: Date.now()
+    };
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+
+    expect(variants.singleLine).toBeDefined();
+    expect(Array.isArray(variants.singleLine)).toBe(true);
+    expect(variants.singleLine.length).toBe(1); // Single line
+  });
+
+  test('singleLine respects max length of 240 chars', () => {
+    const health = createDefaultHealth('single-line-max');
+    health.projectPath = '~/project';
+    health.billing = {
+      costToday: 50,
+      burnRatePerHour: 20,
+      budgetRemaining: 60,
+      budgetPercentUsed: 50,
+      resetTime: '14:00',
+      isFresh: true,
+      lastFetched: Date.now()
+    };
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const singleLine = variants.singleLine[0].replace(/\x1b\[[0-9;]*m/g, '');
+
+    expect(singleLine.length).toBeLessThanOrEqual(240);
+  });
+
+  test('singleLine shrinks components when needed', () => {
+    const health = createDefaultHealth('single-line-shrink');
+    health.projectPath = '~/very/long/project/path/that/takes/up/space';
+    health.git = { branch: 'feature-branch-with-long-name', ahead: 10, behind: 5, dirty: 20, lastChecked: Date.now() };
+    health.model = { value: 'Opus4.5', isFresh: true };
+    health.context = { tokensLeft: 100000, tokensUsed: 100000, percentUsed: 50, windowSize: 200000, nearCompaction: false };
+    health.billing = {
+      costToday: 100,
+      burnRatePerHour: 30,
+      budgetRemaining: 30,
+      budgetPercentUsed: 75,
+      weeklyBudgetRemaining: 48,
+      weeklyBudgetPercentUsed: 60,
+      weeklyResetDay: 'Thu',
+      resetTime: '14:00',
+      totalTokens: 1000000,
+      tokensPerMinute: 50000,
+      isFresh: true,
+      lastFetched: Date.now()
+    };
+    health.transcript = { ...health.transcript, messageCount: 5000 };
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const singleLine = variants.singleLine[0].replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Should be within max length
+    expect(singleLine.length).toBeLessThanOrEqual(240);
+
+    // Should contain essential components
+    expect(singleLine).toContain('📁:');
+    expect(singleLine).toContain('🕐:');
+  });
+});

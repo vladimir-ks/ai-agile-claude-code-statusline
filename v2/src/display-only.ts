@@ -575,35 +575,37 @@ function display(): void {
     // All formatting logic moved to StatuslineFormatter in data-daemon (background)
     // Display-only just looks up pre-formatted variant for current terminal width
 
-    const paneWidth = parseInt(process.env.STATUSLINE_WIDTH || '120', 10);
+    // Get terminal width from environment (0 or undefined = no tmux/unknown)
+    const paneWidthRaw = process.env.STATUSLINE_WIDTH;
+    const paneWidth = paneWidthRaw ? parseInt(paneWidthRaw, 10) : 0;
+    const noTmux = !paneWidth || paneWidth <= 0;
+
     let variant: string[];
 
     // Check if stdin has overrides (directory or model) that differ from cached health
     const hasStdinOverrides = (stdinDirectory && stdinDirectory !== health.projectPath) ||
                                (stdinModel && stdinModel !== health.model?.value);
 
-    if (health.formattedOutput && !hasStdinOverrides) {
-      // Use pre-formatted variant for current terminal width (fast path)
-      // Only when stdin doesn't override cached data
-      if (paneWidth <= 50) {
-        variant = health.formattedOutput.width40;
-      } else if (paneWidth <= 70) {
-        variant = health.formattedOutput.width60;
-      } else if (paneWidth <= 90) {
-        variant = health.formattedOutput.width80;
-      } else if (paneWidth <= 110) {
-        variant = health.formattedOutput.width100;
-      } else if (paneWidth <= 135) {
-        variant = health.formattedOutput.width120;
-      } else if (paneWidth <= 175) {
-        variant = health.formattedOutput.width150;
-      } else {
-        variant = health.formattedOutput.width200;
+    // Helper to select variant based on width
+    const selectVariant = (variants: any): string[] => {
+      if (noTmux) {
+        // No tmux: use single-line mode (max 240 chars)
+        return variants.singleLine || variants.width120;
       }
+      if (paneWidth <= 50) return variants.width40;
+      if (paneWidth <= 70) return variants.width60;
+      if (paneWidth <= 90) return variants.width80;
+      if (paneWidth <= 110) return variants.width100;
+      if (paneWidth <= 135) return variants.width120;
+      if (paneWidth <= 175) return variants.width150;
+      return variants.width200;
+    };
+
+    if (health.formattedOutput && !hasStdinOverrides) {
+      // Use pre-formatted variant (fast path)
+      variant = selectVariant(health.formattedOutput);
     } else {
       // Fallback: Generate on-the-fly (backwards compatibility until daemon runs)
-      // This ensures the statusline works immediately even before formattedOutput is generated
-
       // Merge stdin data (start_directory, model) into health before formatting
       const healthWithStdin = { ...health } as any;
       if (stdinDirectory) {
@@ -615,21 +617,7 @@ function display(): void {
       }
 
       const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin);
-      if (paneWidth <= 50) {
-        variant = allVariants.width40;
-      } else if (paneWidth <= 70) {
-        variant = allVariants.width60;
-      } else if (paneWidth <= 90) {
-        variant = allVariants.width80;
-      } else if (paneWidth <= 110) {
-        variant = allVariants.width100;
-      } else if (paneWidth <= 135) {
-        variant = allVariants.width120;
-      } else if (paneWidth <= 175) {
-        variant = allVariants.width150;
-      } else {
-        variant = allVariants.width200;
-      }
+      variant = selectVariant(allVariants);
     }
 
     // Output with newlines between lines (NO trailing newline)

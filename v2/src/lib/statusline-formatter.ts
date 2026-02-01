@@ -40,8 +40,14 @@ const rst = () =>
   (process.env.NO_COLOR === '1' || process.env.NO_COLOR === 'true') ? '' : COLORS.reset;
 
 export class StatuslineFormatter {
+  // Max length for single-line mode (no tmux/unknown width)
+  private static readonly SINGLE_LINE_MAX_LENGTH = 240;
+  // Fixed length for last message preview in single-line mode
+  private static readonly SINGLE_LINE_MSG_LENGTH = 50;
+
   /**
    * Generate pre-formatted output for all terminal widths
+   * Includes a special 'singleLine' variant for no-tmux environments
    */
   static formatAllVariants(health: SessionHealth): SessionHealth['formattedOutput'] {
     return {
@@ -51,15 +57,108 @@ export class StatuslineFormatter {
       width100: this.formatForWidth(health, 100),
       width120: this.formatForWidth(health, 120),
       width150: this.formatForWidth(health, 150),
-      width200: this.formatForWidth(health, 200)
+      width200: this.formatForWidth(health, 200),
+      singleLine: this.formatSingleLine(health)
     };
   }
 
   /**
-   * Format statusline for specific terminal width
+   * Format as single line for environments without tmux/unknown terminal width
    *
-   * IMPORTANT: Use only 80% of terminal width to avoid rendering issues
-   * when tmux status text appears in the corner.
+   * All components on one line, max 240 chars total.
+   * Last message preview fixed at 50 chars.
+   * Same shrink/drop rules apply when line gets too long.
+   */
+  private static formatSingleLine(health: SessionHealth): string[] {
+    const maxLen = this.SINGLE_LINE_MAX_LENGTH;
+    const msgLen = this.SINGLE_LINE_MSG_LENGTH;
+
+    // Build all components
+    const dir = this.fmtDirectory(health.projectPath);
+    const git = this.fmtGit(health, maxLen);
+    const modelFull = this.fmtModel(health, false);
+    const modelAbbrev = this.fmtModel(health, true);
+
+    // Context variants
+    const ctxFull = this.fmtContextFull(health);
+    const ctxMedium = this.fmtContextMedium(health);
+    const ctxShort = this.fmtContextShort(health);
+    const ctxMinimal = this.fmtContextMinimal(health);
+
+    // Time/Budget/Weekly (required)
+    const timeBudget = this.fmtTimeBudgetLine(health);
+
+    // Optional components
+    const costToday = health.billing?.costToday || 0;
+    const burnRate = health.billing?.burnRatePerHour || 0;
+    const costFull = (costToday >= 0.01 || burnRate >= 0.01)
+      ? `💰:${c('cost')}${this.formatMoney(costToday)}${rst()}|${c('burnRate')}${this.formatMoney(burnRate)}/h${rst()}`
+      : '';
+    const costOnly = (costToday >= 0.01)
+      ? `💰:${c('cost')}${this.formatMoney(costToday)}${rst()}`
+      : '';
+
+    const totalTokens = health.billing?.totalTokens || 0;
+    const tokensPerMin = health.billing?.tokensPerMinute || null;
+    const usage = (totalTokens >= 100000)
+      ? `📊:${c('usage')}${this.formatTokens(totalTokens)}tok${tokensPerMin ? `(${this.formatTokens(tokensPerMin)}tpm)` : ''}${rst()}`
+      : '';
+
+    const turns = health.transcript?.messageCount || 0;
+    const turnsComp = (turns >= 1000)
+      ? `💬:${c('turns')}${this.formatTokens(turns)}t${rst()}`
+      : '';
+
+    // Last message (fixed length)
+    const lastMsg = this.buildLine3(health, msgLen);
+
+    // Calculate available space for optional parts
+    // Reserve: dir + git + timeBudget + lastMsg + separators
+    const requiredWidth = this.visibleWidth([dir, git, timeBudget, lastMsg].filter(Boolean).join(' '));
+    const availableForOptional = maxLen - requiredWidth - 5;
+
+    // Try to fit components with shrink/drop logic
+    const tryFit = (components: string[]): string | null => {
+      const line = [...components, lastMsg].filter(Boolean).join(' ');
+      return this.visibleWidth(line) <= maxLen ? line : null;
+    };
+
+    // Try combinations in order of preference
+    const combinations = [
+      // Full everything
+      [dir, git, modelFull, ctxFull, timeBudget, costFull, usage, turnsComp],
+      // Shrink context
+      [dir, git, modelFull, ctxMedium, timeBudget, costFull, usage, turnsComp],
+      [dir, git, modelFull, ctxShort, timeBudget, costFull, usage, turnsComp],
+      [dir, git, modelFull, ctxMinimal, timeBudget, costFull, usage, turnsComp],
+      // Abbreviate model
+      [dir, git, modelAbbrev, ctxShort, timeBudget, costFull, usage, turnsComp],
+      [dir, git, modelAbbrev, ctxMinimal, timeBudget, costFull, usage, turnsComp],
+      // Drop turns
+      [dir, git, modelAbbrev, ctxMinimal, timeBudget, costFull, usage],
+      // Drop usage
+      [dir, git, modelAbbrev, ctxMinimal, timeBudget, costFull],
+      // Drop burn rate
+      [dir, git, modelAbbrev, ctxMinimal, timeBudget, costOnly],
+      // Drop cost
+      [dir, git, modelAbbrev, ctxMinimal, timeBudget],
+      // Minimal (just required)
+      [dir, git, timeBudget],
+    ];
+
+    for (const combo of combinations) {
+      const result = tryFit(combo);
+      if (result) return [result];
+    }
+
+    // Fallback: just the basics
+    return [[dir, git, timeBudget, lastMsg].filter(Boolean).join(' ')];
+  }
+
+  /**
+   * Format statusline for specific terminal width (multi-line mode)
+   *
+   * Uses 80% of terminal width to avoid rendering issues with tmux corner text.
    *
    * Adaptive overflow rules:
    * - Line 1: Directory + Git (ALWAYS), Model + Context (if they fit)
@@ -67,7 +166,6 @@ export class StatuslineFormatter {
    * - Line 3: Last message preview
    */
   private static formatForWidth(health: SessionHealth, width: number): string[] {
-    // Use only 80% of terminal width to prevent rendering issues
     // Use only 80% of terminal width to prevent rendering issues
     const effectiveWidth = Math.floor(width * 0.80);
     const lines: string[] = [];
@@ -378,9 +476,14 @@ export class StatuslineFormatter {
     model = model.replace(/\s+/g, ''); // Remove spaces
 
     if (abbreviated) {
-      // Only abbreviate Opus: Opus4.5 → o-4.5
-      // Other models (Sonnet, Haiku, Claude) keep full name, just wrap to L2
-      model = model.replace(/^Opus/i, 'o-');
+      // Abbreviate known models:
+      // Opus4.5 → o-4.5, Sonnet4.5 → s-4.5, Haiku4.5 → h-4.5, Claude → c
+      model = model
+        .replace(/^Opus/i, 'o-')
+        .replace(/^Sonnet/i, 's-')
+        .replace(/^Haiku/i, 'h-')
+        .replace(/^Claude$/i, 'c');
+      // Unknown models keep full name (e.g., GPT-4, Gemini, etc.)
     }
 
     return `🤖:${c('model')}${model}${rst()}`;
