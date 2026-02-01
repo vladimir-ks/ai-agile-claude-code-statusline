@@ -49,8 +49,16 @@ export interface BillingInfo {
   budgetRemaining: number;     // minutes
   budgetPercentUsed: number;
   resetTime: string;           // "14:00" UTC
+  totalTokens?: number;        // Total tokens consumed today
+  tokensPerMinute?: number | null; // Recent token consumption rate
   isFresh: boolean;
   lastFetched: number;
+
+  // Weekly quota (from OAuth API)
+  weeklyBudgetRemaining?: number;      // Hours until weekly reset (rounded down)
+  weeklyBudgetPercentUsed?: number;    // Percentage of weekly quota used
+  weeklyResetDay?: string;             // "Mon", "Tue", etc.
+  weeklyLimitUSD?: number;             // Weekly quota limit in USD
 }
 
 export interface SessionAlerts {
@@ -66,11 +74,44 @@ export interface HealthStatus {
   issues: string[];
 }
 
+export interface LaunchContext {
+  authProfile: string;         // Auth profile ID (from env var, path mapping, or fingerprint)
+  detectionMethod: 'env' | 'path' | 'fingerprint' | 'default';
+  launchAlias?: string;        // Original alias used (claude1, claude2, etc.)
+  shellCommand?: string;       // Full command if detectable
+}
+
+export interface TmuxContext {
+  session: string;             // Tmux session name (e.g., "main")
+  window: string;              // Window index (e.g., "1")
+  pane: string;                // Pane index (e.g., "0")
+  width: number;               // Pane width in columns
+  height: number;              // Pane height in rows
+}
+
+export interface ProjectMetadata {
+  language?: string;           // Detected primary language
+  gitRemote?: string;          // Remote URL if git repo
+  repoName?: string;           // Extracted from remote or directory
+}
+
+export interface PerformanceMetrics {
+  gatherDuration?: number;     // ms to gather all data
+  billingFetchDuration?: number; // ms to fetch billing
+  transcriptScanDuration?: number; // ms to scan transcript
+}
+
 export interface SessionHealth {
   // Identity
   sessionId: string;
   projectPath: string;
   transcriptPath: string;
+
+  // Launch Context
+  launch: LaunchContext;
+
+  // Tmux Context (if running in tmux)
+  tmux?: TmuxContext;
 
   // Health
   health: HealthStatus;
@@ -81,8 +122,25 @@ export interface SessionHealth {
   billing: BillingInfo;
   alerts: SessionAlerts;
 
+  // Additional Metadata (NEW)
+  project?: ProjectMetadata;
+  performance?: PerformanceMetrics;
+
   // Timestamps
   gatheredAt: number;
+  firstSeen?: number;          // When session was first detected
+  sessionDuration?: number;    // ms since first seen
+
+  // Pre-formatted output for different terminal widths (NEW - Phase 0)
+  formattedOutput?: {
+    width40: string[];     // Lines for 40-char terminal
+    width60: string[];     // Lines for 60-char terminal
+    width80: string[];     // Lines for 80-char terminal
+    width100: string[];    // Lines for 100-char terminal
+    width120: string[];    // Lines for 120-char terminal (default)
+    width150: string[];    // Lines for 150-char terminal
+    width200: string[];    // Lines for 200-char terminal
+  };
 }
 
 // ============================================================================
@@ -213,6 +271,10 @@ export function createDefaultHealth(sessionId: string): SessionHealth {
     sessionId,
     projectPath: '',
     transcriptPath: '',
+    launch: {
+      authProfile: 'default',
+      detectionMethod: 'default'
+    },
     health: {
       status: 'unknown',
       lastUpdate: Date.now(),
@@ -254,6 +316,8 @@ export function createDefaultHealth(sessionId: string): SessionHealth {
       budgetRemaining: 0,
       budgetPercentUsed: 0,
       resetTime: '',
+      totalTokens: 0,
+      tokensPerMinute: null,
       isFresh: false,
       lastFetched: 0
     },
@@ -263,7 +327,8 @@ export function createDefaultHealth(sessionId: string): SessionHealth {
       transcriptStale: false,
       dataLossRisk: false
     },
-    gatheredAt: Date.now()
+    gatheredAt: Date.now(),
+    firstSeen: Date.now()
   };
 }
 

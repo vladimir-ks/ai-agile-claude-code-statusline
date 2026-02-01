@@ -15,6 +15,7 @@
 import HealthStore from './health-store';
 import TranscriptMonitor from './transcript-monitor';
 import ModelResolver from './model-resolver';
+import { StatuslineFormatter } from './statusline-formatter';
 import {
   SessionHealth,
   ClaudeCodeInput,
@@ -31,9 +32,14 @@ import { execSync } from 'child_process';
 // Import existing modules for git and billing
 import GitModule from '../modules/git-module';
 import CCUsageSharedModule from '../modules/ccusage-shared-module';
+import { AnthropicOAuthAPI } from '../modules/anthropic-oauth-api';
 import IncrementalTranscriptScanner from './incremental-transcript-scanner';
 import GitLeaksScanner from './gitleaks-scanner';
 import CleanupManager from './cleanup-manager';
+import RuntimeStateStore from './runtime-state-store';
+import { sessionHealthToRuntimeSession } from '../types/runtime-state';
+import { AuthProfileDetector } from '../modules/auth-profile-detector';
+import { SubscriptionReader } from './subscription-reader';
 
 class DataGatherer {
   private healthStore: HealthStore;
@@ -44,6 +50,7 @@ class DataGatherer {
   private modelResolver: ModelResolver;
   private gitModule: GitModule;
   private ccusageModule: CCUsageSharedModule;
+  private runtimeStateStore: RuntimeStateStore;
 
   constructor(healthStorePath?: string) {
     this.healthStore = new HealthStore(healthStorePath);
@@ -52,6 +59,7 @@ class DataGatherer {
     this.gitleaksScanner = new GitLeaksScanner();
     this.cleanupManager = new CleanupManager(healthStorePath);
     this.modelResolver = new ModelResolver();
+    this.runtimeStateStore = new RuntimeStateStore(healthStorePath);
     this.gitModule = new GitModule({
       id: 'git',
       name: 'Git Module',
@@ -65,6 +73,11 @@ class DataGatherer {
       cacheTTL: 120000,  // 2min cooldown
       timeout: 25000
     });
+
+    // Ensure runtime state is initialized (migrate from old files if needed)
+    this.runtimeStateStore.migrate().catch(() => {
+      // Ignore migration errors - will create default on first write
+    });
   }
 
   /**
@@ -75,13 +88,44 @@ class DataGatherer {
     transcriptPath: string | null,
     jsonInput: ClaudeCodeInput | null
   ): Promise<SessionHealth> {
+    const startTime = Date.now();
     const health = createDefaultHealth(sessionId);
-    health.gatheredAt = Date.now();
+    health.gatheredAt = startTime;
 
     // Set paths
     health.transcriptPath = transcriptPath || '';
     // Priority: 1) start_directory from JSON, 2) cwd from environment, 3) decoded transcript path
     health.projectPath = jsonInput?.start_directory || process.cwd() || this.extractProjectPath(transcriptPath);
+
+    // Preserve firstSeen from existing health (if this is not a new session)
+    const existingHealth = this.healthStore.readSessionHealth(sessionId);
+    if (existingHealth?.firstSeen) {
+      health.firstSeen = existingHealth.firstSeen;
+      health.sessionDuration = Date.now() - existingHealth.firstSeen;
+    } else {
+      health.firstSeen = Date.now();
+      health.sessionDuration = 0;
+    }
+
+    // 0. Auth profile detection (run early before billing fetch)
+    // We'll update this later once we have billing data
+    const authProfiles = this.runtimeStateStore.read().authProfiles;
+    health.launch = AuthProfileDetector.detectProfile(
+      health.projectPath,
+      existingHealth?.billing || null,
+      authProfiles
+    );
+
+    // 0b. Tmux context capture (if running in tmux)
+    if (process.env.TMUX_SESSION_NAME) {
+      health.tmux = {
+        session: process.env.TMUX_SESSION_NAME,
+        window: process.env.TMUX_WINDOW_INDEX || '0',
+        pane: process.env.TMUX_PANE_INDEX || '0',
+        width: parseInt(process.env.STATUSLINE_WIDTH || '120', 10),
+        height: parseInt(process.env.TMUX_PANE_HEIGHT || '30', 10)
+      };
+    }
 
     // 1. Transcript health (critical for data loss detection)
     // OPTIMIZATION: Use incremental scanner for 20x speedup
@@ -114,8 +158,8 @@ class DataGatherer {
 
     // 5. Billing data - SHARED across all sessions (billing is global, not per-session)
     // Use a shared cache file so lock contention doesn't leave sessions without data
+    const billingStartTime = Date.now();
     const sharedBillingPath = `${homedir()}/.claude/session-health/billing-shared.json`;
-    const existingHealth = this.healthStore.readSessionHealth(sessionId);
 
     // Read shared billing cache (available to all sessions)
     let sharedBilling: any = null;
@@ -133,45 +177,106 @@ class DataGatherer {
       // Use shared billing data (another session fetched it recently)
       health.billing = { ...sharedBilling };
     } else {
-      // Try to fetch fresh billing data
+      // Try OAuth API first (authoritative source with weekly quota)
+      let oauthBilling: BillingInfo | null = null;
       try {
-        const billingData = await this.ccusageModule.fetch(sessionId);
-        if (billingData && billingData.isFresh) {
-          const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
-          health.billing = {
-            costToday: billingData.costUSD || 0,
-            burnRatePerHour: billingData.costPerHour || 0,
-            budgetRemaining: totalMinutes,
-            budgetPercentUsed: billingData.percentageUsed || 0,
-            resetTime: billingData.resetTime || '',
-            totalTokens: billingData.totalTokens || 0,
-            tokensPerMinute: billingData.tokensPerMinute || null,
-            isFresh: true,
-            lastFetched: Date.now()
-          };
-
-          // CRITICAL: Write to shared cache so other sessions can use it (atomic write)
-          try {
-            const tempPath = `${sharedBillingPath}.tmp`;
-            writeFileSync(tempPath, JSON.stringify(health.billing), { encoding: 'utf-8', mode: 0o600 });
-            renameSync(tempPath, sharedBillingPath);
-          } catch { /* ignore write errors */ }
-
-        } else if (sharedBilling?.costToday > 0) {
-          // Lock failed but we have shared data - use it (mark as slightly stale)
-          health.billing = { ...sharedBilling, isFresh: sharedBilling.isFresh };
-        } else if (existingHealth?.billing?.costToday > 0) {
-          // Fallback to session's own old data
-          health.billing = { ...existingHealth.billing, isFresh: false };
-        }
+        oauthBilling = await AnthropicOAuthAPI.fetchUsage(health.launch.authProfile);
       } catch {
-        // ccusage failed - use shared or existing data
-        if (sharedBilling?.costToday > 0) {
-          health.billing = { ...sharedBilling, isFresh: false };
-        } else if (existingHealth?.billing?.costToday > 0) {
-          health.billing = { ...existingHealth.billing, isFresh: false };
+        // OAuth failed - will fall back to ccusage
+      }
+
+      if (oauthBilling && oauthBilling.isFresh) {
+        // OAuth success - use authoritative data (includes weekly quota)
+        health.billing = oauthBilling;
+
+        // CRITICAL: Write to shared cache so other sessions can use it (atomic write)
+        try {
+          const tempPath = `${sharedBillingPath}.tmp`;
+          writeFileSync(tempPath, JSON.stringify(health.billing), { encoding: 'utf-8', mode: 0o600 });
+          renameSync(tempPath, sharedBillingPath);
+        } catch { /* ignore write errors */ }
+
+        // Re-detect auth profile with fresh billing data (fingerprinting)
+        health.launch = AuthProfileDetector.detectProfile(
+          health.projectPath,
+          health.billing,
+          authProfiles
+        );
+
+      } else {
+        // OAuth failed - fallback to ccusage (legacy, no weekly quota)
+        try {
+          const billingData = await this.ccusageModule.fetch(sessionId);
+          if (billingData && billingData.isFresh) {
+            const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
+            health.billing = {
+              costToday: billingData.costUSD || 0,
+              burnRatePerHour: billingData.costPerHour || 0,
+              budgetRemaining: totalMinutes,
+              budgetPercentUsed: billingData.percentageUsed || 0,
+              resetTime: billingData.resetTime || '',
+              totalTokens: billingData.totalTokens || 0,
+              tokensPerMinute: billingData.tokensPerMinute || null,
+              isFresh: true,
+              lastFetched: Date.now()
+              // No weekly quota from ccusage
+            };
+
+            // CRITICAL: Write to shared cache so other sessions can use it (atomic write)
+            try {
+              const tempPath = `${sharedBillingPath}.tmp`;
+              writeFileSync(tempPath, JSON.stringify(health.billing), { encoding: 'utf-8', mode: 0o600 });
+              renameSync(tempPath, sharedBillingPath);
+            } catch { /* ignore write errors */ }
+
+            // Re-detect auth profile with fresh billing data (fingerprinting)
+            health.launch = AuthProfileDetector.detectProfile(
+              health.projectPath,
+              health.billing,
+              authProfiles
+            );
+
+          } else if (sharedBilling?.costToday > 0) {
+            // Lock failed but we have shared data - use it (mark as slightly stale)
+            health.billing = { ...sharedBilling, isFresh: sharedBilling.isFresh };
+          } else if (existingHealth?.billing?.costToday > 0) {
+            // Fallback to session's own old data
+            health.billing = { ...existingHealth.billing, isFresh: false };
+          }
+        } catch {
+          // Both OAuth and ccusage failed - use shared or existing data
+          if (sharedBilling?.costToday > 0) {
+            health.billing = { ...sharedBilling, isFresh: false };
+          } else if (existingHealth?.billing?.costToday > 0) {
+            health.billing = { ...existingHealth.billing, isFresh: false };
+          }
         }
       }
+    }
+
+    // 5b. Merge subscription data for quotas (user-managed YAML file)
+    // CRITICAL: subscription.yaml is the AUTHORITATIVE source for quota percentages
+    // It ALWAYS overwrites data from other sources (OAuth, shared cache)
+    // because the user manually updates it from claude.ai/settings/usage
+
+    // Weekly quota
+    const subscriptionQuota = SubscriptionReader.getWeeklyQuota();
+    if (subscriptionQuota) {
+      health.billing.weeklyBudgetRemaining = subscriptionQuota.hoursRemaining;
+      health.billing.weeklyBudgetPercentUsed = subscriptionQuota.percentUsed;
+      health.billing.weeklyResetDay = subscriptionQuota.resetDay;
+    } else {
+      // No subscription.yaml - clear weekly data to avoid stale values
+      health.billing.weeklyBudgetRemaining = undefined;
+      health.billing.weeklyBudgetPercentUsed = undefined;
+      health.billing.weeklyResetDay = undefined;
+    }
+
+    // Daily session quota (if user has it in subscription.yaml)
+    const sessionQuota = SubscriptionReader.getCurrentSessionQuota();
+    if (sessionQuota && sessionQuota.percentUsed > 0) {
+      // Use subscription.yaml percentage if available (more accurate than ccusage calculation)
+      health.billing.budgetPercentUsed = sessionQuota.percentUsed;
     }
 
     // 6. Secrets scan (if transcript exists)
@@ -201,21 +306,62 @@ class DataGatherer {
     // 8. Calculate overall health status
     health.health = this.calculateOverallHealth(health, config);
 
-    // 9. Write to health store
+    // 9. Add project metadata and performance metrics
+    health.project = {
+      language: AuthProfileDetector.detectProjectLanguage(health.projectPath),
+      gitRemote: this.extractGitRemote(health.projectPath),
+      repoName: AuthProfileDetector.extractRepoName(
+        health.projectPath,
+        this.extractGitRemote(health.projectPath)
+      )
+    };
+
+    health.performance = {
+      gatherDuration: Date.now() - startTime,
+      billingFetchDuration: health.billing.isFresh ? (Date.now() - billingStartTime) : undefined,
+      transcriptScanDuration: undefined // Will be added by incremental scanner if available
+    };
+
+    // 10. Pre-format output for all terminal widths (Phase 0: Performance Architecture)
+    // CRITICAL: Must happen BEFORE writeSessionHealth() so formattedOutput is included in JSON
+    health.formattedOutput = StatuslineFormatter.formatAllVariants(health);
+
+    // 11. Write to health store (NOW includes formattedOutput!)
     this.healthStore.writeSessionHealth(sessionId, health);
 
-    // 10. Update global summary (synchronous - we're already in background daemon)
+    // 12. Update global summary (synchronous - we're already in background daemon)
     try {
       this.healthStore.updateSessionsSummary();
     } catch {
       // Ignore summary update errors
     }
 
-    // 11. Cleanup old files (runs max once per 24h via cooldown)
+    // 13. Cleanup old files (runs max once per 24h via cooldown)
     try {
       await this.cleanupManager.cleanupIfNeeded();
     } catch {
       // Cleanup failed - not critical
+    }
+
+    // 14. Update runtime state (unified auth profiles + sessions)
+    try {
+      // Ensure the detected auth profile exists (or create it)
+      const authProfile = this.runtimeStateStore.getAuthProfile(health.launch.authProfile) ||
+                         this.runtimeStateStore.ensureDefaultAuthProfile();
+
+      // Update auth profile billing (if we have fresh data)
+      if (health.billing.isFresh) {
+        this.runtimeStateStore.updateAuthProfileBilling(authProfile.profileId, health.billing);
+      }
+
+      // Convert SessionHealth to RuntimeSession
+      const runtimeSession = sessionHealthToRuntimeSession(health, authProfile.profileId);
+
+      // Upsert session
+      this.runtimeStateStore.upsertSession(runtimeSession);
+    } catch (error) {
+      // Runtime state update failed - not critical, continue
+      console.error('[DataGatherer] Failed to update runtime state:', error);
     }
 
     return health;
@@ -445,6 +591,23 @@ class DataGatherer {
       lastUpdate: Date.now(),
       issues
     };
+  }
+
+  /**
+   * Extract git remote URL (if git repo)
+   */
+  private extractGitRemote(projectPath: string): string | undefined {
+    try {
+      const remote = execSync('git config --get remote.origin.url', {
+        cwd: projectPath,
+        encoding: 'utf-8',
+        timeout: 1000,
+        stdio: ['pipe', 'pipe', 'ignore']
+      }).trim();
+      return remote || undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

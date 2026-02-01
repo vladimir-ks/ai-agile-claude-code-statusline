@@ -24,6 +24,7 @@
 
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
+import { StatuslineFormatter } from './lib/statusline-formatter';
 
 // ============================================================================
 // Types (inline to avoid import failures)
@@ -158,15 +159,15 @@ function formatMoney(amount: number): string {
   return `$${amount.toFixed(2)}`;
 }
 
-function generateProgressBar(percentUsed: number): string {
-  const width = 12;
-  const thresholdPos = 9; // 78% of 12 (position 9 = 75%, close enough)
+function generateProgressBar(percentUsed: number, width: number = 12): string {
+  const thresholdPercent = 78;
+  const thresholdPos = Math.floor(width * thresholdPercent / 100);
   const pct = Math.max(0, Math.min(100, percentUsed || 0));
   const usedPos = Math.floor(width * pct / 100);
 
   let bar = '';
   for (let i = 0; i < width; i++) {
-    // Threshold marker ALWAYS appears at position 9 (highest priority)
+    // Threshold marker ALWAYS appears at threshold position (78%)
     if (i === thresholdPos) {
       bar += '|';
     } else if (i < usedPos) {
@@ -176,6 +177,30 @@ function generateProgressBar(percentUsed: number): string {
     }
   }
   return `[${bar}]`;
+}
+
+/**
+ * Smart path truncation - keep all parts visible, shorten long directory names
+ * Example: ~/Projects/ai-agile-claude-code-statusline/v2 → ~/Projects/ai-agi…/v2
+ * Only truncates directory names >= 10 characters
+ */
+function smartTruncatePath(path: string): string {
+  if (!path) return '?';
+  const home = homedir();
+  const startsWithHome = path.startsWith(home);
+  let workingPath = startsWithHome ? '~' + path.slice(home.length) : path;
+
+  const parts = workingPath.split('/').filter(p => p);
+
+  const truncated = parts.map(part => {
+    // Don't truncate short names (< 10 chars)
+    if (part.length < 10) return part;
+
+    // Truncate long names: first 6 chars + …
+    return part.slice(0, 6) + '…';
+  });
+
+  return truncated.join('/');
 }
 
 function shortenPath(path: string, maxLen: number = 40): string {
@@ -243,7 +268,10 @@ function visibleWidth(str: string): number {
 
 function fmtDirectory(path: string | null): string {
   if (!path) return '';
-  return `📁:${c('directory')}${shortenPath(path)}${rst()}`;
+  // SPEC: Directory should NEVER be truncated - only replace home with ~
+  const home = homedir();
+  const displayPath = path.startsWith(home) ? '~' + path.slice(home.length) : path;
+  return `📁:${c('directory')}${displayPath}${rst()}`;
 }
 
 function fmtGit(h: SessionHealth): string {
@@ -263,17 +291,23 @@ function fmtModel(h: SessionHealth, stdinModel: string | null = null): string {
   return `🤖:${c('model')}${model}${rst()}`;
 }
 
-function fmtContext(h: SessionHealth): string {
+function fmtContext(h: SessionHealth, availableWidth?: number): string {
   const left = formatTokens(h.context?.tokensLeft || 0);
-  const bar = generateProgressBar(h.context?.percentUsed || 0);
   const pct = h.context?.percentUsed || 0;
+
+  // Determine bar width based on available space
+  const barWidth = availableWidth && availableWidth > 15 ? Math.min(availableWidth - 10, 15) : 12;
+  const bar = generateProgressBar(h.context?.percentUsed || 0, barWidth);
 
   // Color based on context usage
   let colorName: keyof typeof COLORS = 'contextGood';
   if (pct >= 95) colorName = 'contextCrit';
   else if (pct >= 80) colorName = 'contextWarn';
 
-  return `🧠:${c(colorName)}${left}left${bar}${rst()}`;
+  // Show "-free" suffix, or just "K" if space is tight
+  const suffix = availableWidth && availableWidth < 20 ? '' : '-free';
+
+  return `🧠:${c(colorName)}${left}${suffix}${bar}${rst()}`;
 }
 
 function fmtTime(): string {
@@ -281,6 +315,31 @@ function fmtTime(): string {
   const hours = String(now.getHours()).padStart(2, '0');
   const mins = String(now.getMinutes()).padStart(2, '0');
   return `🕐:${c('time')}${hours}:${mins}${rst()}`;
+}
+
+function fmtWeeklyBudget(h: SessionHealth): string {
+  if (!h.billing?.weeklyBudgetRemaining) return '';
+
+  const hours = Math.floor(h.billing.weeklyBudgetRemaining); // Round down
+  const pct = h.billing.weeklyBudgetPercentUsed || 0;
+  const resetDay = h.billing.weeklyResetDay || 'Mon';
+
+  return `📅:${c('weeklyBudget')}${hours}h(${pct}%)@${resetDay}${rst()}`;
+}
+
+function fmtTimeBudgetLine(h: SessionHealth): string {
+  // Combined line: 🕐:13:18|⌛:42m(29%)|📅:28h(41%)@Mon
+  const parts: string[] = [];
+
+  parts.push(fmtTime());
+
+  const budget = fmtBudget(h);
+  if (budget) parts.push(budget);
+
+  const weekly = fmtWeeklyBudget(h);
+  if (weekly) parts.push(weekly);
+
+  return parts.join('|');
 }
 
 function fmtTranscriptSync(h: SessionHealth): string {
@@ -308,15 +367,22 @@ function fmtLastMessage(h: SessionHealth): string {
 
 function fmtBudget(h: SessionHealth): string {
   if (!h.billing?.budgetRemaining && h.billing?.budgetRemaining !== 0) return '';
-  const mins = Math.max(0, h.billing.budgetRemaining || 0);  // Clamp to 0
+
+  // Client-side time adjustment: subtract elapsed minutes from cached value
+  let mins = h.billing.budgetRemaining || 0;
+  if (h.billing.lastFetched) {
+    const ageMinutes = Math.floor((Date.now() - h.billing.lastFetched) / 60000);
+    mins = Math.max(0, mins - ageMinutes);  // Adjust for staleness
+  }
+
   const hours = Math.floor(mins / 60);
   const m = mins % 60;
   const pct = h.billing.budgetPercentUsed || 0;
 
-  // V1 format: "XhXm(XX%)HH:MM" or "XhXm(XX%)🔴" if stale
+  // New format: "42m(29%)" or "2h15m(73%)" - omit hours if 0
   const stale = !h.billing.isFresh ? `${c('critical')}🔴${rst()}` : '';
-  const reset = h.billing.resetTime && h.billing.isFresh ? h.billing.resetTime : '';
-  return `⌛:${c('budget')}${hours}h${m}m(${pct}%)${reset}${rst()}${stale}`;
+  const timeStr = hours > 0 ? `${hours}h${m}m` : `${m}m`;
+  return `⌛:${c('budget')}${timeStr}(${pct}%)${rst()}${stale}`;
 }
 
 function fmtCost(h: SessionHealth): string {
@@ -389,7 +455,33 @@ function fmtHealthStatus(h: SessionHealth): string {
   // Context warnings are already visible in the progress bar
   // Billing staleness is shown via 🔴 on budget
   if (h.alerts?.secretsDetected) {
-    return `${c('critical')}🔴SEC${rst()}`;
+    // Enhanced secrets display - show type instead of generic "SEC"
+    const types = h.alerts.secretTypes || [];
+
+    // Filter out file paths (like /var/folders/.../gitleaks) - keep only secret type names
+    const secretNames = types
+      .filter(t => !t.startsWith('/'))  // Remove paths
+      .map(t => {
+        // Shorten common names
+        if (t.includes('Private Key') || t.includes('RSA') || t.includes('SSH')) return 'Key';
+        if (t.includes('API') || t.includes('Anthropic') || t.includes('OpenAI')) return 'API';
+        if (t.includes('GitHub')) return 'GH';
+        if (t.includes('AWS')) return 'AWS';
+        if (t.includes('GitLab')) return 'GL';
+        if (t.includes('Slack')) return 'Slack';
+        if (t.includes('DB') || t.includes('Connection')) return 'DB';
+        return t.slice(0, 10);  // Fallback: first 10 chars
+      });
+
+    if (secretNames.length === 0) {
+      // All were paths (false positive) - don't show alert
+      return '';
+    }
+
+    if (secretNames.length === 1) {
+      return `${c('critical')}⚠️ ${secretNames[0]}${rst()}`;
+    }
+    return `${c('critical')}⚠️ ${secretNames.length} secrets${rst()}`;
   }
   if (!h.transcript?.exists && h.transcriptPath) {
     return `${c('critical')}🔴TXN${rst()}`;
@@ -479,70 +571,69 @@ function display(): void {
     const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig> }>(configPath);
     const cfg: ComponentsConfig = { ...DEFAULT_COMPONENTS, ...configRaw?.components };
 
-    // 6. Build output matching V1 format:
-    // 📁:dir 🌿:git 🤖:model 🧠:context 🕐:time ⌛:budget 💰:cost 💬:turns 📝:sync 💬:lastMsg
-    const parts: string[] = [];
+    // 6. Simple variant lookup - NO formatting logic (Phase 0: Performance Architecture)
+    // All formatting logic moved to StatuslineFormatter in data-daemon (background)
+    // Display-only just looks up pre-formatted variant for current terminal width
 
-    // Critical alerts only (health issues - secrets moved to end)
-    { const hs = fmtHealthStatus(health); if (hs) parts.push(hs); }
-
-    // Core info - ONLY use stdin directory (from Claude Code), never daemon's cached path
-    if (cfg.directory && stdinDirectory) {
-      const dir = fmtDirectory(stdinDirectory);
-      if (dir) parts.push(dir);
-    }
-    if (cfg.git) { const g = fmtGit(health); if (g) parts.push(g); }
-    if (cfg.model) parts.push(fmtModel(health, stdinModel));
-    if (cfg.context) parts.push(fmtContext(health));
-
-    // Time first, then billing
-    if (cfg.time) parts.push(fmtTime());
-    if (cfg.budget) { const b = fmtBudget(health); if (b) parts.push(b); }
-    if (cfg.cost) { const co = fmtCost(health); if (co) parts.push(co); }
-
-    // Usage metrics (📊 total tokens + TPM from ccusage)
-    { const u = fmtUsage(health); if (u) parts.push(u); }
-
-    // Cache ratio (from stdin JSON context_window data)
-    { const ca = fmtCache(cacheRatio); if (ca) parts.push(ca); }
-
-    // Conversation metrics (message count = turns)
-    { const mc = fmtMessageCount(health); if (mc) parts.push(mc); }
-
-    // Sync status
-    if (cfg.transcriptSync) parts.push(fmtTranscriptSync(health));
-
-    // Last message at end (V1 format: HH:MM(elapsed) preview)
-    { const lm = fmtLastMessage(health); if (lm) parts.push(lm); }
-
-    // Secrets alert at very end (user requested position)
-    if (cfg.secrets) { const s = fmtSecrets(health); if (s) parts.push(s); }
-
-    // 7. Intelligent multi-line wrapping
-    // Use tmux pane width if available (set by wrapper script), else default
-    // Use 80% of width to leave room for Claude's messages on the right
     const paneWidth = parseInt(process.env.STATUSLINE_WIDTH || '120', 10);
-    const MAX_LINE_WIDTH = Math.floor(paneWidth * 0.8);
+    let variant: string[];
 
-    // Build output with intelligent line wrapping
-    const lines: string[] = [];
-    let currentLine = '';
+    // Check if stdin has overrides (directory or model) that differ from cached health
+    const hasStdinOverrides = (stdinDirectory && stdinDirectory !== health.projectPath) ||
+                               (stdinModel && stdinModel !== health.model?.value);
 
-    for (const part of parts) {
-      const testLine = currentLine ? currentLine + ' ' + part : part;
-      if (visibleWidth(testLine) <= MAX_LINE_WIDTH) {
-        currentLine = testLine;
+    if (health.formattedOutput && !hasStdinOverrides) {
+      // Use pre-formatted variant for current terminal width (fast path)
+      // Only when stdin doesn't override cached data
+      if (paneWidth <= 50) {
+        variant = health.formattedOutput.width40;
+      } else if (paneWidth <= 70) {
+        variant = health.formattedOutput.width60;
+      } else if (paneWidth <= 90) {
+        variant = health.formattedOutput.width80;
+      } else if (paneWidth <= 110) {
+        variant = health.formattedOutput.width100;
+      } else if (paneWidth <= 135) {
+        variant = health.formattedOutput.width120;
+      } else if (paneWidth <= 175) {
+        variant = health.formattedOutput.width150;
       } else {
-        // Current line is full, start new line
-        if (currentLine) lines.push(currentLine);
-        currentLine = part;
+        variant = health.formattedOutput.width200;
+      }
+    } else {
+      // Fallback: Generate on-the-fly (backwards compatibility until daemon runs)
+      // This ensures the statusline works immediately even before formattedOutput is generated
+
+      // Merge stdin data (start_directory, model) into health before formatting
+      const healthWithStdin = { ...health } as any;
+      if (stdinDirectory) {
+        healthWithStdin.projectPath = stdinDirectory;
+      }
+      if (stdinModel) {
+        healthWithStdin.model = healthWithStdin.model || {};
+        healthWithStdin.model.value = stdinModel;
+      }
+
+      const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin);
+      if (paneWidth <= 50) {
+        variant = allVariants.width40;
+      } else if (paneWidth <= 70) {
+        variant = allVariants.width60;
+      } else if (paneWidth <= 90) {
+        variant = allVariants.width80;
+      } else if (paneWidth <= 110) {
+        variant = allVariants.width100;
+      } else if (paneWidth <= 135) {
+        variant = allVariants.width120;
+      } else if (paneWidth <= 175) {
+        variant = allVariants.width150;
+      } else {
+        variant = allVariants.width200;
       }
     }
-    // Don't forget the last line
-    if (currentLine) lines.push(currentLine);
 
     // Output with newlines between lines (NO trailing newline)
-    process.stdout.write(lines.join('\n'));
+    process.stdout.write(variant.join('\n'));
 
   } catch (error) {
     // LAST RESORT: If anything fails, output safe fallback

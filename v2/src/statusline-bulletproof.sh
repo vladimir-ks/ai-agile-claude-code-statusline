@@ -41,10 +41,14 @@ JSON_INPUT=$(cat)
 # DETECT PANE WIDTH (tmux-aware)
 # ============================================================================
 
-# If running in tmux, get the actual pane width
-# This allows the display to format output correctly for the available space
+# If running in tmux, get the actual pane width and capture tmux context
 if [ -n "${TMUX:-}" ]; then
   STATUSLINE_WIDTH=$(tmux display -p '#{pane_width}' 2>/dev/null || echo "120")
+  # Capture tmux session/window/pane info for session tracking
+  export TMUX_SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
+  export TMUX_WINDOW_INDEX=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "")
+  export TMUX_PANE_INDEX=$(tmux display-message -p '#{pane_index}' 2>/dev/null || echo "")
+  export TMUX_PANE_HEIGHT=$(tmux display-message -p '#{pane_height}' 2>/dev/null || echo "")
 else
   # Fallback: try terminal columns, or default to 120
   STATUSLINE_WIDTH="${COLUMNS:-120}"
