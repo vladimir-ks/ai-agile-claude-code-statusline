@@ -434,30 +434,115 @@ class DataGatherer {
           health.launch = AuthProfileDetector.detectProfile(
             health.projectPath, health.billing, authProfiles
           );
-        } else if (billingData && billingData.costUSD >= 0) {
-          const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
-          health.billing = {
-            costToday: billingData.costUSD || 0,
-            burnRatePerHour: billingData.costPerHour || 0,
-            budgetRemaining: totalMinutes,
-            budgetPercentUsed: billingData.percentageUsed || 0,
-            resetTime: billingData.resetTime || '',
-            totalTokens: billingData.totalTokens || 0,
-            tokensPerMinute: billingData.tokensPerMinute || null,
-            isFresh: false,
-            lastFetched: billingData.lastFetched || Date.now()
-          };
-        } else if (existingHealth?.billing?.costToday > 0) {
-          health.billing = { ...existingHealth.billing, isFresh: false };
-        }
+          DebugStateWriter.recordFetch({
+            category: 'billing_ccusage',
+            timestamp: ccusageStart,
+            success: true,
+            durationMs: Date.now() - ccusageStart,
+          });
+        } else {
+          // ccusage returned stale data or failed - try local cost calculation
+          // This is the PRIMARY path when ccusage hangs or returns stale cache
+          console.error(`[DataGatherer] ccusage returned stale data (isFresh=${billingData?.isFresh})`);
+          DebugStateWriter.recordFetch({
+            category: 'billing_ccusage',
+            timestamp: ccusageStart,
+            success: false,
+            durationMs: Date.now() - ccusageStart,
+          });
 
-        DebugStateWriter.recordFetch({
-          category: 'billing_ccusage',
-          timestamp: ccusageStart,
-          success: !!(billingData && billingData.isFresh),
-          durationMs: Date.now() - ccusageStart,
-        });
+          console.error(`[DataGatherer] transcriptPath=${health.transcriptPath}, exists=${health.transcriptPath ? existsSync(health.transcriptPath) : false}`);
+          if (health.transcriptPath && existsSync(health.transcriptPath)) {
+            console.error('[DataGatherer] ccusage stale, trying local cost calculation...');
+            const localCostStart = Date.now();
+            try {
+              const localCost = await LocalCostCalculator.calculateCost(health.transcriptPath);
+              if (localCost && localCost.isFresh && localCost.costUSD > 0) {
+                // Use local cost data but preserve budget info from ccusage if available
+                const totalMinutes = billingData
+                  ? (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0)
+                  : (existingHealth?.billing?.budgetRemaining || 0);
+                health.billing = {
+                  costToday: localCost.costUSD,
+                  burnRatePerHour: localCost.costPerHour || 0,
+                  budgetRemaining: totalMinutes,
+                  budgetPercentUsed: billingData?.percentageUsed || existingHealth?.billing?.budgetPercentUsed || 0,
+                  resetTime: billingData?.resetTime || existingHealth?.billing?.resetTime || '',
+                  totalTokens: localCost.totalTokens || 0,
+                  tokensPerMinute: localCost.tokensPerMinute || null,
+                  isFresh: true,
+                  lastFetched: localCost.lastFetched
+                };
+                DebugStateWriter.recordFetch({
+                  category: 'billing_local',
+                  timestamp: localCostStart,
+                  success: true,
+                  durationMs: Date.now() - localCostStart,
+                });
+                console.error(`[DataGatherer] Local cost: $${localCost.costUSD.toFixed(2)} (${localCost.messageCount} msgs)`);
+              } else if (billingData && billingData.costUSD >= 0) {
+                // Local cost failed - use stale ccusage data
+                const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
+                health.billing = {
+                  costToday: billingData.costUSD || 0,
+                  burnRatePerHour: billingData.costPerHour || 0,
+                  budgetRemaining: totalMinutes,
+                  budgetPercentUsed: billingData.percentageUsed || 0,
+                  resetTime: billingData.resetTime || '',
+                  totalTokens: billingData.totalTokens || 0,
+                  tokensPerMinute: billingData.tokensPerMinute || null,
+                  isFresh: false,
+                  lastFetched: billingData.lastFetched || Date.now()
+                };
+              } else if (existingHealth?.billing?.costToday > 0) {
+                health.billing = { ...existingHealth.billing, isFresh: false };
+              }
+            } catch (localErr) {
+              DebugStateWriter.recordFetch({
+                category: 'billing_local',
+                timestamp: localCostStart,
+                success: false,
+                durationMs: Date.now() - localCostStart,
+                error: sanitizeError(localErr),
+              });
+              // Fall back to stale ccusage data
+              if (billingData && billingData.costUSD >= 0) {
+                const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
+                health.billing = {
+                  costToday: billingData.costUSD || 0,
+                  burnRatePerHour: billingData.costPerHour || 0,
+                  budgetRemaining: totalMinutes,
+                  budgetPercentUsed: billingData.percentageUsed || 0,
+                  resetTime: billingData.resetTime || '',
+                  totalTokens: billingData.totalTokens || 0,
+                  tokensPerMinute: billingData.tokensPerMinute || null,
+                  isFresh: false,
+                  lastFetched: billingData.lastFetched || Date.now()
+                };
+              } else if (existingHealth?.billing?.costToday > 0) {
+                health.billing = { ...existingHealth.billing, isFresh: false };
+              }
+            }
+          } else if (billingData && billingData.costUSD >= 0) {
+            // No transcript path - use stale ccusage data
+            const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
+            health.billing = {
+              costToday: billingData.costUSD || 0,
+              burnRatePerHour: billingData.costPerHour || 0,
+              budgetRemaining: totalMinutes,
+              budgetPercentUsed: billingData.percentageUsed || 0,
+              resetTime: billingData.resetTime || '',
+              totalTokens: billingData.totalTokens || 0,
+              tokensPerMinute: billingData.tokensPerMinute || null,
+              isFresh: false,
+              lastFetched: billingData.lastFetched || Date.now()
+            };
+          } else if (existingHealth?.billing?.costToday > 0) {
+            health.billing = { ...existingHealth.billing, isFresh: false };
+          }
+        }
       } catch (err) {
+        // ccusage module threw an error (rare - usually returns stale data)
         DebugStateWriter.recordFetch({
           category: 'billing_ccusage',
           timestamp: ccusageStart,
@@ -465,47 +550,9 @@ class DataGatherer {
           durationMs: Date.now() - ccusageStart,
           error: sanitizeError(err),
         });
+        console.error('[DataGatherer] ccusage threw error:', sanitizeError(err));
 
-        // ccusage failed - try local cost calculation from transcript
-        // This bypasses ccusage entirely and only parses the current session
-        if (health.transcriptPath && existsSync(health.transcriptPath)) {
-          console.error('[DataGatherer] ccusage failed, trying local cost calculation...');
-          const localCostStart = Date.now();
-          try {
-            const localCost = await LocalCostCalculator.calculateCost(health.transcriptPath);
-            if (localCost && localCost.isFresh && localCost.costUSD > 0) {
-              health.billing = {
-                ...health.billing,
-                costToday: localCost.costUSD,
-                burnRatePerHour: localCost.costPerHour || 0,
-                totalTokens: localCost.totalTokens || 0,
-                tokensPerMinute: localCost.tokensPerMinute || null,
-                isFresh: true,
-                lastFetched: localCost.lastFetched
-              };
-              DebugStateWriter.recordFetch({
-                category: 'billing_local',
-                timestamp: localCostStart,
-                success: true,
-                durationMs: Date.now() - localCostStart,
-              });
-              console.error(`[DataGatherer] Local cost calculation: $${localCost.costUSD.toFixed(4)}`);
-            } else if (existingHealth?.billing?.costToday > 0) {
-              health.billing = { ...existingHealth.billing, isFresh: false };
-            }
-          } catch (localErr) {
-            DebugStateWriter.recordFetch({
-              category: 'billing_local',
-              timestamp: localCostStart,
-              success: false,
-              durationMs: Date.now() - localCostStart,
-              error: sanitizeError(localErr),
-            });
-            if (existingHealth?.billing?.costToday > 0) {
-              health.billing = { ...existingHealth.billing, isFresh: false };
-            }
-          }
-        } else if (existingHealth?.billing?.costToday > 0) {
+        if (existingHealth?.billing?.costToday > 0) {
           health.billing = { ...existingHealth.billing, isFresh: false };
         }
       }

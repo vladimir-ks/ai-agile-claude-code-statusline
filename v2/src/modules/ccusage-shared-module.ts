@@ -206,9 +206,14 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
 
   /**
    * Convert cache format to CCUsageData format
+   *
+   * CRITICAL: isFresh is COMPUTED from timestamp, not read from stored value.
+   * The stored isFresh can lie (set to true when data was fresh, but now stale).
    */
   private cacheToData(cache: SharedCache): CCUsageData {
     const totalMinutes = cache.budgetRemaining || 0;
+    // COMPUTE freshness from timestamp - don't trust stored value
+    const computedIsFresh = FreshnessManager.isFresh(cache.lastFetched, 'billing_ccusage');
     return {
       blockId: '',
       startTime: new Date(),
@@ -222,7 +227,7 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       resetTime: cache.resetTime,
       totalTokens: cache.totalTokens,
       tokensPerMinute: cache.tokensPerMinute,
-      isFresh: cache.isFresh,
+      isFresh: computedIsFresh,
       lastFetched: cache.lastFetched
     };
   }
