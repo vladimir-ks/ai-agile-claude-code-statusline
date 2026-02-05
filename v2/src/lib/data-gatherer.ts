@@ -40,6 +40,8 @@ import RuntimeStateStore from './runtime-state-store';
 import { sessionHealthToRuntimeSession } from '../types/runtime-state';
 import { AuthProfileDetector } from '../modules/auth-profile-detector';
 import { SubscriptionReader } from './subscription-reader';
+import { HotSwapQuotaReader } from './hot-swap-quota-reader';
+import { KeychainResolver } from '../modules/keychain-resolver';
 
 class DataGatherer {
   private healthStore: HealthStore;
@@ -89,6 +91,9 @@ class DataGatherer {
     jsonInput: ClaudeCodeInput | null
   ): Promise<SessionHealth> {
     const startTime = Date.now();
+    // Hard time budget: 20s (wrapper SIGKILL at 30s, need margin for post-billing steps)
+    const DEADLINE_MS = 20000;
+    const deadline = startTime + DEADLINE_MS;
     const health = createDefaultHealth(sessionId);
     health.gatheredAt = startTime;
 
@@ -116,7 +121,25 @@ class DataGatherer {
       authProfiles
     );
 
-    // 0b. Tmux context capture (if running in tmux)
+    // 0b. Session-aware keychain resolution (derive configDir + keychainService from transcript path)
+    const { configDir, keychainService } = KeychainResolver.resolveFromTranscript(transcriptPath);
+    if (configDir) {
+      health.launch.configDir = configDir;
+      health.launch.keychainService = keychainService || undefined;
+
+      // Derive auth profile from configDir → hot-swap slot mapping
+      // This is more precise than generic detection since it's derived from the session's transcript path
+      const matchedSlot = HotSwapQuotaReader.getSlotByConfigDir(configDir);
+      if (matchedSlot) {
+        health.launch.authProfile = matchedSlot.email;
+        health.launch.detectionMethod = 'path'; // configDir-based is a path-derived method
+        console.error(`[DataGatherer] Session ${sessionId} → ${keychainService} (${matchedSlot.email}, configDir: ${configDir})`);
+      } else {
+        console.error(`[DataGatherer] Session ${sessionId} → ${keychainService} (configDir: ${configDir}, no slot match)`);
+      }
+    }
+
+    // 0c. Tmux context capture (if running in tmux)
     if (process.env.TMUX_SESSION_NAME) {
       health.tmux = {
         session: process.env.TMUX_SESSION_NAME,
@@ -157,140 +180,81 @@ class DataGatherer {
     }
 
     // 5. Billing data - SHARED across all sessions (billing is global, not per-session)
-    // Use a shared cache file so lock contention doesn't leave sessions without data
+    // TIME BUDGET: Billing is the slowest step (OAuth + ccusage can take 20s+).
+    // If we've already spent too long on prior steps, skip billing and use stale data.
+    // This guarantees writeSessionHealth() is always reached before the 30s SIGKILL.
     const billingStartTime = Date.now();
-    const sharedBillingPath = `${homedir()}/.claude/session-health/billing-shared.json`;
+    const billingBudgetMs = Math.max(0, deadline - billingStartTime - 5000); // Reserve 5s for post-billing steps
 
-    // Read shared billing cache (available to all sessions)
-    let sharedBilling: any = null;
-    try {
-      if (existsSync(sharedBillingPath)) {
-        sharedBilling = JSON.parse(readFileSync(sharedBillingPath, 'utf-8'));
+    const slotStatus = configDir ? HotSwapQuotaReader.getSlotStatus(
+      HotSwapQuotaReader.getSlotByConfigDir(configDir)?.slotId || ''
+    ) : 'unknown';
+
+    if (billingBudgetMs < 2000) {
+      // Not enough time for billing — use stale data
+      console.error(`[DataGatherer] Skipping billing (only ${billingBudgetMs}ms left in budget)`);
+      if (existingHealth?.billing?.costToday > 0) {
+        health.billing = { ...existingHealth.billing, isFresh: false };
       }
-    } catch { /* ignore read errors */ }
-
-    // Check if shared billing is fresh enough (< 2 minutes old AND has valid cost data)
-    const sharedFresh = sharedBilling?.lastFetched &&
-                       (Date.now() - sharedBilling.lastFetched) < 120000 &&
-                       sharedBilling?.costToday > 0;  // Validate has actual cost data (prevents using empty/failed data)
-
-    if (sharedFresh && sharedBilling?.isFresh) {
-      // Use shared billing data (another session fetched it recently)
-      health.billing = { ...sharedBilling };
     } else {
-      // Try OAuth API first (authoritative source with weekly quota)
-      let oauthBilling: BillingInfo | null = null;
-      try {
-        oauthBilling = await AnthropicOAuthAPI.fetchUsage(health.launch.authProfile);
-      } catch {
-        // OAuth failed - will fall back to ccusage
+      // Race billing fetch against remaining time budget
+      const billingPromise = this.fetchBilling(
+        health, configDir, keychainService, slotStatus, authProfiles, existingHealth
+      );
+      const timeoutPromise = new Promise<void>(resolve => setTimeout(resolve, billingBudgetMs));
+
+      await Promise.race([billingPromise, timeoutPromise]);
+
+      // If billing didn't complete in time, use stale
+      if (!health.billing.isFresh && !health.billing.costToday && existingHealth?.billing?.costToday > 0) {
+        health.billing = { ...existingHealth.billing, isFresh: false };
+      }
+    }
+
+    // 5b. Weekly/Daily quota - priority:
+    // 1. hot-swap-quota.json (PRIMARY - reads active_account from claude-sessions.yaml)
+    // 2. OAuth API (already in health.billing if OAuth succeeded)
+    // 3. subscription.yaml (user-managed fallback, typically stale)
+    const hotSwapQuota = HotSwapQuotaReader.getActiveQuota(configDir || undefined);
+
+    if (hotSwapQuota) {
+      // Hot-swap has quota data — use it (even if slightly stale, it's still
+      // better than subscription.yaml which may be hours/days old)
+      health.billing.weeklyBudgetRemaining = hotSwapQuota.weeklyBudgetRemaining;
+      health.billing.weeklyBudgetPercentUsed = hotSwapQuota.weeklyPercentUsed;
+      health.billing.weeklyResetDay = hotSwapQuota.weeklyResetDay;
+      health.billing.weeklyDataStale = hotSwapQuota.isStale;
+      health.billing.weeklyLastModified = hotSwapQuota.lastFetched;
+
+      if (hotSwapQuota.dailyPercentUsed > 0) {
+        health.billing.budgetPercentUsed = hotSwapQuota.dailyPercentUsed;
       }
 
-      if (oauthBilling && oauthBilling.isFresh) {
-        // OAuth success - use authoritative data (includes weekly quota)
-        health.billing = oauthBilling;
+      const ageSec = Math.floor((Date.now() - hotSwapQuota.lastFetched) / 1000);
+      console.error(`[DataGatherer] Hot-swap quota: ${hotSwapQuota.slotId} (${hotSwapQuota.email}, age: ${ageSec}s, stale: ${hotSwapQuota.isStale})`);
+    } else {
+      // No hot-swap data — fall through to OAuth or subscription.yaml
+      const hasOAuthWeeklyData = health.billing.weeklyBudgetRemaining !== undefined ||
+                                 health.billing.weeklyBudgetPercentUsed !== undefined;
 
-        // CRITICAL: Write to shared cache so other sessions can use it (atomic write)
-        try {
-          const tempPath = `${sharedBillingPath}.tmp`;
-          writeFileSync(tempPath, JSON.stringify(health.billing), { encoding: 'utf-8', mode: 0o600 });
-          renameSync(tempPath, sharedBillingPath);
-        } catch { /* ignore write errors */ }
-
-        // Re-detect auth profile with fresh billing data (fingerprinting)
-        health.launch = AuthProfileDetector.detectProfile(
-          health.projectPath,
-          health.billing,
-          authProfiles
-        );
-
+      if (hasOAuthWeeklyData) {
+        health.billing.weeklyDataStale = false;
+        health.billing.weeklyLastModified = Date.now();
       } else {
-        // OAuth failed - fallback to ccusage (legacy, no weekly quota)
-        try {
-          const billingData = await this.ccusageModule.fetch(sessionId);
-
-          // Check for cooldown marker (costUSD: -1 means "cooldown active, use shared cache")
-          if (billingData && billingData.costUSD === -1) {
-            // Cooldown active - use shared cache as fresh data (it was fetched recently)
-            if (sharedBilling?.costToday > 0 && sharedBilling?.lastFetched) {
-              const ageMs = Date.now() - sharedBilling.lastFetched;
-              // If shared cache is < 3 minutes old, treat as fresh (cooldown is 2min)
-              const stillFresh = ageMs < 180000;
-              health.billing = { ...sharedBilling, isFresh: stillFresh };
-              console.error(`[DataGatherer] Using shared cache (age: ${Math.floor(ageMs/1000)}s, fresh: ${stillFresh})`);
-            } else if (existingHealth?.billing?.costToday > 0) {
-              health.billing = { ...existingHealth.billing, isFresh: false };
-            }
-          } else if (billingData && billingData.isFresh) {
-            const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
-            health.billing = {
-              costToday: billingData.costUSD || 0,
-              burnRatePerHour: billingData.costPerHour || 0,
-              budgetRemaining: totalMinutes,
-              budgetPercentUsed: billingData.percentageUsed || 0,
-              resetTime: billingData.resetTime || '',
-              totalTokens: billingData.totalTokens || 0,
-              tokensPerMinute: billingData.tokensPerMinute || null,
-              isFresh: true,
-              lastFetched: Date.now()
-              // No weekly quota from ccusage
-            };
-
-            // CRITICAL: Write to shared cache so other sessions can use it (atomic write)
-            try {
-              const tempPath = `${sharedBillingPath}.tmp`;
-              writeFileSync(tempPath, JSON.stringify(health.billing), { encoding: 'utf-8', mode: 0o600 });
-              renameSync(tempPath, sharedBillingPath);
-            } catch { /* ignore write errors */ }
-
-            // Re-detect auth profile with fresh billing data (fingerprinting)
-            health.launch = AuthProfileDetector.detectProfile(
-              health.projectPath,
-              health.billing,
-              authProfiles
-            );
-
-          } else if (sharedBilling?.costToday > 0) {
-            // Lock failed but we have shared data - use it (mark as slightly stale)
-            health.billing = { ...sharedBilling, isFresh: sharedBilling.isFresh };
-          } else if (existingHealth?.billing?.costToday > 0) {
-            // Fallback to session's own old data
-            health.billing = { ...existingHealth.billing, isFresh: false };
-          }
-        } catch {
-          // Both OAuth and ccusage failed - use shared or existing data
-          if (sharedBilling?.costToday > 0) {
-            health.billing = { ...sharedBilling, isFresh: false };
-          } else if (existingHealth?.billing?.costToday > 0) {
-            health.billing = { ...existingHealth.billing, isFresh: false };
-          }
+        const subscriptionQuota = SubscriptionReader.getWeeklyQuota();
+        if (subscriptionQuota) {
+          health.billing.weeklyBudgetRemaining = subscriptionQuota.hoursRemaining;
+          health.billing.weeklyBudgetPercentUsed = subscriptionQuota.percentUsed;
+          health.billing.weeklyResetDay = subscriptionQuota.resetDay;
+          health.billing.weeklyDataStale = subscriptionQuota.isStale;
+          health.billing.weeklyLastModified = subscriptionQuota.lastModified;
         }
       }
-    }
 
-    // 5b. Merge subscription data for quotas (user-managed YAML file)
-    // CRITICAL: subscription.yaml is the AUTHORITATIVE source for quota percentages
-    // It ALWAYS overwrites data from other sources (OAuth, shared cache)
-    // because the user manually updates it from claude.ai/settings/usage
-
-    // Weekly quota
-    const subscriptionQuota = SubscriptionReader.getWeeklyQuota();
-    if (subscriptionQuota) {
-      health.billing.weeklyBudgetRemaining = subscriptionQuota.hoursRemaining;
-      health.billing.weeklyBudgetPercentUsed = subscriptionQuota.percentUsed;
-      health.billing.weeklyResetDay = subscriptionQuota.resetDay;
-    } else {
-      // No subscription.yaml - clear weekly data to avoid stale values
-      health.billing.weeklyBudgetRemaining = undefined;
-      health.billing.weeklyBudgetPercentUsed = undefined;
-      health.billing.weeklyResetDay = undefined;
-    }
-
-    // Daily session quota (if user has it in subscription.yaml)
-    const sessionQuota = SubscriptionReader.getCurrentSessionQuota();
-    if (sessionQuota && sessionQuota.percentUsed > 0) {
-      // Use subscription.yaml percentage if available (more accurate than ccusage calculation)
-      health.billing.budgetPercentUsed = sessionQuota.percentUsed;
+      const sessionQuota = SubscriptionReader.getCurrentSessionQuota();
+      if (sessionQuota && sessionQuota.percentUsed > 0) {
+        health.billing.budgetPercentUsed = sessionQuota.percentUsed;
+      }
     }
 
     // 6. Secrets scan (if transcript exists)
@@ -379,6 +343,81 @@ class DataGatherer {
     }
 
     return health;
+  }
+
+  /**
+   * Fetch billing data (extracted for time-budget racing).
+   * Mutates health.billing directly.
+   */
+  private async fetchBilling(
+    health: SessionHealth,
+    configDir: string | null,
+    keychainService: string | null,
+    slotStatus: string,
+    authProfiles: any,
+    existingHealth: SessionHealth | null
+  ): Promise<void> {
+    // Try OAuth API first (authoritative source with weekly quota)
+    let oauthBilling: BillingInfo | null = null;
+
+    if (slotStatus === 'inactive') {
+      console.error(`[DataGatherer] Skipping OAuth API for inactive slot (${health.launch.authProfile})`);
+    } else {
+      try {
+        oauthBilling = await AnthropicOAuthAPI.fetchUsage(health.launch.authProfile, keychainService || undefined);
+      } catch {
+        // OAuth failed - will fall back to ccusage
+      }
+    }
+
+    if (oauthBilling && oauthBilling.isFresh) {
+      health.billing = oauthBilling;
+      health.launch = AuthProfileDetector.detectProfile(
+        health.projectPath, health.billing, authProfiles
+      );
+    } else {
+      // OAuth failed - fallback to ccusage
+      try {
+        const billingData = await this.ccusageModule.fetch(health.sessionId || '');
+
+        if (billingData && billingData.isFresh) {
+          const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
+          health.billing = {
+            costToday: billingData.costUSD || 0,
+            burnRatePerHour: billingData.costPerHour || 0,
+            budgetRemaining: totalMinutes,
+            budgetPercentUsed: billingData.percentageUsed || 0,
+            resetTime: billingData.resetTime || '',
+            totalTokens: billingData.totalTokens || 0,
+            tokensPerMinute: billingData.tokensPerMinute || null,
+            isFresh: true,
+            lastFetched: billingData.lastFetched || Date.now()
+          };
+          health.launch = AuthProfileDetector.detectProfile(
+            health.projectPath, health.billing, authProfiles
+          );
+        } else if (billingData && billingData.costUSD >= 0) {
+          const totalMinutes = (billingData.hoursLeft || 0) * 60 + (billingData.minutesLeft || 0);
+          health.billing = {
+            costToday: billingData.costUSD || 0,
+            burnRatePerHour: billingData.costPerHour || 0,
+            budgetRemaining: totalMinutes,
+            budgetPercentUsed: billingData.percentageUsed || 0,
+            resetTime: billingData.resetTime || '',
+            totalTokens: billingData.totalTokens || 0,
+            tokensPerMinute: billingData.tokensPerMinute || null,
+            isFresh: false,
+            lastFetched: billingData.lastFetched || Date.now()
+          };
+        } else if (existingHealth?.billing?.costToday > 0) {
+          health.billing = { ...existingHealth.billing, isFresh: false };
+        }
+      } catch {
+        if (existingHealth?.billing?.costToday > 0) {
+          health.billing = { ...existingHealth.billing, isFresh: false };
+        }
+      }
+    }
   }
 
   /**

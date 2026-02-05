@@ -601,8 +601,11 @@ export class StatuslineFormatter {
       const pct = Math.max(0, Math.min(100, health.billing.weeklyBudgetPercentUsed || 0));
       const resetDay = health.billing.weeklyResetDay || 'Mon';
 
-      // Weekly data shares staleness with budget
-      parts.push(`📅:${c('weeklyBudget')}${hours}h(${pct}%)@${resetDay}${rst()}${staleMarker}`);
+      // Weekly has its own staleness (from subscription.yaml file age)
+      const weeklyStale = health.billing.weeklyDataStale === true;
+      const weeklyMarker = weeklyStale ? `${c('critical')}⚠${rst()}` : '';
+
+      parts.push(`📅:${c('weeklyBudget')}${hours}h(${pct}%)@${resetDay}${rst()}${weeklyMarker}`);
     }
 
     return parts.join('|');

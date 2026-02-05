@@ -6,25 +6,41 @@
  * - BudgetModule (⌛)
  * - UsageModule (📊)
  *
- * This prevents 3 concurrent ccusage calls!
+ * ARCHITECTURE:
+ * 1. Check shared cache - if fresh (<2min), return it
+ * 2. If stale, acquire lock and fetch from ccusage
+ * 3. Write to shared cache for other sessions
  *
- * Optimization: 2min cooldown to skip ccusage entirely if fresh data available
+ * NO COOLDOWN GATE - freshness is determined by cache timestamp only!
  */
 
 import type { DataModule, DataModuleConfig } from '../broker/data-broker';
 import type { ValidationResult } from '../types/validation';
 import { promisify } from 'util';
 import { exec } from 'child_process';
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, unlinkSync } from 'fs';
+import { homedir } from 'os';
 import ProcessLock from '../lib/process-lock';
-import CooldownManager from '../lib/cooldown-manager';
 
 const execAsync = promisify(exec);
+
+// Shared cache path - ALL sessions read/write here
+const SHARED_CACHE_PATH = `${homedir()}/.claude/session-health/billing-shared.json`;
+
+// Cache freshness threshold (2 minutes)
+const CACHE_FRESH_MS = 120000;
+
+// Lock for preventing concurrent ccusage calls
 const ccusageLock = new ProcessLock({
   lockPath: `${process.env.HOME}/.claude/.ccusage.lock`,
-  timeout: 60000,         // 60s timeout (ccusage can take 30+ seconds)
-  retryInterval: 3000,    // Wait 3s between retries
-  maxRetries: 15          // Try for up to 45 seconds total
+  timeout: 15000,         // 15s stale lock timeout (was 60s — daemon killed at 30s)
+  retryInterval: 2000,    // Wait 2s between retries
+  maxRetries: 5           // Total ~10s (was 20×2s=40s — exceeded daemon budget)
 });
+
+// Cooldown file to prevent ccusage retry storms across daemon invocations
+const CCUSAGE_COOLDOWN_PATH = `${homedir()}/.claude/session-health/cooldowns/ccusage-fetch.cooldown`;
+const CCUSAGE_COOLDOWN_MS = 120000; // 2 minutes
 
 interface CCUsageData {
   // Raw block data
@@ -48,164 +64,291 @@ interface CCUsageData {
   tokensPerMinute: number | null;
 
   // Metadata
-  isFresh: boolean;  // false if fetch failed
+  isFresh: boolean;
+  lastFetched?: number;  // Timestamp when data was fetched
+}
+
+interface SharedCache {
+  costToday: number;
+  burnRatePerHour: number;
+  budgetRemaining: number;
+  budgetPercentUsed: number;
+  resetTime: string;
+  totalTokens: number;
+  tokensPerMinute: number | null;
+  isFresh: boolean;
+  lastFetched: number;
 }
 
 class CCUsageSharedModule implements DataModule<CCUsageData> {
-  readonly moduleId = 'ccusage';  // Single module ID
-  private cooldownManager: CooldownManager;
+  readonly moduleId = 'ccusage';
 
   config: DataModuleConfig = {
     timeout: 35000,      // 35s (ccusage can take 20-30s)
-    cacheTTL: 120000     // 2min cooldown (was 15min)
+    cacheTTL: 120000     // 2min cache freshness
   };
 
   constructor(config?: Partial<DataModuleConfig>) {
     if (config) {
       this.config = { ...this.config, ...config };
     }
-    this.cooldownManager = new CooldownManager();
   }
 
+  /**
+   * Main fetch method - checks cache first, fetches if stale
+   *
+   * IMPORTANT: No cooldown gate! Freshness is determined by cache timestamp.
+   */
   async fetch(sessionId: string): Promise<CCUsageData> {
-    // OPTIMIZATION: Check cooldown BEFORE trying to acquire lock
-    // If another session fetched recently, return "cooldown active" indicator
-    // Caller (data-gatherer) should check shared billing cache for fresh data
-    const cooldownActive = !this.cooldownManager.shouldRun('billing');
+    // STEP 1: Check shared cache
+    const cache = this.readSharedCache();
+    const cacheAgeMs = Date.now() - (cache?.lastFetched || 0);
+    const cacheIsFresh = cacheAgeMs < CACHE_FRESH_MS && cache?.isFresh && cache?.costToday >= 0;
 
-    if (cooldownActive) {
-      // Cooldown is active - signal to caller that we intentionally skipped
-      // Caller should use shared billing cache (which has fresh data from recent fetch)
-      // Return special marker: isFresh: false but costUSD: -1 means "check shared cache"
-      console.error('[CCUsageSharedModule] Billing cooldown active - caller should use shared cache');
-      return {
-        ...this.getDefaultData(),
-        costUSD: -1,  // Special marker: -1 means "cooldown, use shared cache"
-        isFresh: false
-      };
+    if (cacheIsFresh) {
+      // Cache is fresh - return it without fetching
+      console.error(`[CCUsage] Using fresh cache (age: ${Math.floor(cacheAgeMs/1000)}s)`);
+      return this.cacheToData(cache!);
     }
 
-    // CRITICAL: Acquire system-wide lock to prevent concurrent ccusage spawns
-    const result = await ccusageLock.withLock(async () => {
-      try {
-        const { stdout } = await execAsync('ccusage blocks --json --active', {
-          timeout: this.config.timeout,
-          maxBuffer: 1024 * 1024  // 1MB max output
-          // Note: Removed killSignal as it caused premature termination
-        });
+    // STEP 2: Cache is stale - check ccusage fetch cooldown before attempting
+    // Prevents retry storms when ccusage is broken (persisted across daemon invocations)
+    if (this.isCcusageCooldown()) {
+      console.error(`[CCUsage] Cache stale but ccusage in cooldown, using stale cache`);
+      return cache ? this.cacheToData(cache) : this.getDefaultData();
+    }
 
-        const parsed = JSON.parse(stdout);
-        console.error('[CCUsageSharedModule] ccusage fetch succeeded');
-        return parsed;
-      } catch (error) {
-        // Log to daemon log for observability
-        const msg = error instanceof Error ? error.message : String(error);
-        console.error(`[CCUsageSharedModule] ccusage execution failed: ${msg}`);
+    console.error(`[CCUsage] Cache stale (age: ${Math.floor(cacheAgeMs/1000)}s), fetching from ccusage...`);
+
+    // STEP 3: Try to acquire lock
+    const lockResult = await ccusageLock.acquire();
+
+    if (!lockResult.acquired) {
+      // Another process is fetching - wait briefly and check cache again
+      console.error('[CCUsage] Lock held by another process, waiting for fresh cache...');
+      await this.sleep(3000);
+
+      // Check if the other process updated the cache
+      const updatedCache = this.readSharedCache();
+      const updatedAgeMs = Date.now() - (updatedCache?.lastFetched || 0);
+
+      if (updatedAgeMs < 10000 && updatedCache?.isFresh) {
+        // Cache was just updated - use it
+        console.error('[CCUsage] Another process updated cache, using it');
+        return this.cacheToData(updatedCache);
+      }
+
+      // Still stale - return what we have (will show stale indicator)
+      console.error('[CCUsage] Cache still stale after waiting');
+      return cache ? this.cacheToData(cache) : this.getDefaultData();
+    }
+
+    // STEP 4: We have the lock - fetch from ccusage
+    try {
+      const freshData = await this.runCcusage();
+
+      if (freshData.isFresh) {
+        // Write to shared cache for other sessions
+        this.writeSharedCache(freshData);
+        console.error('[CCUsage] Fetch successful, cache updated');
+        return freshData;
+      } else {
+        // Fetch failed - use stale cache if available (better than empty)
+        console.error('[CCUsage] Fetch returned empty data, using stale cache');
+        if (cache && cache.costToday >= 0) {
+          // Return stale cache with isFresh: false
+          const staleData = this.cacheToData(cache);
+          staleData.isFresh = false;
+          return staleData;
+        }
+        return freshData;
+      }
+    } finally {
+      // Always release lock
+      ccusageLock.release();
+    }
+  }
+
+  /**
+   * Read shared cache file
+   */
+  private readSharedCache(): SharedCache | null {
+    try {
+      if (!existsSync(SHARED_CACHE_PATH)) {
         return null;
       }
-    });
-
-    // Lock acquisition failed or ccusage failed
-    if (!result) {
-      return this.getDefaultData();
+      const content = readFileSync(SHARED_CACHE_PATH, 'utf-8');
+      return JSON.parse(content);
+    } catch {
+      return null;
     }
+  }
 
+  /**
+   * Write to shared cache (atomic write)
+   */
+  private writeSharedCache(data: CCUsageData): void {
     try {
-      const activeBlock = result.blocks?.find((b: any) => b.isActive === true);
+      const cache: SharedCache = {
+        costToday: data.costUSD,
+        burnRatePerHour: data.costPerHour || 0,
+        budgetRemaining: data.hoursLeft * 60 + data.minutesLeft,
+        budgetPercentUsed: data.percentageUsed,
+        resetTime: data.resetTime,
+        totalTokens: data.totalTokens,
+        tokensPerMinute: data.tokensPerMinute,
+        isFresh: data.isFresh,
+        lastFetched: Date.now()
+      };
+
+      const tempPath = `${SHARED_CACHE_PATH}.tmp`;
+      writeFileSync(tempPath, JSON.stringify(cache), { encoding: 'utf-8', mode: 0o600 });
+      renameSync(tempPath, SHARED_CACHE_PATH);
+    } catch (error) {
+      console.error('[CCUsage] Failed to write cache:', error);
+    }
+  }
+
+  /**
+   * Convert cache format to CCUsageData format
+   */
+  private cacheToData(cache: SharedCache): CCUsageData {
+    const totalMinutes = cache.budgetRemaining || 0;
+    return {
+      blockId: '',
+      startTime: new Date(),
+      endTime: new Date(),
+      isActive: true,
+      costUSD: cache.costToday,
+      costPerHour: cache.burnRatePerHour,
+      hoursLeft: Math.floor(totalMinutes / 60),
+      minutesLeft: totalMinutes % 60,
+      percentageUsed: cache.budgetPercentUsed,
+      resetTime: cache.resetTime,
+      totalTokens: cache.totalTokens,
+      tokensPerMinute: cache.tokensPerMinute,
+      isFresh: cache.isFresh,
+      lastFetched: cache.lastFetched
+    };
+  }
+
+  /**
+   * Run ccusage CLI and parse output
+   */
+  private async runCcusage(): Promise<CCUsageData> {
+    try {
+      const { stdout } = await execAsync('ccusage blocks --json --active', {
+        timeout: this.config.timeout,
+        maxBuffer: 1024 * 1024
+      });
+
+      const parsed = JSON.parse(stdout);
+      const activeBlock = parsed.blocks?.find((b: any) => b.isActive === true);
 
       if (!activeBlock) {
+        console.error('[CCUsage] No active block found');
         return this.getDefaultData();
       }
 
-      // VALIDATION: Ensure required fields exist and are correct types
-      if (typeof activeBlock.costUSD !== 'number' && activeBlock.costUSD !== undefined) {
-        console.error('[CCUsageSharedModule] costUSD is not a number:', typeof activeBlock.costUSD);
-        return this.getDefaultData();
-      }
+      return this.parseActiveBlock(activeBlock);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`[CCUsage] ccusage failed: ${msg}`);
+      // Write cooldown to prevent all daemon processes from retrying
+      this.writeCcusageCooldown();
+      return this.getDefaultData();
+    }
+  }
 
-      // Extract all data from single ccusage call (with validation)
-      const costUSD = Math.max(0, Number(activeBlock.costUSD) || 0);
-      const costPerHour = activeBlock.burnRate?.costPerHour != null
-        ? Math.max(0, Number(activeBlock.burnRate.costPerHour))
-        : null;
+  /**
+   * Parse ccusage active block into CCUsageData
+   */
+  private parseActiveBlock(activeBlock: any): CCUsageData {
+    const costUSD = Math.max(0, Number(activeBlock.costUSD) || 0);
+    const costPerHour = activeBlock.burnRate?.costPerHour != null
+      ? Math.max(0, Number(activeBlock.burnRate.costPerHour))
+      : null;
 
-      const totalTokens = Math.max(0, Number(activeBlock.totalTokens) || 0);
-      const tokensPerMinute = activeBlock.burnRate?.tokensPerMinute != null
-        ? Math.max(0, Number(activeBlock.burnRate.tokensPerMinute))
-        : null;
+    const totalTokens = Math.max(0, Number(activeBlock.totalTokens) || 0);
+    const tokensPerMinute = activeBlock.burnRate?.tokensPerMinute != null
+      ? Math.max(0, Number(activeBlock.burnRate.tokensPerMinute))
+      : null;
 
-      // NOTE: usageLimitResetTime is often null in ccusage output, fallback to endTime
-      const resetTimeStr = activeBlock.usageLimitResetTime || activeBlock.endTime;
-      const startTimeStr = activeBlock.startTime;
+    const resetTimeStr = activeBlock.usageLimitResetTime || activeBlock.endTime;
+    const startTimeStr = activeBlock.startTime;
 
-      let hoursLeft = 0;
-      let minutesLeft = 0;
-      let percentageUsed = 0;
-      let resetTime = '00:00';
+    let hoursLeft = 0;
+    let minutesLeft = 0;
+    let percentageUsed = 0;
+    let resetTime = '00:00';
 
-      if (resetTimeStr && startTimeStr) {
-        const startTime = new Date(startTimeStr);
-        const endTime = new Date(resetTimeStr);
-        const now = new Date();
+    if (resetTimeStr && startTimeStr) {
+      const startTime = new Date(startTimeStr);
+      const endTime = new Date(resetTimeStr);
+      const now = new Date();
 
-        // VALIDATION: Check for valid dates
-        if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
-          console.error('[CCUsageSharedModule] Invalid date strings:', { startTimeStr, resetTimeStr });
-          return this.getDefaultData();
-        }
-
+      if (!isNaN(startTime.getTime()) && !isNaN(endTime.getTime())) {
         const totalMs = endTime.getTime() - startTime.getTime();
         const elapsedMs = now.getTime() - startTime.getTime();
         const remainingMs = Math.max(0, endTime.getTime() - now.getTime());
 
-        // VALIDATION: Prevent division by zero and cap percentage
         if (totalMs > 0) {
           percentageUsed = Math.min(100, Math.max(0, Math.floor((elapsedMs / totalMs) * 100)));
         }
 
-        // VALIDATION: Ensure non-negative time values
         hoursLeft = Math.max(0, Math.floor(remainingMs / (1000 * 60 * 60)));
         minutesLeft = Math.max(0, Math.floor((remainingMs % (1000 * 60 * 60)) / (1000 * 60)));
         resetTime = `${String(endTime.getUTCHours()).padStart(2, '0')}:${String(endTime.getUTCMinutes()).padStart(2, '0')}`;
       }
-
-      // VALIDATION: Check if data looks like a legitimate active billing block
-      // (costUSD=0 + hoursLeft=0 often indicates failed fetch that succeeded syntactically)
-      const hasZeroCost = costUSD === 0;
-      const hasZeroHours = hoursLeft === 0 && minutesLeft === 0;
-      const dataLooksEmpty = hasZeroCost && hasZeroHours && totalTokens === 0;
-
-      const ccusageData = {
-        // FIX: ccusage uses 'id' not 'blockId'
-        blockId: activeBlock.id || '',
-        startTime: new Date(startTimeStr),
-        endTime: new Date(resetTimeStr),
-        isActive: true,
-        costUSD,
-        costPerHour,
-        hoursLeft,
-        minutesLeft,
-        percentageUsed,
-        resetTime,
-        totalTokens,
-        tokensPerMinute,
-        isFresh: !dataLooksEmpty  // Mark as stale if data appears to be from failed fetch
-      };
-
-      if (ccusageData.isFresh) {
-        // Mark cooldown to prevent duplicate ccusage calls for 2 minutes
-        this.cooldownManager.markComplete('billing', { dataAvailable: true });
-      } else {
-        // Data looks failed - log for diagnostics
-        console.error('[CCUsageSharedModule] ccusage returned empty data (cost=0, hours=0, tokens=0)');
-      }
-
-      return ccusageData;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.error('[CCUsageSharedModule] Parse error:', msg);
-      return this.getDefaultData();
     }
+
+    // Check if data looks valid (not all zeros)
+    const dataLooksEmpty = costUSD === 0 && hoursLeft === 0 && minutesLeft === 0 && totalTokens === 0;
+
+    return {
+      blockId: activeBlock.id || '',
+      startTime: new Date(startTimeStr || Date.now()),
+      endTime: new Date(resetTimeStr || Date.now()),
+      isActive: true,
+      costUSD,
+      costPerHour,
+      hoursLeft,
+      minutesLeft,
+      percentageUsed,
+      resetTime,
+      totalTokens,
+      tokensPerMinute,
+      isFresh: !dataLooksEmpty,
+      lastFetched: Date.now()
+    };
+  }
+
+  /**
+   * Check if ccusage fetch is in cooldown (persisted across daemon processes)
+   */
+  private isCcusageCooldown(): boolean {
+    try {
+      if (!existsSync(CCUSAGE_COOLDOWN_PATH)) return false;
+      const mtime = statSync(CCUSAGE_COOLDOWN_PATH).mtimeMs;
+      if (Date.now() - mtime < CCUSAGE_COOLDOWN_MS) return true;
+      try { unlinkSync(CCUSAGE_COOLDOWN_PATH); } catch { /* ignore */ }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Write ccusage cooldown marker to prevent retry storms
+   */
+  private writeCcusageCooldown(): void {
+    try {
+      const dir = `${homedir()}/.claude/session-health/cooldowns`;
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+      }
+      writeFileSync(CCUSAGE_COOLDOWN_PATH, String(Date.now()), { mode: 0o600 });
+    } catch { /* ignore */ }
   }
 
   private getDefaultData(): CCUsageData {
@@ -226,6 +369,10 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
     };
   }
 
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
   validate(data: CCUsageData): ValidationResult {
     if (!data || !data.isFresh) {
       return {
@@ -243,11 +390,9 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
   }
 
   format(data: CCUsageData): string {
-    // This module doesn't format - individual modules will
     return '';
   }
 
-  // Helper methods for individual modules to use
   formatCost(costUSD: number): string {
     if (costUSD >= 100) {
       return `$${costUSD.toFixed(0)}`;
@@ -259,25 +404,12 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
   }
 
   formatTokens(tokens: number): string {
-    let smoothed = tokens;
-
-    if (tokens >= 10000000) {
-      smoothed = Math.round(tokens / 10000000) * 10000000;
-    } else if (tokens >= 1000000) {
-      smoothed = Math.round(tokens / 1000000) * 1000000;
+    if (tokens >= 1000000) {
+      return `${(tokens / 1000000).toFixed(1)}M`;
     } else if (tokens >= 1000) {
-      smoothed = Math.round(tokens / 100) * 100;
+      return `${Math.floor(tokens / 1000)}k`;
     }
-
-    if (smoothed >= 1000000) {
-      const millions = smoothed / 1000000;
-      return `${millions.toFixed(1)}M`;
-    } else if (smoothed >= 1000) {
-      const thousands = Math.floor(smoothed / 1000);
-      return `${thousands}k`;
-    }
-
-    return String(smoothed);
+    return String(tokens);
   }
 }
 

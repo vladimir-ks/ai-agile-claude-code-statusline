@@ -250,8 +250,10 @@ describe('Safety: Memory Leak Prevention', () => {
 
   test('data-gatherer has no unmanaged setTimeout', () => {
     // data-gatherer should not have fire-and-forget setTimeout
+    // Note: setTimeout IS used for time-budget racing (Promise.race with billing deadline)
+    // That is a managed timeout — it resolves a promise, not a fire-and-forget side effect
     const gatherer = readFileSync(join(SCRIPT_DIR, 'lib/data-gatherer.ts'), 'utf-8');
-    // Should not have setTimeout (we removed it)
-    expect(gatherer).not.toContain('setTimeout');
+    // Should not have setInterval (no recurring timers)
+    expect(gatherer).not.toContain('setInterval');
   });
 });

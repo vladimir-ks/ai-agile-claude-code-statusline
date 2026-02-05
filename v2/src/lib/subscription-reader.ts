@@ -152,12 +152,15 @@ export class SubscriptionReader {
 
   /**
    * Get weekly quota info for display (uses "All models" limit)
+   * Includes staleness tracking based on file modification time
    */
   static getWeeklyQuota(): {
     hoursRemaining: number;
     percentUsed: number;
     resetDay: string;
     accountLabel?: string;
+    lastModified?: number;  // File modification timestamp
+    isStale?: boolean;      // True if file >4 hours old
   } | null {
     const account = this.getActiveAccount();
     if (!account) return null;
@@ -170,11 +173,26 @@ export class SubscriptionReader {
       weekly.resetTime
     );
 
+    // Get file modification time to detect stale data
+    let lastModified: number | undefined;
+    let isStale = false;
+    try {
+      const { statSync } = require('fs');
+      const stats = statSync(this.CONFIG_PATH);
+      lastModified = stats.mtimeMs;
+      // Consider stale if >4 hours old (user should update every few hours)
+      isStale = (Date.now() - lastModified) > 4 * 60 * 60 * 1000;
+    } catch {
+      isStale = true; // File doesn't exist or can't be read
+    }
+
     return {
       hoursRemaining: hoursUntilReset,
       percentUsed: weekly.percentUsed || 0,
       resetDay: weekly.resetDay?.substring(0, 3) || '?', // "Thu", "Sat", etc.
-      accountLabel: account.label
+      accountLabel: account.label,
+      lastModified,
+      isStale
     };
   }
 

@@ -54,11 +54,13 @@ export interface BillingInfo {
   isFresh: boolean;
   lastFetched: number;
 
-  // Weekly quota (from OAuth API)
+  // Weekly quota (from OAuth API or subscription.yaml)
   weeklyBudgetRemaining?: number;      // Hours until weekly reset (rounded down)
   weeklyBudgetPercentUsed?: number;    // Percentage of weekly quota used
   weeklyResetDay?: string;             // "Mon", "Tue", etc.
   weeklyLimitUSD?: number;             // Weekly quota limit in USD
+  weeklyDataStale?: boolean;           // True if subscription.yaml is >4 hours old
+  weeklyLastModified?: number;         // When subscription.yaml was last modified
 }
 
 export interface SessionAlerts {
@@ -79,6 +81,8 @@ export interface LaunchContext {
   detectionMethod: 'env' | 'path' | 'fingerprint' | 'default';
   launchAlias?: string;        // Original alias used (claude1, claude2, etc.)
   shellCommand?: string;       // Full command if detectable
+  configDir?: string;          // Derived CLAUDE_CONFIG_DIR from transcript path
+  keychainService?: string;    // Exact keychain service name for this session
 }
 
 export interface TmuxContext {

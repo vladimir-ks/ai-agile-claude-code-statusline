@@ -29,9 +29,9 @@ class ProcessLock {
   constructor(options: Partial<LockOptions> = {}) {
     this.options = {
       lockPath: options.lockPath || `${process.env.HOME}/.claude/.ccusage.lock`,
-      timeout: options.timeout || 60000,  // 60s timeout (ccusage can take 25-35s, allow buffer for lock holder)
-      retryInterval: options.retryInterval || 5000,  // 5s between retries
-      maxRetries: options.maxRetries || 15  // Total ~75s of attempts
+      timeout: options.timeout || 15000,  // 15s stale lock timeout (was 60s — too long, daemons killed at 30s)
+      retryInterval: options.retryInterval || 2000,  // 2s between retries
+      maxRetries: options.maxRetries || 5  // Total ~10s of attempts (was 15×5s=75s — far exceeds daemon budget)
     };
   }
 
