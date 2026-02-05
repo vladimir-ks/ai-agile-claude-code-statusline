@@ -25,6 +25,7 @@ export interface ModelInfo {
   source: 'transcript' | 'jsonInput' | 'settings' | 'default';
   confidence: number;          // 0-100
   reason?: string;
+  updatedAt?: number;          // Unix ms when model was resolved
 }
 
 export interface ContextInfo {
@@ -33,6 +34,7 @@ export interface ContextInfo {
   percentUsed: number;
   windowSize: number;
   nearCompaction: boolean;     // >70%
+  updatedAt?: number;          // Unix ms when context was calculated
 }
 
 export interface GitInfo {
@@ -126,9 +128,10 @@ export interface SessionHealth {
   billing: BillingInfo;
   alerts: SessionAlerts;
 
-  // Additional Metadata (NEW)
+  // Additional Metadata
   project?: ProjectMetadata;
   performance?: PerformanceMetrics;
+  failoverNotification?: string;   // "🔄 Swapped → slot-2 (3m ago)" if recent swap
 
   // Timestamps
   gatheredAt: number;

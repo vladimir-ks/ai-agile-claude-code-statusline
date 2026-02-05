@@ -20,11 +20,10 @@ import {
   SessionHealth,
   ClaudeCodeInput,
   ContextInfo,
-  GitInfo,
   BillingInfo,
   createDefaultHealth
 } from '../types/session-health';
-import { existsSync, readFileSync, writeFileSync, statSync, renameSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { basename, dirname } from 'path';
 import { homedir } from 'os';
 import { execSync } from 'child_process';
@@ -42,6 +41,12 @@ import { AuthProfileDetector } from '../modules/auth-profile-detector';
 import { SubscriptionReader } from './subscription-reader';
 import { HotSwapQuotaReader } from './hot-swap-quota-reader';
 import { KeychainResolver } from '../modules/keychain-resolver';
+import { FreshnessManager } from './freshness-manager';
+import { DebugStateWriter } from './debug-state-writer';
+import { HealthPublisher } from './health-publisher';
+import { sanitizeError, redactEmail } from './sanitize';
+import { FailoverSubscriber } from './failover-subscriber';
+import { LocalCostCalculator } from './local-cost-calculator';
 
 class DataGatherer {
   private healthStore: HealthStore;
@@ -133,9 +138,9 @@ class DataGatherer {
       if (matchedSlot) {
         health.launch.authProfile = matchedSlot.email;
         health.launch.detectionMethod = 'path'; // configDir-based is a path-derived method
-        console.error(`[DataGatherer] Session ${sessionId} → ${keychainService} (${matchedSlot.email}, configDir: ${configDir})`);
+        console.error(`[DataGatherer] Session matched → ${keychainService} (${redactEmail(matchedSlot.email)})`);
       } else {
-        console.error(`[DataGatherer] Session ${sessionId} → ${keychainService} (configDir: ${configDir}, no slot match)`);
+        console.error(`[DataGatherer] Session → ${keychainService} (no slot match)`);
       }
     }
 
@@ -159,12 +164,18 @@ class DataGatherer {
     // 2. Model (multi-source validation)
     const settingsModel = this.getSettingsModel();
     health.model = this.modelResolver.resolve(transcriptPath, jsonInput, settingsModel);
+    health.model.updatedAt = Date.now();
 
     // 3. Context window (from JSON input)
     health.context = this.calculateContext(jsonInput);
+    health.context.updatedAt = Date.now();
 
     // 4. Git status (cached)
+    // NOTE: lastChecked is now set BEFORE fetch, so cached git data
+    // gets the fetch time, not the post-return time. This fixes the bug
+    // where cached git data showed "just checked" when it was actually 30s old.
     try {
+      const gitFetchStart = Date.now();
       const gitData = await this.gitModule.fetch(sessionId);
       if (gitData) {
         health.git = {
@@ -172,7 +183,7 @@ class DataGatherer {
           ahead: gitData.ahead || 0,
           behind: gitData.behind || 0,
           dirty: gitData.dirty || 0,
-          lastChecked: Date.now()
+          lastChecked: gitFetchStart
         };
       }
     } catch {
@@ -231,7 +242,7 @@ class DataGatherer {
       }
 
       const ageSec = Math.floor((Date.now() - hotSwapQuota.lastFetched) / 1000);
-      console.error(`[DataGatherer] Hot-swap quota: ${hotSwapQuota.slotId} (${hotSwapQuota.email}, age: ${ageSec}s, stale: ${hotSwapQuota.isStale})`);
+      console.error(`[DataGatherer] Hot-swap quota: ${hotSwapQuota.slotId} (${redactEmail(hotSwapQuota.email)}, age: ${ageSec}s, stale: ${hotSwapQuota.isStale})`);
     } else {
       // No hot-swap data — fall through to OAuth or subscription.yaml
       const hasOAuthWeeklyData = health.billing.weeklyBudgetRemaining !== undefined ||
@@ -300,12 +311,25 @@ class DataGatherer {
       transcriptScanDuration: undefined // Will be added by incremental scanner if available
     };
 
-    // 10. Pre-format output for all terminal widths (Phase 0: Performance Architecture)
+    // 9b. Failover notification (read local JSONL — fast, non-blocking)
+    health.failoverNotification = FailoverSubscriber.getNotification() || undefined;
+
+    // 10. CRITICAL FIX: Compute billing.isFresh from timestamp (replaces stored boolean)
+    // Previously isFresh was stored as true and never recomputed — 4-day-old data showed fresh.
+    health.billing.isFresh = FreshnessManager.isBillingFresh(health.billing.lastFetched);
+
+    // 10b. Pre-format output for all terminal widths (Phase 0: Performance Architecture)
     // CRITICAL: Must happen BEFORE writeSessionHealth() so formattedOutput is included in JSON
     health.formattedOutput = StatuslineFormatter.formatAllVariants(health);
 
     // 11. Write to health store (NOW includes formattedOutput!)
     this.healthStore.writeSessionHealth(sessionId, health);
+
+    // 11b. Write debug state file (non-critical — never fails the gather)
+    DebugStateWriter.write(sessionId, health);
+
+    // 11c. Publish health for cloud_configs handshake (non-critical)
+    HealthPublisher.publish(sessionId, health);
 
     // 12. Update global summary (synchronous - we're already in background daemon)
     try {
@@ -339,7 +363,7 @@ class DataGatherer {
       this.runtimeStateStore.upsertSession(runtimeSession);
     } catch (error) {
       // Runtime state update failed - not critical, continue
-      console.error('[DataGatherer] Failed to update runtime state:', error);
+      console.error('[DataGatherer] Failed to update runtime state:', sanitizeError(error));
     }
 
     return health;
@@ -361,12 +385,25 @@ class DataGatherer {
     let oauthBilling: BillingInfo | null = null;
 
     if (slotStatus === 'inactive') {
-      console.error(`[DataGatherer] Skipping OAuth API for inactive slot (${health.launch.authProfile})`);
+      console.error(`[DataGatherer] Skipping OAuth API for inactive slot (${redactEmail(health.launch.authProfile)})`);
     } else {
+      const oauthStart = Date.now();
       try {
         oauthBilling = await AnthropicOAuthAPI.fetchUsage(health.launch.authProfile, keychainService || undefined);
-      } catch {
-        // OAuth failed - will fall back to ccusage
+        DebugStateWriter.recordFetch({
+          category: 'billing_oauth',
+          timestamp: oauthStart,
+          success: !!(oauthBilling && oauthBilling.isFresh),
+          durationMs: Date.now() - oauthStart,
+        });
+      } catch (err) {
+        DebugStateWriter.recordFetch({
+          category: 'billing_oauth',
+          timestamp: oauthStart,
+          success: false,
+          durationMs: Date.now() - oauthStart,
+          error: sanitizeError(err),
+        });
       }
     }
 
@@ -377,6 +414,7 @@ class DataGatherer {
       );
     } else {
       // OAuth failed - fallback to ccusage
+      const ccusageStart = Date.now();
       try {
         const billingData = await this.ccusageModule.fetch(health.sessionId || '');
 
@@ -412,8 +450,62 @@ class DataGatherer {
         } else if (existingHealth?.billing?.costToday > 0) {
           health.billing = { ...existingHealth.billing, isFresh: false };
         }
-      } catch {
-        if (existingHealth?.billing?.costToday > 0) {
+
+        DebugStateWriter.recordFetch({
+          category: 'billing_ccusage',
+          timestamp: ccusageStart,
+          success: !!(billingData && billingData.isFresh),
+          durationMs: Date.now() - ccusageStart,
+        });
+      } catch (err) {
+        DebugStateWriter.recordFetch({
+          category: 'billing_ccusage',
+          timestamp: ccusageStart,
+          success: false,
+          durationMs: Date.now() - ccusageStart,
+          error: sanitizeError(err),
+        });
+
+        // ccusage failed - try local cost calculation from transcript
+        // This bypasses ccusage entirely and only parses the current session
+        if (health.transcriptPath && existsSync(health.transcriptPath)) {
+          console.error('[DataGatherer] ccusage failed, trying local cost calculation...');
+          const localCostStart = Date.now();
+          try {
+            const localCost = await LocalCostCalculator.calculateCost(health.transcriptPath);
+            if (localCost && localCost.isFresh && localCost.costUSD > 0) {
+              health.billing = {
+                ...health.billing,
+                costToday: localCost.costUSD,
+                burnRatePerHour: localCost.costPerHour || 0,
+                totalTokens: localCost.totalTokens || 0,
+                tokensPerMinute: localCost.tokensPerMinute || null,
+                isFresh: true,
+                lastFetched: localCost.lastFetched
+              };
+              DebugStateWriter.recordFetch({
+                category: 'billing_local',
+                timestamp: localCostStart,
+                success: true,
+                durationMs: Date.now() - localCostStart,
+              });
+              console.error(`[DataGatherer] Local cost calculation: $${localCost.costUSD.toFixed(4)}`);
+            } else if (existingHealth?.billing?.costToday > 0) {
+              health.billing = { ...existingHealth.billing, isFresh: false };
+            }
+          } catch (localErr) {
+            DebugStateWriter.recordFetch({
+              category: 'billing_local',
+              timestamp: localCostStart,
+              success: false,
+              durationMs: Date.now() - localCostStart,
+              error: sanitizeError(localErr),
+            });
+            if (existingHealth?.billing?.costToday > 0) {
+              health.billing = { ...existingHealth.billing, isFresh: false };
+            }
+          }
+        } else if (existingHealth?.billing?.costToday > 0) {
           health.billing = { ...existingHealth.billing, isFresh: false };
         }
       }
@@ -632,7 +724,7 @@ class DataGatherer {
       }
     }
 
-    if (!health.billing.isFresh && health.billing.lastFetched > 0) {
+    if (!FreshnessManager.isBillingFresh(health.billing.lastFetched) && health.billing.lastFetched > 0) {
       issues.push('Billing data stale');
       if (status === 'healthy') {
         status = 'warning';

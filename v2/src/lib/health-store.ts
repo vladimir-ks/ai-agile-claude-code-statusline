@@ -26,6 +26,7 @@ import {
   createDefaultConfig,
   createDefaultSummary
 } from '../types/session-health';
+import { sanitizeSessionId } from './sanitize';
 
 class HealthStore {
   private basePath: string;
@@ -44,10 +45,11 @@ class HealthStore {
   }
 
   /**
-   * Get path for a session health file
+   * Get path for a session health file.
+   * SessionId is sanitized to prevent path traversal.
    */
   private sessionPath(sessionId: string): string {
-    return join(this.basePath, `${sessionId}.json`);
+    return join(this.basePath, `${sanitizeSessionId(sessionId)}.json`);
   }
 
   /**

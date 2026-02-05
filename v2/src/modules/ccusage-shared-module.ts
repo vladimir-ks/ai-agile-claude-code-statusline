@@ -18,17 +18,15 @@ import type { DataModule, DataModuleConfig } from '../broker/data-broker';
 import type { ValidationResult } from '../types/validation';
 import { promisify } from 'util';
 import { exec } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { homedir } from 'os';
 import ProcessLock from '../lib/process-lock';
+import { FreshnessManager } from '../lib/freshness-manager';
 
 const execAsync = promisify(exec);
 
 // Shared cache path - ALL sessions read/write here
 const SHARED_CACHE_PATH = `${homedir()}/.claude/session-health/billing-shared.json`;
-
-// Cache freshness threshold (2 minutes)
-const CACHE_FRESH_MS = 120000;
 
 // Lock for preventing concurrent ccusage calls
 const ccusageLock = new ProcessLock({
@@ -37,10 +35,6 @@ const ccusageLock = new ProcessLock({
   retryInterval: 2000,    // Wait 2s between retries
   maxRetries: 5           // Total ~10s (was 20×2s=40s — exceeded daemon budget)
 });
-
-// Cooldown file to prevent ccusage retry storms across daemon invocations
-const CCUSAGE_COOLDOWN_PATH = `${homedir()}/.claude/session-health/cooldowns/ccusage-fetch.cooldown`;
-const CCUSAGE_COOLDOWN_MS = 120000; // 2 minutes
 
 interface CCUsageData {
   // Raw block data
@@ -100,10 +94,10 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
    * IMPORTANT: No cooldown gate! Freshness is determined by cache timestamp.
    */
   async fetch(sessionId: string): Promise<CCUsageData> {
-    // STEP 1: Check shared cache
+    // STEP 1: Check shared cache via FreshnessManager (replaces manual CACHE_FRESH_MS check)
     const cache = this.readSharedCache();
-    const cacheAgeMs = Date.now() - (cache?.lastFetched || 0);
-    const cacheIsFresh = cacheAgeMs < CACHE_FRESH_MS && cache?.isFresh && cache?.costToday >= 0;
+    const cacheAgeMs = FreshnessManager.getAge(cache?.lastFetched);
+    const cacheIsFresh = FreshnessManager.isFresh(cache?.lastFetched, 'billing_ccusage') && cache?.costToday >= 0;
 
     if (cacheIsFresh) {
       // Cache is fresh - return it without fetching
@@ -111,9 +105,9 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       return this.cacheToData(cache!);
     }
 
-    // STEP 2: Cache is stale - check ccusage fetch cooldown before attempting
+    // STEP 2: Cache is stale - check cooldown via FreshnessManager
     // Prevents retry storms when ccusage is broken (persisted across daemon invocations)
-    if (this.isCcusageCooldown()) {
+    if (!FreshnessManager.shouldRefetch('billing_ccusage')) {
       console.error(`[CCUsage] Cache stale but ccusage in cooldown, using stale cache`);
       return cache ? this.cacheToData(cache) : this.getDefaultData();
     }
@@ -150,6 +144,7 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       if (freshData.isFresh) {
         // Write to shared cache for other sessions
         this.writeSharedCache(freshData);
+        FreshnessManager.recordFetch('billing_ccusage', true);
         console.error('[CCUsage] Fetch successful, cache updated');
         return freshData;
       } else {
@@ -234,13 +229,39 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
 
   /**
    * Run ccusage CLI and parse output
+   *
+   * IMPORTANT: Uses explicit `timeout` command wrapper because Node's execAsync timeout
+   * doesn't reliably kill child processes on macOS. Also adds:
+   * - --offline: Use cached pricing data (avoids network delay)
+   * - --since: Limit to today only (avoids parsing hundreds of old transcript files)
    */
   private async runCcusage(): Promise<CCUsageData> {
     try {
-      const { stdout } = await execAsync('ccusage blocks --json --active', {
-        timeout: this.config.timeout,
-        maxBuffer: 1024 * 1024
+      // Build command with timeout wrapper and performance flags
+      // The `timeout` command reliably kills the process on macOS
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const timeoutSec = Math.floor(this.config.timeout / 1000);
+      const cmd = `timeout ${timeoutSec} ccusage blocks --json --active --offline --since ${today}`;
+
+      console.error(`[CCUsage] Running: ${cmd}`);
+      const startTime = Date.now();
+
+      const { stdout, stderr } = await execAsync(cmd, {
+        timeout: this.config.timeout + 5000, // Extra buffer for timeout command
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, NO_COLOR: '1' } // Disable color codes in output
       });
+
+      const elapsed = Date.now() - startTime;
+      console.error(`[CCUsage] Command completed in ${elapsed}ms`);
+
+      // Check if timeout command killed the process (exit code 124)
+      // This is caught as an error, but let's also check stderr
+      if (stderr && stderr.includes('timed out')) {
+        console.error('[CCUsage] ccusage timed out');
+        FreshnessManager.recordFetch('billing_ccusage', false);
+        return this.getDefaultData();
+      }
 
       const parsed = JSON.parse(stdout);
       const activeBlock = parsed.blocks?.find((b: any) => b.isActive === true);
@@ -251,11 +272,18 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       }
 
       return this.parseActiveBlock(activeBlock);
-    } catch (error) {
+    } catch (error: any) {
       const msg = error instanceof Error ? error.message : String(error);
-      console.error(`[CCUsage] ccusage failed: ${msg}`);
-      // Write cooldown to prevent all daemon processes from retrying
-      this.writeCcusageCooldown();
+
+      // Detect timeout (exit code 124 from `timeout` command)
+      if (msg.includes('124') || msg.includes('SIGTERM') || msg.includes('killed')) {
+        console.error(`[CCUsage] ccusage TIMED OUT after ${this.config.timeout}ms`);
+      } else {
+        console.error(`[CCUsage] ccusage failed: ${msg}`);
+      }
+
+      // Record failure via FreshnessManager to prevent retry storms
+      FreshnessManager.recordFetch('billing_ccusage', false);
       return this.getDefaultData();
     }
   }
@@ -321,34 +349,6 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       isFresh: !dataLooksEmpty,
       lastFetched: Date.now()
     };
-  }
-
-  /**
-   * Check if ccusage fetch is in cooldown (persisted across daemon processes)
-   */
-  private isCcusageCooldown(): boolean {
-    try {
-      if (!existsSync(CCUSAGE_COOLDOWN_PATH)) return false;
-      const mtime = statSync(CCUSAGE_COOLDOWN_PATH).mtimeMs;
-      if (Date.now() - mtime < CCUSAGE_COOLDOWN_MS) return true;
-      try { unlinkSync(CCUSAGE_COOLDOWN_PATH); } catch { /* ignore */ }
-      return false;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Write ccusage cooldown marker to prevent retry storms
-   */
-  private writeCcusageCooldown(): void {
-    try {
-      const dir = `${homedir()}/.claude/session-health/cooldowns`;
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true, mode: 0o700 });
-      }
-      writeFileSync(CCUSAGE_COOLDOWN_PATH, String(Date.now()), { mode: 0o600 });
-    } catch { /* ignore */ }
   }
 
   private getDefaultData(): CCUsageData {

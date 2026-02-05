@@ -326,7 +326,7 @@ describe('SPEC: Output Format', () => {
       expect(output).toMatch(/\d+%\)/);  // Ends with percent and closing paren
     });
 
-    test('shows subtle staleness indicator when data is old (>3min)', () => {
+    test('shows staleness indicator when data is old (>3min)', () => {
       createHealthFile('budget-stale', {
         sessionId: 'budget-stale',
         model: { value: 'Claude' },
@@ -340,8 +340,9 @@ describe('SPEC: Output Format', () => {
       const output = runDisplay('{"session_id":"budget-stale"}');
 
       expect(output).toContain('⌛:');
-      // Shows ⚠ warning marker when data is stale (>3 minutes old)
-      expect(output).toContain('⚠');
+      // Shows staleness marker: ⚠ (stale 2-10min) or 🔺 (critical >10min)
+      const hasStaleIndicator = output.includes('⚠') || output.includes('🔺');
+      expect(hasStaleIndicator).toBe(true);
     });
   });
 

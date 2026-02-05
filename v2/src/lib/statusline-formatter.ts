@@ -9,6 +9,7 @@
 
 import { SessionHealth } from '../types/session-health';
 import { homedir } from 'os';
+import { FreshnessManager } from './freshness-manager';
 
 // Color codes
 const COLORS = {
@@ -480,6 +481,10 @@ export class StatuslineFormatter {
 
     git += rst();
 
+    // Staleness indicator for git (>5min = stale)
+    const gitIndicator = FreshnessManager.getIndicator(health.git?.lastChecked, 'git_status');
+    if (gitIndicator) git += `${c('critical')}${gitIndicator}${rst()}`;
+
     return git;
   }
 
@@ -498,7 +503,17 @@ export class StatuslineFormatter {
       // Unknown models keep full name (e.g., GPT-4, Gemini, etc.)
     }
 
-    return `🤖:${c('model')}${model}${rst()}`;
+    let result = `🤖:${c('model')}${model}${rst()}`;
+
+    // Staleness indicator for model (low confidence = uncertain)
+    const confidence = health.model?.confidence ?? 0;
+    if (confidence > 0 && confidence < 50) {
+      result += `${c('critical')}🔺${rst()}`;
+    } else if (confidence > 0 && confidence < 80) {
+      result += `${c('critical')}⚠${rst()}`;
+    }
+
+    return result;
   }
 
   /**
@@ -562,12 +577,11 @@ export class StatuslineFormatter {
     const timeMins = String(now.getMinutes()).padStart(2, '0');
     parts.push(`🕐:${c('time')}${timeHours}:${timeMins}${rst()}`);
 
-    // Check data staleness (>4 minutes = stale, add ⚠ to affected data)
-    // Note: cooldown is 2min, fresh window is 3min, so 4min threshold avoids false positives
+    // Check data staleness via FreshnessManager (unified thresholds)
     const lastFetched = health.billing?.lastFetched || health.gatheredAt || Date.now();
-    const ageMinutes = Math.floor((Date.now() - lastFetched) / 60000);
-    const isStale = ageMinutes >= 4;
-    const staleMarker = isStale ? `${c('critical')}⚠${rst()}` : '';
+    const ageMinutes = Math.floor(FreshnessManager.getAge(lastFetched) / 60000);
+    const billingIndicator = FreshnessManager.getIndicator(lastFetched, 'billing_ccusage');
+    const staleMarker = billingIndicator ? `${c('critical')}${billingIndicator}${rst()}` : '';
 
     // Budget
     if (health.billing?.budgetRemaining || health.billing?.budgetRemaining === 0) {
@@ -601,9 +615,11 @@ export class StatuslineFormatter {
       const pct = Math.max(0, Math.min(100, health.billing.weeklyBudgetPercentUsed || 0));
       const resetDay = health.billing.weeklyResetDay || 'Mon';
 
-      // Weekly has its own staleness (from subscription.yaml file age)
-      const weeklyStale = health.billing.weeklyDataStale === true;
-      const weeklyMarker = weeklyStale ? `${c('critical')}⚠${rst()}` : '';
+      // Weekly staleness via FreshnessManager
+      const weeklyIndicator = FreshnessManager.getIndicator(
+        health.billing.weeklyLastModified, 'weekly_quota'
+      );
+      const weeklyMarker = weeklyIndicator ? `${c('critical')}${weeklyIndicator}${rst()}` : '';
 
       parts.push(`📅:${c('weeklyBudget')}${hours}h(${pct}%)@${resetDay}${rst()}${weeklyMarker}`);
     }
@@ -629,6 +645,11 @@ export class StatuslineFormatter {
       } else if (secretNames.length > 1) {
         return `${c('critical')}⚠️ ${secretNames.length} secrets${rst()}`;
       }
+    }
+
+    // Failover notification (transient — recent hot-swap event)
+    if (health.failoverNotification) {
+      return `${c('critical')}${health.failoverNotification}${rst()}`;
     }
 
     // Check for data loss risk (highest priority - active session with stale transcript)

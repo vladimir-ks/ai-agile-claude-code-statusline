@@ -697,16 +697,17 @@ describe('Line 2 Drop Order', () => {
 });
 
 describe('Staleness Indicator', () => {
-  test('no warning when data is fresh (<3 min old)', () => {
+  test('no warning when data is fresh (<2 min old)', () => {
     const health = createDefaultHealth('fresh-data');
-    health.gatheredAt = Date.now() - (2 * 60 * 1000); // 2 minutes ago
+    health.gatheredAt = Date.now() - (60 * 1000); // 1 minute ago
     health.billing.lastFetched = health.gatheredAt;
     health.billing.budgetRemaining = 30;
+    health.git.lastChecked = health.gatheredAt; // Ensure git is also fresh
 
     const variants = StatuslineFormatter.formatAllVariants(health);
     const output = variants.width120.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Should show time and budget without ⚠
+    // Should show time and budget without ⚠ (FreshnessManager threshold is 2min)
     expect(output).toContain('🕐:');
     expect(output).toContain('⌛:');
     expect(output).not.toContain('⚠');
@@ -869,5 +870,66 @@ describe('Single Line Mode (No Tmux)', () => {
     // Should contain essential components
     expect(singleLine).toContain('📁:');
     expect(singleLine).toContain('🕐:');
+  });
+});
+
+describe('Failover Notification Display', () => {
+  test('failover notification appears on Line 1 when present', () => {
+    const health = createDefaultHealth('failover-test');
+    health.projectPath = '~/project';
+    health.failoverNotification = '🔄 Swapped → slot-2 (3m ago)';
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    expect(stripped).toContain('🔄 Swapped → slot-2 (3m ago)');
+    // Should be on Line 1
+    const line1 = variants.width120[0].replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line1).toContain('🔄 Swapped');
+  });
+
+  test('failover notification absent when field is undefined', () => {
+    const health = createDefaultHealth('no-failover');
+    health.projectPath = '~/project';
+    // failoverNotification is undefined by default
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    expect(stripped).not.toContain('🔄');
+  });
+
+  test('failover notification takes priority over transcript stale', () => {
+    const health = createDefaultHealth('failover-priority');
+    health.projectPath = '~/project';
+    health.failoverNotification = '🔄 Swapped → slot-1 (30s ago)';
+    health.alerts.transcriptStale = true;
+    health.transcript.lastModifiedAgo = '10m';
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Failover should show, transcript stale should NOT (only one alert slot)
+    expect(stripped).toContain('🔄 Swapped');
+    expect(stripped).not.toContain('📝:10m');
+  });
+
+  test('secrets alert takes priority over failover notification', () => {
+    const health = createDefaultHealth('secrets-vs-failover');
+    health.projectPath = '~/project';
+    health.failoverNotification = '🔄 Swapped → slot-2 (1m ago)';
+    health.alerts.secretsDetected = true;
+    health.alerts.secretTypes = ['API_KEY'];
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    // Secrets take highest priority
+    expect(stripped).toContain('API_KEY');
+    expect(stripped).not.toContain('🔄 Swapped');
   });
 });
