@@ -12,6 +12,7 @@
 
 import { existsSync, statSync, writeFileSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import { homedir } from 'os';
+import { RefreshIntentManager } from './refresh-intent-manager';
 
 // ---------------------------------------------------------------------------
 // Category definitions
@@ -34,6 +35,11 @@ export const CATEGORIES: Record<string, FreshnessCategory> = {
   model:               { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh
   context:             { freshMs: 5_000,     cooldownMs: 0 },                            // 5s fresh (real-time from stdin)
   weekly_quota:        { freshMs: 300_000,   cooldownMs: 0,       staleMs: 86_400_000 }, // 5min fresh, 24h critical
+  quota_broker:        { freshMs: 30_000,    cooldownMs: 0,       staleMs: 300_000 },    // 30s fresh, 5min critical
+  version_check:       { freshMs: 14_400_000,cooldownMs: 0 },                            // 4h fresh
+  auth_profile:        { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh
+  secrets_scan:        { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh
+  notifications:       { freshMs: 5_000,     cooldownMs: 0 },                            // 5s fresh
 };
 
 // ---------------------------------------------------------------------------
@@ -125,6 +131,53 @@ export class FreshnessManager {
       case 'critical': return '🔺';
       case 'unknown': return '⚠';
     }
+  }
+
+  /**
+   * Context-aware indicator that considers refresh intent state.
+   *
+   * Unlike getIndicator() which shows ⚠ immediately on stale data,
+   * this only shows indicators when something is ACTUALLY wrong:
+   * - Fresh → '' (no indicator)
+   * - Stale, no intent → '' (daemon will handle on next run)
+   * - Stale, intent < 30s → '' (refresh pending, normal)
+   * - Stale, intent 30s-5min → '⚠' (refresh overdue)
+   * - Stale, in cooldown → '⚠' (failed, retrying)
+   * - Critical age → '🔺'
+   * - Intent > 5min → '🔺' (refresh broken)
+   */
+  static getContextAwareIndicator(
+    timestamp: number | undefined | null,
+    category: string
+  ): '' | '⚠' | '🔺' {
+    // No data or unknown category → silent (not an error to show)
+    if (!timestamp || timestamp <= 0) return '';
+    const cat = CATEGORIES[category];
+    if (!cat) return '';
+
+    const age = Date.now() - timestamp;
+
+    // 1. Fresh → no indicator
+    if (age < cat.freshMs) return '';
+
+    // 2. Critical age → always 🔺
+    if (cat.staleMs && age >= cat.staleMs) return '🔺';
+
+    // 3. Check intent state for context
+    const intentAge = RefreshIntentManager.getIntentAge(category);
+
+    if (intentAge !== null) {
+      // Intent exists — check how long it's been pending
+      if (intentAge >= 5 * 60_000) return '🔺';  // > 5min: refresh broken
+      if (intentAge >= 30_000) return '⚠';       // > 30s: overdue
+      return '';                                   // < 30s: pending, normal
+    }
+
+    // 4. No intent — check if in cooldown (means previous fetch failed)
+    if (this.isInCooldown(category)) return '⚠';
+
+    // 5. Stale but no intent and no cooldown → daemon hasn't run yet, will handle
+    return '';
   }
 
   /**

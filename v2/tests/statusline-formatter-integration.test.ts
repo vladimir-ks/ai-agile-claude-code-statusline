@@ -7,10 +7,15 @@
  * - Display-only reads and outputs variants
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { StatuslineFormatter } from '../src/lib/statusline-formatter';
 import { createDefaultHealth, TmuxContext } from '../src/types/session-health';
 import { sessionHealthToRuntimeSession } from '../src/types/runtime-state';
+import { SessionLockManager } from '../src/lib/session-lock-manager';
+import { NotificationManager } from '../src/lib/notification-manager';
+import { rmSync, mkdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 describe('StatuslineFormatter Integration', () => {
   test('formatAllVariants generates all 7 terminal width variants', () => {
@@ -933,5 +938,436 @@ describe('Failover Notification Display', () => {
     // Secrets take highest priority
     expect(stripped).toContain('API_KEY');
     expect(stripped).not.toContain('🔄 Swapped');
+  });
+
+  // Phase 4: Transcript indicator dedup — suppress 📝 when line 3 message preview shows elapsed
+  test('transcriptStale with lastMessagePreview → no 📝 indicator (suppressed)', () => {
+    const health = createDefaultHealth('dedup-stale-preview');
+    health.projectPath = '~/project';
+    health.alerts.transcriptStale = true;
+    health.transcript.lastModifiedAgo = '37m';
+    health.transcript.lastMessagePreview = 'What does the main function do?';
+    health.transcript.lastMessageAgo = '35m';
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    // 📝 indicator should be suppressed since line 3 shows "(35m) What does..."
+    expect(stripped).not.toContain('📝:37m');
+  });
+
+  test('transcriptStale without lastMessagePreview → shows 📝 indicator', () => {
+    const health = createDefaultHealth('dedup-stale-no-preview');
+    health.projectPath = '~/project';
+    health.alerts.transcriptStale = true;
+    health.transcript.lastModifiedAgo = '37m';
+    health.transcript.lastMessagePreview = undefined;
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    // 📝 indicator should show since no message preview on line 3
+    expect(stripped).toContain('📝:37m');
+  });
+
+  test('dataLossRisk with lastMessagePreview → no 📝 indicator (suppressed)', () => {
+    const health = createDefaultHealth('dedup-risk-preview');
+    health.projectPath = '~/project';
+    health.alerts.dataLossRisk = true;
+    health.alerts.transcriptStale = true;
+    health.transcript.lastModifiedAgo = '37m';
+    health.transcript.lastMessagePreview = 'What does this function do?';
+    health.transcript.lastMessageAgo = '35m';
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    // 📝:37m⚠ should be suppressed — line 3 shows elapsed
+    expect(stripped).not.toContain('📝:37m');
+    expect(stripped).not.toContain('📝:37m⚠');
+  });
+
+  test('dataLossRisk without lastMessagePreview → shows 📝 indicator with ⚠', () => {
+    const health = createDefaultHealth('dedup-risk-no-preview');
+    health.projectPath = '~/project';
+    health.alerts.dataLossRisk = true;
+    health.alerts.transcriptStale = true;
+    health.transcript.lastModifiedAgo = '37m';
+    health.transcript.lastMessagePreview = undefined;
+
+    const variants = StatuslineFormatter.formatAllVariants(health);
+    const output = variants.width120.join('\n');
+    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+    // 📝 with warning should show since no message preview
+    expect(stripped).toContain('📝:37m⚠');
+  });
+});
+
+// ============================================================================
+// Phase 1 + 2 Integration Tests: Slot Indicator + Notifications
+// ============================================================================
+
+describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
+  const TEST_DIR = join(tmpdir(), `phase12-integration-test-${Date.now()}`);
+  const LOCK_DIR = join(TEST_DIR, 'session-health');
+
+  beforeEach(() => {
+    mkdirSync(LOCK_DIR, { recursive: true });
+    // Override paths for testing
+    (SessionLockManager as any).LOCK_DIR = LOCK_DIR;
+    (NotificationManager as any).STATE_PATH = join(LOCK_DIR, 'notifications.json');
+    SessionLockManager.clearCache?.();
+    NotificationManager.clearCache();
+  });
+
+  afterEach(() => {
+    SessionLockManager.clearCache?.();
+    NotificationManager.clearCache();
+    try { rmSync(TEST_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  describe('Slot Indicator Display', () => {
+    test('shows |S1 when session lock exists with slot-1', () => {
+      const health = createDefaultHealth('slot-test-1');
+      health.projectPath = '~/project';
+
+      // Create lock file with slot-1
+      SessionLockManager.create(
+        'slot-test-1',
+        'slot-1',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).toContain('|S1');
+    });
+
+    test('shows |S2 when session lock exists with slot-2', () => {
+      const health = createDefaultHealth('slot-test-2');
+      health.projectPath = '~/project';
+
+      SessionLockManager.create(
+        'slot-test-2',
+        'slot-2',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).toContain('|S2');
+    });
+
+    test('shows |S3 when session lock exists with slot-3', () => {
+      const health = createDefaultHealth('slot-test-3');
+      health.projectPath = '~/project';
+
+      SessionLockManager.create(
+        'slot-test-3',
+        'slot-3',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).toContain('|S3');
+    });
+
+    test('shows no slot indicator when lock file missing', () => {
+      const health = createDefaultHealth('slot-test-no-lock');
+      health.projectPath = '~/project';
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).not.toContain('|S1');
+      expect(stripped).not.toContain('|S2');
+      expect(stripped).not.toContain('|S3');
+    });
+
+    test('slot indicator appears after weekly reset day', () => {
+      const health = createDefaultHealth('slot-position-test');
+      health.projectPath = '~/project';
+      health.billing.weeklyBudgetRemaining = 120;
+      health.billing.weeklyBudgetPercentUsed = 50;
+      health.billing.weeklyResetDay = 'Wed';
+
+      SessionLockManager.create(
+        'slot-position-test',
+        'slot-1',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const line2 = variants.width120[1];
+      const stripped = line2.replace(/\x1b\[[0-9;]*m/g, '');
+
+      // Should appear after @Wed
+      expect(stripped).toMatch(/@Wed.*\|S1/);
+    });
+  });
+
+  describe('Version Update Notification', () => {
+    test('shows update notification when registered', () => {
+      const health = createDefaultHealth('version-notify-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register(
+        'version_update',
+        'Update to 2.1.32 available (your version: 2.1.31)',
+        7
+      );
+      // Mark as shown to start show cycle
+      NotificationManager.recordShown('version_update');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).toContain('Update to 2.1.32 available');
+      expect(stripped).toContain('2.1.31');
+    });
+
+    test('update notification appears on line 4', () => {
+      const health = createDefaultHealth('version-line-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register(
+        'version_update',
+        'Update to 2.1.32 available',
+        7
+      );
+      NotificationManager.recordShown('version_update');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      expect(variants.width120.length).toBeGreaterThanOrEqual(4);
+
+      const line4 = variants.width120[3];
+      const stripped = line4.replace(/\x1b\[[0-9;]*m/g, '');
+      expect(stripped).toContain('Update to 2.1.32');
+    });
+
+    test('no notification line when no notifications active', () => {
+      const health = createDefaultHealth('no-notify-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      // Should only have 3 lines (dir+model+context, time+budget, last message)
+      expect(variants.width120.length).toBe(3);
+    });
+
+    test('notification hidden when dismissed', () => {
+      const health = createDefaultHealth('dismissed-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register('version_update', 'Update available', 7);
+      NotificationManager.dismiss('version_update');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).not.toContain('Update available');
+      expect(variants.width120.length).toBe(3); // No notification line
+    });
+  });
+
+  describe('Slot Switch Notification', () => {
+    test('shows slot switch notification when registered', () => {
+      const health = createDefaultHealth('slot-switch-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register(
+        'slot_switch',
+        'Switch to slot-3 (rank 1, urgency: 538)',
+        6
+      );
+      NotificationManager.recordShown('slot_switch');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).toContain('Switch to slot-3');
+      expect(stripped).toContain('rank 1');
+    });
+
+    test('slot switch uses cyan color (💡)', () => {
+      const health = createDefaultHealth('slot-color-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register('slot_switch', 'Switch slots', 6);
+      NotificationManager.recordShown('slot_switch');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+
+      expect(output).toContain('💡');
+    });
+  });
+
+  describe('Multiple Notifications', () => {
+    test('shows both version and slot notifications', () => {
+      const health = createDefaultHealth('multi-notify-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register('version_update', 'Update to 2.1.32', 7);
+      NotificationManager.recordShown('version_update');
+      NotificationManager.register('slot_switch', 'Switch to slot-2', 6);
+      NotificationManager.recordShown('slot_switch');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(stripped).toContain('Update to 2.1.32');
+      expect(stripped).toContain('Switch to slot-2');
+      expect(variants.width120.length).toBe(5); // 3 base + 2 notifications
+    });
+
+    test('higher priority notification appears first', () => {
+      const health = createDefaultHealth('priority-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register('slot_switch', 'Switch slots', 6);
+      NotificationManager.recordShown('slot_switch');
+      NotificationManager.register('version_update', 'Update available', 7);
+      NotificationManager.recordShown('version_update');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const line4 = variants.width120[3].replace(/\x1b\[[0-9;]*m/g, '');
+      const line5 = variants.width120[4].replace(/\x1b\[[0-9;]*m/g, '');
+
+      // Version (priority 7) should appear before slot switch (priority 6)
+      expect(line4).toContain('Update available');
+      expect(line5).toContain('Switch slots');
+    });
+
+    test('max 2 notifications shown simultaneously', () => {
+      const health = createDefaultHealth('max-notify-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      NotificationManager.register('version_update', 'Update', 7);
+      NotificationManager.recordShown('version_update');
+      NotificationManager.register('slot_switch', 'Switch', 6);
+      NotificationManager.recordShown('slot_switch');
+      NotificationManager.register('restart_ready', 'Restart', 5);
+      NotificationManager.recordShown('restart_ready');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+
+      // Should have max 5 lines (3 base + 2 notifications)
+      expect(variants.width120.length).toBeLessThanOrEqual(5);
+    });
+  });
+
+  describe('Full Integration: Slot + Notifications', () => {
+    test('slot indicator and notification coexist', () => {
+      const health = createDefaultHealth('full-integration-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+      health.billing.weeklyBudgetRemaining = 100;
+      health.billing.weeklyResetDay = 'Wed';
+
+      SessionLockManager.create(
+        'full-integration-test',
+        'slot-2',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      NotificationManager.register('version_update', 'Update to 2.1.33', 7);
+      NotificationManager.recordShown('version_update');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      // Both should be present
+      expect(stripped).toContain('|S2');
+      expect(stripped).toContain('Update to 2.1.33');
+
+      // 4 lines: dir+model+context, time+budget+slot, last message, notification
+      expect(variants.width120.length).toBe(4);
+    });
+
+    test('handles all width variants correctly', () => {
+      const health = createDefaultHealth('width-test');
+      health.projectPath = '~/project';
+      health.transcript.lastMessagePreview = 'What does main do?';
+      health.transcript.lastMessageAgo = '2m';
+
+      SessionLockManager.create(
+        'width-test',
+        'slot-1',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      NotificationManager.register('version_update', 'Update available', 7);
+      NotificationManager.recordShown('version_update');
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+
+      // All variants should have slot indicator and notification
+      for (const [width, lines] of Object.entries(variants)) {
+        if (width === 'singleLine') continue; // Skip single line
+
+        const output = lines.join('\n');
+        const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+        expect(stripped).toContain('|S1');
+        expect(stripped).toContain('Update available');
+      }
+    });
   });
 });

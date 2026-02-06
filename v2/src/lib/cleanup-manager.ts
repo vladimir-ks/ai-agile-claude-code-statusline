@@ -14,6 +14,7 @@ import { existsSync, readdirSync, statSync, unlinkSync, readFileSync, writeFileS
 import { join } from 'path';
 import { homedir } from 'os';
 import CooldownManager from './cooldown-manager';
+import { RefreshIntentManager } from './refresh-intent-manager';
 
 interface CleanupStats {
   sessionsRemoved: number;
@@ -78,6 +79,9 @@ class CleanupManager {
 
       // 4. Clean up temp files
       this.cleanupTempFiles();
+
+      // 5. Clean stale refresh intents (>10min = stuck)
+      RefreshIntentManager.cleanStale(600_000);
 
       // Mark cleanup cooldown
       this.cooldownManager.markComplete('cleanup', { stats });

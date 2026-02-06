@@ -10,6 +10,8 @@
 import { SessionHealth } from '../types/session-health';
 import { homedir } from 'os';
 import { FreshnessManager } from './freshness-manager';
+import { SessionLockManager } from './session-lock-manager';
+import { NotificationManager } from './notification-manager';
 
 // Color codes
 const COLORS = {
@@ -200,6 +202,10 @@ export class StatuslineFormatter {
     // Line 3: Last message (hard truncate at effectiveWidth)
     const line3 = this.buildLine3(health, effectiveWidth);
     if (line3) lines.push(line3);
+
+    // Lines 4-5: Notifications (Phase 2 — intermittent display)
+    const notifications = this.buildNotifications(health.sessionId, effectiveWidth);
+    lines.push(...notifications);
 
     return lines;
   }
@@ -503,7 +509,7 @@ export class StatuslineFormatter {
     git += rst();
 
     // Staleness indicator for git (>5min = stale)
-    const gitIndicator = FreshnessManager.getIndicator(health.git?.lastChecked, 'git_status');
+    const gitIndicator = FreshnessManager.getContextAwareIndicator(health.git?.lastChecked, 'git_status');
     if (gitIndicator) git += `${c('critical')}${gitIndicator}${rst()}`;
 
     return git;
@@ -601,7 +607,7 @@ export class StatuslineFormatter {
     // Check data staleness via FreshnessManager (unified thresholds)
     const lastFetched = health.billing?.lastFetched || health.gatheredAt || Date.now();
     const ageMinutes = Math.floor(FreshnessManager.getAge(lastFetched) / 60000);
-    const billingIndicator = FreshnessManager.getIndicator(lastFetched, 'billing_ccusage');
+    const billingIndicator = FreshnessManager.getContextAwareIndicator(lastFetched, 'billing_ccusage');
     const staleMarker = billingIndicator ? `${c('critical')}${billingIndicator}${rst()}` : '';
 
     // Budget
@@ -637,7 +643,7 @@ export class StatuslineFormatter {
       const resetDay = health.billing.weeklyResetDay || 'Mon';
 
       // Weekly staleness via FreshnessManager
-      const weeklyIndicator = FreshnessManager.getIndicator(
+      const weeklyIndicator = FreshnessManager.getContextAwareIndicator(
         health.billing.weeklyLastModified, 'weekly_quota'
       );
       const weeklyMarker = weeklyIndicator ? `${c('critical')}${weeklyIndicator}${rst()}` : '';
@@ -645,10 +651,53 @@ export class StatuslineFormatter {
       parts.push(`📅:${c('weeklyBudget')}${hours}h(${pct}%)@${resetDay}${rst()}${weeklyMarker}`);
     }
 
+    // Slot indicator (Phase 1 — Session Lifecycle)
+    const slotIndicator = this.fmtSlotIndicator(health.sessionId);
+    if (slotIndicator) {
+      parts.push(slotIndicator);
+    }
+
     return parts.join('|');
   }
 
   // Note: Cost, Usage, Turns adaptive logic moved inline to buildLine2WithOverflow
+
+  /**
+   * Format slot indicator (Phase 1 — Session Lifecycle)
+   * Returns colored |S1, |S2, etc. based on session lock file
+   * Returns empty string if no lock file or read error
+   */
+  private static fmtSlotIndicator(sessionId: string): string {
+    try {
+      const lock = SessionLockManager.read(sessionId);
+      if (!lock || !lock.slotId) {
+        return '';
+      }
+
+      // Extract slot number from slotId (e.g., "slot-1" → "1")
+      const slotMatch = lock.slotId.match(/slot-(\d+)/);
+      if (!slotMatch) {
+        return '';
+      }
+
+      const slotNum = slotMatch[1];
+
+      // Color coding: slot-1=red, slot-2=blue, slot-3=green, slot-4=yellow
+      const slotColors: Record<string, string> = {
+        '1': c('critical'),     // Red
+        '2': c('contextBar'),   // Blue
+        '3': c('weeklyBudget'), // Green
+        '4': c('cost')          // Yellow
+      };
+
+      const color = slotColors[slotNum] || '';
+
+      return `${color}|S${slotNum}${rst()}`;
+    } catch {
+      // Lock file read error - non-critical, return empty
+      return '';
+    }
+  }
 
   /**
    * Format health status / alerts
@@ -674,17 +723,23 @@ export class StatuslineFormatter {
     }
 
     // Check for data loss risk (highest priority - active session with stale transcript)
-    // Make this informative: show how long since last save
+    // Suppress when line 3 message preview already shows elapsed time
     if (health.alerts?.dataLossRisk) {
-      const ago = health.transcript?.lastModifiedAgo || '?';
-      return `${c('critical')}📝:${ago}⚠${rst()}`;
+      if (!health.transcript?.lastMessagePreview) {
+        const ago = health.transcript?.lastModifiedAgo || '?';
+        return `${c('critical')}📝:${ago}⚠${rst()}`;
+      }
+      return '';  // Line 3 shows "(37m) message..." which is more informative
     }
 
     // Check for transcript stale (session inactive but transcript old)
-    // Less alarming - just show age indicator
+    // Suppress when line 3 message preview already shows elapsed time
     if (health.alerts?.transcriptStale) {
-      const ago = health.transcript?.lastModifiedAgo || '?';
-      return `${c('time')}📝:${ago}${rst()}`;
+      if (!health.transcript?.lastMessagePreview) {
+        const ago = health.transcript?.lastModifiedAgo || '?';
+        return `${c('time')}📝:${ago}${rst()}`;
+      }
+      return '';  // Line 3 shows elapsed time
     }
 
     return '';
@@ -760,5 +815,79 @@ export class StatuslineFormatter {
   private static truncateString(text: string, maxLen: number): string {
     if (text.length <= maxLen) return text;
     return text.substring(0, maxLen - 2) + '..';
+  }
+
+  /**
+   * Build notification lines (Phase 2 — intermittent display)
+   * Returns array of notification lines (max 2)
+   *
+   * Notifications:
+   * - version_update: ⚠️ Update to 2.1.32 available (your version: 2.1.31) [yellow]
+   * - slot_switch: 💡 Switch to slot-3 (rank 1, urgency: 538) [cyan]
+   * - restart_ready: 🔴 Auto-restart ready (idle + saved) [red] (Phase 3)
+   *
+   * Display pattern: Show 30s → Hide 5min → Repeat
+   */
+  private static buildNotifications(sessionId: string, maxWidth: number): string[] {
+    const lines: string[] = [];
+
+    try {
+      // Get active notifications (sorted by priority)
+      const active = NotificationManager.getActive();
+
+      // Show max 2 notifications
+      for (const [type, notification] of active.slice(0, 2)) {
+        // Record that we're showing this notification
+        NotificationManager.recordShown(type);
+
+        // Format notification with color coding
+        let line = '';
+
+        switch (type) {
+          case 'version_update':
+            line = `${c('cost')}⚠️ ${notification.message}${rst()}`; // Yellow
+            break;
+
+          case 'slot_switch':
+            line = `${c('contextBar')}💡 ${notification.message}${rst()}`; // Cyan
+            break;
+
+          case 'restart_ready':
+            line = `${c('critical')}🔴 ${notification.message}${rst()}`; // Red
+            break;
+
+          default:
+            line = notification.message; // Default (no color)
+        }
+
+        // Truncate if too long
+        if (this.visibleWidth(line) > maxWidth) {
+          // Remove emojis and color codes for length calculation
+          const plainMsg = notification.message;
+          const truncated = this.truncateString(plainMsg, maxWidth - 4); // -4 for emoji + space
+
+          // Re-apply color
+          switch (type) {
+            case 'version_update':
+              line = `${c('cost')}⚠️ ${truncated}${rst()}`;
+              break;
+            case 'slot_switch':
+              line = `${c('contextBar')}💡 ${truncated}${rst()}`;
+              break;
+            case 'restart_ready':
+              line = `${c('critical')}🔴 ${truncated}${rst()}`;
+              break;
+            default:
+              line = `⚠️ ${truncated}`;
+          }
+        }
+
+        lines.push(line);
+      }
+    } catch {
+      // Notification rendering failed - non-critical, return empty array
+    }
+
+    return lines;
   }
 }

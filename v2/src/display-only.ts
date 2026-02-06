@@ -561,14 +561,38 @@ function display(): void {
 
       parts.push(fmtTime());
 
-      // Try to get billing from shared cache (available even for new sessions)
+      // Try to get billing/quota from global data cache first, then shared billing cache
       try {
-        const sharedBillingPath = `${HEALTH_DIR}/billing-shared.json`;
-        if (existsSync(sharedBillingPath)) {
-          const billing = JSON.parse(readFileSync(sharedBillingPath, 'utf-8'));
-          if (billing?.costToday > 0) {
-            const cost = formatMoney(billing.costToday);
-            parts.push(`💰:${c('cost')}${cost}${rst()}`);
+        const dataCachePath = `${HEALTH_DIR}/data-cache.json`;
+        let gotBilling = false;
+        if (existsSync(dataCachePath)) {
+          const dataCache = JSON.parse(readFileSync(dataCachePath, 'utf-8'));
+          if (dataCache?.version === 2 && dataCache?.sources) {
+            // Billing from data cache
+            const billingEntry = dataCache.sources.billing;
+            if (billingEntry?.data?.billing?.costToday > 0) {
+              const cost = formatMoney(billingEntry.data.billing.costToday);
+              parts.push(`💰:${c('cost')}${cost}${rst()}`);
+              gotBilling = true;
+            }
+            // Quota from data cache
+            const quotaEntry = dataCache.sources.quota;
+            if (quotaEntry?.data?.weeklyBudgetRemaining) {
+              const hours = Math.floor(quotaEntry.data.weeklyBudgetRemaining);
+              const pct = quotaEntry.data.weeklyBudgetPercentUsed || 0;
+              parts.push(`📅:${c('budget')}${hours}h(${pct}%)${rst()}`);
+            }
+          }
+        }
+        // Fallback: shared billing cache (legacy)
+        if (!gotBilling) {
+          const sharedBillingPath = `${HEALTH_DIR}/billing-shared.json`;
+          if (existsSync(sharedBillingPath)) {
+            const billing = JSON.parse(readFileSync(sharedBillingPath, 'utf-8'));
+            if (billing?.costToday > 0) {
+              const cost = formatMoney(billing.costToday);
+              parts.push(`💰:${c('cost')}${cost}${rst()}`);
+            }
           }
         }
       } catch { /* ignore */ }

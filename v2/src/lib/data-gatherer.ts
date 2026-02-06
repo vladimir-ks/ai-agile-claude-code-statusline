@@ -47,6 +47,13 @@ import { HealthPublisher } from './health-publisher';
 import { sanitizeError, redactEmail } from './sanitize';
 import { FailoverSubscriber } from './failover-subscriber';
 import { LocalCostCalculator } from './local-cost-calculator';
+import { RefreshIntentManager } from './refresh-intent-manager';
+import { TelemetryDashboard } from './telemetry-dashboard';
+import { SessionLockManager } from './session-lock-manager';
+import { VersionChecker } from './version-checker';
+import { NotificationManager } from './notification-manager';
+import { SlotRecommendationReader } from './slot-recommendation-reader';
+import { QuotaBrokerClient } from './quota-broker-client';
 
 class DataGatherer {
   private healthStore: HealthStore;
@@ -201,13 +208,33 @@ class DataGatherer {
       HotSwapQuotaReader.getSlotByConfigDir(configDir)?.slotId || ''
     ) : 'unknown';
 
+    // INTENT COORDINATION: Check if billing is stale and signal refresh intent
+    const billingIsStale = !FreshnessManager.isBillingFresh(existingHealth?.billing?.lastFetched);
+    if (billingIsStale) {
+      RefreshIntentManager.signalRefreshNeeded('billing');
+    }
+
+    // Check if another daemon is already refreshing billing
+    const anotherDaemonRefreshing = billingIsStale && RefreshIntentManager.isRefreshInProgress('billing');
+
     if (billingBudgetMs < 2000) {
       // Not enough time for billing — use stale data
       console.error(`[DataGatherer] Skipping billing (only ${billingBudgetMs}ms left in budget)`);
       if (existingHealth?.billing?.costToday > 0) {
         health.billing = { ...existingHealth.billing, isFresh: false };
       }
+    } else if (anotherDaemonRefreshing) {
+      // Another daemon is handling the refresh — use stale cache, avoid duplicate work
+      console.error('[DataGatherer] Billing refresh in progress by another daemon, using stale cache');
+      if (existingHealth?.billing?.costToday > 0) {
+        health.billing = { ...existingHealth.billing, isFresh: false };
+      }
     } else {
+      // Signal that WE are refreshing
+      if (billingIsStale) {
+        RefreshIntentManager.signalRefreshInProgress('billing');
+      }
+
       // Race billing fetch against remaining time budget
       const billingPromise = this.fetchBilling(
         health, configDir, keychainService, slotStatus, authProfiles, existingHealth
@@ -220,51 +247,83 @@ class DataGatherer {
       if (!health.billing.isFresh && !health.billing.costToday && existingHealth?.billing?.costToday > 0) {
         health.billing = { ...existingHealth.billing, isFresh: false };
       }
+
+      // Clear intent on success, clear inprogress on failure
+      if (health.billing.isFresh) {
+        RefreshIntentManager.clearIntent('billing');
+      } else {
+        RefreshIntentManager.clearInProgress('billing');
+      }
     }
 
-    // 5b. Weekly/Daily quota - priority:
-    // 1. hot-swap-quota.json (PRIMARY - reads active_account from claude-sessions.yaml)
-    // 2. OAuth API (already in health.billing if OAuth succeeded)
-    // 3. subscription.yaml (user-managed fallback, typically stale)
-    const hotSwapQuota = HotSwapQuotaReader.getActiveQuota(configDir || undefined);
+    // 5b. Weekly/Daily quota
+    // Priority:
+    // 1. QuotaBrokerClient (merged-quota-cache.json — single source of truth)
+    // 2. HotSwapQuotaReader (fallback if broker not installed yet, NO auto-refresh)
+    // 3. OAuth data already in health.billing
+    // 4. subscription.yaml (user-managed fallback)
+    //
+    // NOTE: The statusline NEVER writes quota data. The broker is the sole writer.
+    // The old auto-refresh block was removed — it used the wrong keychain token
+    // (session's token) to fetch data that was written to a different slot's entry.
 
-    if (hotSwapQuota) {
-      // Hot-swap has quota data — use it (even if slightly stale, it's still
-      // better than subscription.yaml which may be hours/days old)
-      health.billing.weeklyBudgetRemaining = hotSwapQuota.weeklyBudgetRemaining;
-      health.billing.weeklyBudgetPercentUsed = hotSwapQuota.weeklyPercentUsed;
-      health.billing.weeklyResetDay = hotSwapQuota.weeklyResetDay;
-      health.billing.weeklyDataStale = hotSwapQuota.isStale;
-      health.billing.weeklyLastModified = hotSwapQuota.lastFetched;
+    if (QuotaBrokerClient.isAvailable()) {
+      // PRIMARY: Read from broker's merged cache
+      const brokerQuota = QuotaBrokerClient.getActiveQuota(configDir || undefined);
+      if (brokerQuota) {
+        health.billing.weeklyBudgetRemaining = brokerQuota.weeklyBudgetRemaining;
+        health.billing.weeklyBudgetPercentUsed = brokerQuota.weeklyPercentUsed;
+        health.billing.weeklyResetDay = brokerQuota.weeklyResetDay;
+        health.billing.weeklyDataStale = brokerQuota.isStale;
+        health.billing.weeklyLastModified = brokerQuota.lastFetched;
 
-      if (hotSwapQuota.dailyPercentUsed > 0) {
-        health.billing.budgetPercentUsed = hotSwapQuota.dailyPercentUsed;
-      }
-
-      const ageSec = Math.floor((Date.now() - hotSwapQuota.lastFetched) / 1000);
-      console.error(`[DataGatherer] Hot-swap quota: ${hotSwapQuota.slotId} (${redactEmail(hotSwapQuota.email)}, age: ${ageSec}s, stale: ${hotSwapQuota.isStale})`);
-    } else {
-      // No hot-swap data — fall through to OAuth or subscription.yaml
-      const hasOAuthWeeklyData = health.billing.weeklyBudgetRemaining !== undefined ||
-                                 health.billing.weeklyBudgetPercentUsed !== undefined;
-
-      if (hasOAuthWeeklyData) {
-        health.billing.weeklyDataStale = false;
-        health.billing.weeklyLastModified = Date.now();
-      } else {
-        const subscriptionQuota = SubscriptionReader.getWeeklyQuota();
-        if (subscriptionQuota) {
-          health.billing.weeklyBudgetRemaining = subscriptionQuota.hoursRemaining;
-          health.billing.weeklyBudgetPercentUsed = subscriptionQuota.percentUsed;
-          health.billing.weeklyResetDay = subscriptionQuota.resetDay;
-          health.billing.weeklyDataStale = subscriptionQuota.isStale;
-          health.billing.weeklyLastModified = subscriptionQuota.lastModified;
+        if (brokerQuota.dailyPercentUsed > 0) {
+          health.billing.budgetPercentUsed = brokerQuota.dailyPercentUsed;
         }
-      }
 
-      const sessionQuota = SubscriptionReader.getCurrentSessionQuota();
-      if (sessionQuota && sessionQuota.percentUsed > 0) {
-        health.billing.budgetPercentUsed = sessionQuota.percentUsed;
+        const ageSec = Math.floor((Date.now() - brokerQuota.lastFetched) / 1000);
+        console.error(`[DataGatherer] Broker quota: ${brokerQuota.slotId} (${redactEmail(brokerQuota.email)}, age: ${ageSec}s, stale: ${brokerQuota.isStale})`);
+      }
+    } else {
+      // FALLBACK: Broker not available — use HotSwapQuotaReader (read-only, no auto-refresh)
+      const hotSwapQuota = HotSwapQuotaReader.getActiveQuota(configDir || undefined);
+
+      if (hotSwapQuota) {
+        health.billing.weeklyBudgetRemaining = hotSwapQuota.weeklyBudgetRemaining;
+        health.billing.weeklyBudgetPercentUsed = hotSwapQuota.weeklyPercentUsed;
+        health.billing.weeklyResetDay = hotSwapQuota.weeklyResetDay;
+        health.billing.weeklyDataStale = hotSwapQuota.isStale;
+        health.billing.weeklyLastModified = hotSwapQuota.lastFetched;
+
+        if (hotSwapQuota.dailyPercentUsed > 0) {
+          health.billing.budgetPercentUsed = hotSwapQuota.dailyPercentUsed;
+        }
+
+        const ageSec = Math.floor((Date.now() - hotSwapQuota.lastFetched) / 1000);
+        console.error(`[DataGatherer] Hot-swap quota (fallback): ${hotSwapQuota.slotId} (${redactEmail(hotSwapQuota.email)}, age: ${ageSec}s, stale: ${hotSwapQuota.isStale})`);
+      } else {
+        // No hot-swap data — fall through to OAuth or subscription.yaml
+        const hasOAuthWeeklyData = health.billing.weeklyBudgetRemaining !== undefined ||
+                                   health.billing.weeklyBudgetPercentUsed !== undefined;
+
+        if (hasOAuthWeeklyData) {
+          health.billing.weeklyDataStale = false;
+          health.billing.weeklyLastModified = Date.now();
+        } else {
+          const subscriptionQuota = SubscriptionReader.getWeeklyQuota();
+          if (subscriptionQuota) {
+            health.billing.weeklyBudgetRemaining = subscriptionQuota.hoursRemaining;
+            health.billing.weeklyBudgetPercentUsed = subscriptionQuota.percentUsed;
+            health.billing.weeklyResetDay = subscriptionQuota.resetDay;
+            health.billing.weeklyDataStale = subscriptionQuota.isStale;
+            health.billing.weeklyLastModified = subscriptionQuota.lastModified;
+          }
+        }
+
+        const sessionQuota = SubscriptionReader.getCurrentSessionQuota();
+        if (sessionQuota && sessionQuota.percentUsed > 0) {
+          health.billing.budgetPercentUsed = sessionQuota.percentUsed;
+        }
       }
     }
 
@@ -346,6 +405,91 @@ class DataGatherer {
     // 11c. Publish health for cloud_configs handshake (non-critical)
     HealthPublisher.publish(sessionId, health);
 
+    // 11d. Update telemetry dashboard (non-critical)
+    try {
+      TelemetryDashboard.update(sessionId, health);
+    } catch {
+      // Telemetry update failed - not critical
+    }
+
+    // 11e. Create or update session lock file (non-critical — Phase 1)
+    try {
+      // Only create lock if we have slot resolution
+      const matchedSlot = configDir ? HotSwapQuotaReader.getSlotByConfigDir(configDir) : null;
+      if (matchedSlot && keychainService && health.transcriptPath) {
+        const tmuxContext = health.tmux ? {
+          session: health.tmux.session,
+          window: health.tmux.window,
+          pane: health.tmux.pane
+        } : undefined;
+
+        SessionLockManager.getOrCreate(
+          sessionId,
+          matchedSlot.slotId,
+          configDir,
+          keychainService,
+          matchedSlot.email,
+          health.transcriptPath,
+          tmuxContext
+        );
+      }
+    } catch {
+      // Session lock creation failed - not critical
+    }
+
+    // 11f. Check for version updates (non-critical — Phase 2)
+    try {
+      // Only check if cooldown expired (4h)
+      if (VersionChecker.getCheckCooldown() === 0) {
+        // Non-blocking async check
+        VersionChecker.getLatestVersion().then(latest => {
+          if (latest) {
+            SessionLockManager.update(sessionId, {
+              lastVersionCheck: Date.now()
+            });
+
+            // Register update notification if newer version available
+            const currentVersion = VersionChecker.getCurrentVersion();
+            if (currentVersion !== 'unknown' && VersionChecker.needsUpdate(currentVersion, latest.version)) {
+              NotificationManager.register(
+                'version_update',
+                `Update to ${latest.version} available (your version: ${currentVersion})`,
+                7
+              );
+            }
+          }
+        }).catch(() => {
+          // Version check failed - silent failure (non-critical)
+        });
+      }
+    } catch {
+      // Version check initialization failed - not critical
+    }
+
+    // 11g. Check for slot switch recommendation (non-critical — Phase 2)
+    // Priority: QuotaBrokerClient (merged data) → SlotRecommendationReader (fallback)
+    try {
+      const lock = SessionLockManager.read(sessionId);
+      if (lock && lock.slotId) {
+        let switchMsg: string | null = null;
+
+        if (QuotaBrokerClient.isAvailable()) {
+          switchMsg = QuotaBrokerClient.getSwitchMessage(lock.slotId);
+        } else {
+          switchMsg = SlotRecommendationReader.getSwitchMessage(lock.slotId);
+        }
+
+        if (switchMsg) {
+          NotificationManager.register('slot_switch', switchMsg, 6);
+        } else {
+          // No switch recommended - remove notification if exists
+          NotificationManager.remove('slot_switch');
+        }
+      }
+    } catch {
+      // Slot switch check failed - not critical
+    }
+
     // 12. Update global summary (synchronous - we're already in background daemon)
     try {
       this.healthStore.updateSessionsSummary();
@@ -358,6 +502,13 @@ class DataGatherer {
       await this.cleanupManager.cleanupIfNeeded();
     } catch {
       // Cleanup failed - not critical
+    }
+
+    // 13b. Cleanup old dismissed notifications (>24h)
+    try {
+      NotificationManager.cleanup();
+    } catch {
+      // Notification cleanup failed - not critical
     }
 
     // 14. Update runtime state (unified auth profiles + sessions)

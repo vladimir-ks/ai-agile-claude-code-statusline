@@ -28,7 +28,8 @@
  * }
  */
 
-import { existsSync, readFileSync, statSync } from 'fs';
+import { existsSync, readFileSync, statSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 import { homedir } from 'os';
 
 export interface HotSwapSlotData {
@@ -434,6 +435,63 @@ export class HotSwapQuotaReader {
       return ageMs < 600000;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Update hot-swap-quota.json with fresh data from OAuth API.
+   * Called by data-gatherer when quota is stale and OAuth fetch succeeds.
+   *
+   * Atomic write (temp + rename) to prevent corruption from concurrent daemons.
+   */
+  static updateFromOAuth(slotId: string | undefined, quotaBilling: {
+    budgetPercentUsed?: number;
+    weeklyBudgetPercentUsed?: number;
+    weeklyBudgetRemaining?: number;
+    weeklyResetDay?: string;
+  }): void {
+    if (!slotId) return;
+
+    try {
+      // Read existing cache
+      let cache: HotSwapQuotaCache = {};
+      try {
+        if (existsSync(this.CACHE_PATH)) {
+          cache = JSON.parse(readFileSync(this.CACHE_PATH, 'utf-8')) || {};
+        }
+      } catch { /* start fresh */ }
+
+      // Merge OAuth fields into slot entry (preserve existing fields)
+      const existing = cache[slotId] || {} as Partial<HotSwapSlotData>;
+      cache[slotId] = {
+        ...existing,
+        five_hour_util: quotaBilling.budgetPercentUsed ?? existing.five_hour_util ?? 0,
+        seven_day_util: quotaBilling.weeklyBudgetPercentUsed ?? existing.seven_day_util ?? 0,
+        weekly_budget_remaining_hours: quotaBilling.weeklyBudgetRemaining ?? existing.weekly_budget_remaining_hours ?? 0,
+        weekly_reset_day: quotaBilling.weeklyResetDay ?? existing.weekly_reset_day ?? '',
+        daily_reset_time: existing.daily_reset_time ?? '',
+        email: existing.email ?? '',
+        last_fetched: Date.now(),
+        is_fresh: true,
+      } as HotSwapSlotData;
+
+      // Ensure parent directory exists
+      const dir = dirname(this.CACHE_PATH);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+      }
+
+      // Atomic write: temp file + rename
+      const tmpPath = `${this.CACHE_PATH}.${process.pid}.tmp`;
+      writeFileSync(tmpPath, JSON.stringify(cache, null, 2), { mode: 0o600 });
+      renameSync(tmpPath, this.CACHE_PATH);
+
+      // Invalidate memory cache so next read() picks up fresh data
+      cachedData = null;
+      cacheTimestamp = 0;
+    } catch {
+      // Non-critical — log but don't throw
+      console.error('[HotSwapQuotaReader] Failed to update from OAuth');
     }
   }
 

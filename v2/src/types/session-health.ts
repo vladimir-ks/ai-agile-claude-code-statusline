@@ -100,6 +100,100 @@ export interface TmuxContext {
   height: number;              // Pane height in rows
 }
 
+/**
+ * Session Lock File - Persists session identity across restarts
+ * Path: ~/.claude/session-health/{sessionId}.lock
+ * Written: On first statusline invocation
+ * Updated: Mutable fields on subsequent invocations
+ */
+export interface SessionLock {
+  // Immutable - Set once at launch, never changes
+  sessionId: string;           // Session identifier
+  launchedAt: number;          // Unix timestamp ms when session started
+  slotId: string;              // Hot-swap slot ID (slot-1, slot-2, etc.)
+  configDir: string;           // CLAUDE_CONFIG_DIR path
+  keychainService: string;     // Keychain service name for token
+  email: string;               // Account email
+  transcriptPath: string;      // Path to session transcript file
+
+  // Mutable - Updated on daemon runs
+  claudeVersion: string;       // From `claude --version`
+  lastVersionCheck?: number;   // Unix timestamp ms of last version poll
+  lastIdleCheck?: number;      // Unix timestamp ms of last idle detection
+
+  // Tmux context (if running in tmux)
+  tmux?: {
+    session: string;
+    window: string;
+    pane: string;
+  };
+
+  // Internal tracking
+  lockFileVersion: number;     // Lock file schema version (currently 1)
+  updatedAt: number;           // Unix timestamp ms of last update
+}
+
+/**
+ * Slot Recommendation Data - From select-account.sh
+ * Path: ~/.claude/session-health/slot-recommendation.json
+ * Updated: Every launch + every health check (~5min)
+ */
+export interface SlotRecommendation {
+  updated_at: string;          // ISO8601 UTC timestamp
+  updated_epoch: number;       // Unix epoch seconds (10 digits)
+  recommended: string;         // "slot-N" or "none"
+  failover_needed: boolean;    // True if all slots exhausted
+  all_exhausted: boolean;      // True if no slots available
+  rankings: SlotRanking[];     // Sorted by urgency desc (rank asc)
+}
+
+export interface SlotRanking {
+  slot: string;                // "slot-N"
+  rank: number;                // 1, 2, 3... (1 = best)
+  urgency: number;             // Calculated urgency score
+  five_hour_util: number;      // Daily quota % used (0-100)
+  seven_day_util: number;      // Weekly quota % used (0-100)
+  status: 'active' | 'inactive' | 'expired';
+  reason: string;              // Why this slot was ranked here
+}
+
+/**
+ * Merged Quota Data - From quota-broker.sh
+ * Path: ~/.claude/session-health/merged-quota-cache.json
+ * Single source of truth for all quota consumers
+ */
+export interface MergedQuotaSlot {
+  email: string;
+  status: 'active' | 'inactive' | 'expired';
+  subscription_type: string;       // "max", "pro", etc.
+  five_hour_util: number;          // Daily quota % used (0-100)
+  seven_day_util: number;          // Weekly quota % used (0-100)
+  five_hour_resets_at?: string;    // ISO 8601
+  seven_day_resets_at?: string;    // ISO 8601
+  weekly_budget_remaining_hours: number;
+  weekly_reset_day: string;        // "Mon", "Tue", etc.
+  daily_reset_time: string;        // "HH:MM" UTC
+  last_fetched: number;            // Unix timestamp ms
+  is_fresh: boolean;
+  config_dir?: string;             // CLAUDE_CONFIG_DIR for this slot
+  keychain_hash?: string;          // SHA256 hash prefix
+  urgency: number;                 // Calculated urgency score
+  rank: number;                    // 1 = best
+  reason: string;                  // Why ranked here
+}
+
+export interface MergedQuotaData {
+  ts: number;                      // Unix epoch seconds
+  active_slot: string;             // "slot-N"
+  recommended_slot: string;        // "slot-N" or "none"
+  failover_needed: boolean;
+  all_exhausted: boolean;
+  slots: Record<string, MergedQuotaSlot>;
+  // Computed by client, not in file
+  age_seconds?: number;
+  is_fresh?: boolean;
+}
+
 export interface ProjectMetadata {
   language?: string;           // Detected primary language
   gitRemote?: string;          // Remote URL if git repo
