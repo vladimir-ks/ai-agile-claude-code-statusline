@@ -75,8 +75,6 @@ const CACHE_CREATION_MULTIPLIER = 1.25;  // Same as input (cached writes are exp
 const CACHE_READ_MULTIPLIER = 0.10;      // 90% discount
 
 export class LocalCostCalculator {
-  private static parseStatePath = `${homedir()}/.claude/session-health/local-cost-parse-state.json`;
-
   /**
    * Calculate cost for a session by parsing its transcript
    *
@@ -147,11 +145,11 @@ export class LocalCostCalculator {
           // Get pricing for this model
           const pricing = this.getPricing(model);
 
-          // Calculate tokens
-          const inputTokens = usage.input_tokens || 0;
-          const outputTokens = usage.output_tokens || 0;
-          const cacheCreation = usage.cache_creation_input_tokens || 0;
-          const cacheRead = usage.cache_read_input_tokens || 0;
+          // Calculate tokens (validate: non-negative numbers only)
+          const inputTokens = Math.max(0, Number(usage.input_tokens) || 0);
+          const outputTokens = Math.max(0, Number(usage.output_tokens) || 0);
+          const cacheCreation = Math.max(0, Number(usage.cache_creation_input_tokens) || 0);
+          const cacheRead = Math.max(0, Number(usage.cache_read_input_tokens) || 0);
 
           // Calculate cost for this message
           // Input tokens (excluding cache operations)

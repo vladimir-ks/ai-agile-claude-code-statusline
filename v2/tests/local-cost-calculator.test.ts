@@ -200,6 +200,137 @@ describe('LocalCostCalculator', () => {
       expect(result.messageCount).toBe(0);
     });
 
+    it('should handle empty transcript (no assistant messages)', async () => {
+      const testFile = `${TEST_DIR}/empty-messages.jsonl`;
+
+      // File with only user messages, no assistant responses
+      const lines = [
+        JSON.stringify({
+          type: 'user',
+          timestamp: '2026-01-01T10:00:00.000Z',
+          message: { role: 'user', content: 'Hello' }
+        }),
+        JSON.stringify({
+          type: 'user',
+          timestamp: '2026-01-01T10:01:00.000Z',
+          message: { role: 'user', content: 'World' }
+        })
+      ];
+
+      writeFileSync(testFile, lines.join('\n'));
+
+      const result = await LocalCostCalculator.calculateCost(testFile);
+
+      // No assistant messages = no cost, but file was read successfully
+      expect(result.isFresh).toBe(true);  // File was successfully parsed
+      expect(result.costUSD).toBe(0);
+      expect(result.messageCount).toBe(0);
+      expect(result.totalTokens).toBe(0);
+
+      unlinkSync(testFile);
+    });
+
+    it('should handle assistant messages without usage data', async () => {
+      const testFile = `${TEST_DIR}/no-usage.jsonl`;
+
+      // Assistant message but no usage field
+      const lines = [
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-01-01T10:00:00.000Z',
+          message: {
+            role: 'assistant',
+            content: 'Hello!'
+            // No usage field
+          }
+        })
+      ];
+
+      writeFileSync(testFile, lines.join('\n'));
+
+      const result = await LocalCostCalculator.calculateCost(testFile);
+
+      // No usage data = no cost tracked
+      expect(result.isFresh).toBe(true);
+      expect(result.costUSD).toBe(0);
+      expect(result.messageCount).toBe(0);
+
+      unlinkSync(testFile);
+    });
+
+    it('should handle negative/invalid token counts gracefully', async () => {
+      const testFile = `${TEST_DIR}/invalid-tokens.jsonl`;
+
+      const lines = [
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-01-01T10:00:00.000Z',
+          message: {
+            model: 'claude-opus-4-5',
+            usage: {
+              input_tokens: -100,  // Invalid: negative
+              output_tokens: 'abc', // Invalid: not a number
+              cache_read_input_tokens: null
+            }
+          }
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-01-01T10:01:00.000Z',
+          message: {
+            model: 'claude-opus-4-5',
+            usage: {
+              input_tokens: 1000,
+              output_tokens: 500
+            }
+          }
+        })
+      ];
+
+      writeFileSync(testFile, lines.join('\n'));
+
+      const result = await LocalCostCalculator.calculateCost(testFile);
+
+      // Should handle invalid values and still process valid ones
+      expect(result.isFresh).toBe(true);
+      expect(result.messageCount).toBe(2);  // Both messages processed
+      expect(result.costUSD).toBeGreaterThan(0);  // At least second message counted
+
+      unlinkSync(testFile);
+    });
+
+    it('should use Opus pricing for unknown model names', async () => {
+      const testFile = `${TEST_DIR}/unknown-model.jsonl`;
+
+      const lines = [
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-01-01T10:00:00.000Z',
+          message: {
+            model: 'future-claude-model-xyz',  // Unknown model
+            usage: {
+              input_tokens: 1000,
+              output_tokens: 1000
+            }
+          }
+        })
+      ];
+
+      writeFileSync(testFile, lines.join('\n'));
+
+      const result = await LocalCostCalculator.calculateCost(testFile);
+
+      // Unknown model should default to Opus pricing (conservative)
+      // Opus: $15 input + $75 output per 1M tokens
+      // 1000 in + 1000 out = $0.015 + $0.075 = $0.09
+      const expectedCost = (1000 / 1_000_000) * 15 + (1000 / 1_000_000) * 75;
+
+      expect(result.isFresh).toBe(true);
+      expect(result.costUSD).toBeCloseTo(expectedCost, 6);
+
+      unlinkSync(testFile);
+    });
+
     it('should handle malformed JSON lines gracefully', async () => {
       const testFile = `${TEST_DIR}/malformed.jsonl`;
 
