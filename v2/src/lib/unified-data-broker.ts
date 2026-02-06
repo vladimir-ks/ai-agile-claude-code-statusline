@@ -18,6 +18,11 @@ import { DataSourceRegistry } from './sources/registry';
 import { DataCacheManager } from './data-cache-manager';
 import { SingleFlightCoordinator } from './single-flight-coordinator';
 import { FreshnessManager } from './freshness-manager';
+import { StatuslineFormatter } from './statusline-formatter';
+import { FailoverSubscriber } from './failover-subscriber';
+import { AuthProfileDetector } from '../modules/auth-profile-detector';
+import TranscriptMonitor from './transcript-monitor';
+import HealthStore from './health-store';
 import type { DataSourceDescriptor, GatherContext, GlobalDataCacheEntry } from './sources/types';
 import type { SessionHealth, ClaudeCodeInput } from '../types/session-health';
 import { createDefaultHealth } from '../types/session-health';
@@ -79,13 +84,14 @@ export class UnifiedDataBroker {
       projectPath?: string;
       configDir?: string | null;
       keychainService?: string | null;
+      deadline?: number;  // Override default 20s deadline (absolute timestamp)
     }
   ): Promise<SessionHealth> {
     ensureRegistered();
 
     const startTime = Date.now();
     const DEADLINE_MS = 20000;
-    const deadline = startTime + DEADLINE_MS;
+    const deadline = options?.deadline || (startTime + DEADLINE_MS);
     const health = createDefaultHealth(sessionId);
     health.gatheredAt = startTime;
     health.transcriptPath = transcriptPath || '';
@@ -268,11 +274,41 @@ export class UnifiedDataBroker {
     }
 
     // -----------------------------------------------------------------------
-    // POST-PROCESSING
+    // POST-PROCESSING (Steps 7-10b from DataGatherer)
     // -----------------------------------------------------------------------
 
-    // Recompute billing freshness from timestamp
+    // 7. Data loss risk detection
+    const transcriptMonitor = new TranscriptMonitor();
+    const healthStore = new HealthStore(options?.healthStorePath);
+    const config = healthStore.readConfig();
+    health.alerts.transcriptStale = transcriptMonitor.isTranscriptStale(
+      health.transcript,
+      config.thresholds.transcriptStaleMinutes
+    );
+    health.alerts.dataLossRisk =
+      health.alerts.transcriptStale && this.isSessionActive(jsonInput);
+
+    // 8. Calculate overall health status
+    health.health = this.calculateOverallHealth(health, config);
+
+    // 9. Add project metadata
+    health.project = {
+      language: AuthProfileDetector.detectProjectLanguage(health.projectPath),
+      gitRemote: this.extractGitRemote(health.projectPath),
+      repoName: AuthProfileDetector.extractRepoName(
+        health.projectPath,
+        this.extractGitRemote(health.projectPath)
+      )
+    };
+
+    // 9b. Failover notification
+    health.failoverNotification = FailoverSubscriber.getNotification() || undefined;
+
+    // 10. Recompute billing freshness from timestamp
     health.billing.isFresh = FreshnessManager.isBillingFresh(health.billing.lastFetched);
+
+    // 10b. Pre-format output for all terminal widths
+    health.formattedOutput = StatuslineFormatter.formatAllVariants(health);
 
     // Performance metrics
     health.performance = {
@@ -283,6 +319,52 @@ export class UnifiedDataBroker {
     };
 
     return health;
+  }
+
+  /**
+   * Check if a session appears to be active based on JSON input.
+   */
+  private static isSessionActive(jsonInput: ClaudeCodeInput | null): boolean {
+    if (!jsonInput) return false;
+    // Session is active if we have turn data or trajectory
+    return !!(jsonInput.turns_count || jsonInput.trajectory?.length);
+  }
+
+  /**
+   * Calculate overall health status based on alerts and data freshness.
+   */
+  private static calculateOverallHealth(
+    health: SessionHealth,
+    config: any
+  ): 'good' | 'warning' | 'critical' {
+    // Critical: data loss risk or secrets detected
+    if (health.alerts.dataLossRisk || health.alerts.secretsDetected) {
+      return 'critical';
+    }
+
+    // Warning: transcript stale or billing stale
+    if (health.alerts.transcriptStale || !health.billing.isFresh) {
+      return 'warning';
+    }
+
+    return 'good';
+  }
+
+  /**
+   * Extract git remote URL from project path.
+   */
+  private static extractGitRemote(projectPath: string): string | undefined {
+    try {
+      const { execSync } = require('child_process');
+      const remote = execSync('git config --get remote.origin.url', {
+        cwd: projectPath,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore']
+      }).trim();
+      return remote || undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

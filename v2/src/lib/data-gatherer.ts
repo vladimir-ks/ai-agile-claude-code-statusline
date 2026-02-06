@@ -54,9 +54,11 @@ import { VersionChecker } from './version-checker';
 import { NotificationManager } from './notification-manager';
 import { SlotRecommendationReader } from './slot-recommendation-reader';
 import { QuotaBrokerClient } from './quota-broker-client';
+import { UnifiedDataBroker } from './unified-data-broker';
 
 class DataGatherer {
   private healthStore: HealthStore;
+  private healthStorePath: string | undefined;
   private transcriptMonitor: TranscriptMonitor;
   private incrementalScanner: IncrementalTranscriptScanner;
   private gitleaksScanner: GitLeaksScanner;
@@ -67,6 +69,7 @@ class DataGatherer {
   private runtimeStateStore: RuntimeStateStore;
 
   constructor(healthStorePath?: string) {
+    this.healthStorePath = healthStorePath;
     this.healthStore = new HealthStore(healthStorePath);
     this.transcriptMonitor = new TranscriptMonitor();
     this.incrementalScanner = new IncrementalTranscriptScanner();
@@ -96,6 +99,9 @@ class DataGatherer {
 
   /**
    * Gather all data for a session
+   *
+   * ARCHITECTURE: This method now delegates data gathering to UnifiedDataBroker
+   * and handles only post-processing (writes, cleanup, notifications).
    */
   async gather(
     sessionId: string,
@@ -103,300 +109,34 @@ class DataGatherer {
     jsonInput: ClaudeCodeInput | null
   ): Promise<SessionHealth> {
     const startTime = Date.now();
-    // Hard time budget: 20s (wrapper SIGKILL at 30s, need margin for post-billing steps)
     const DEADLINE_MS = 20000;
     const deadline = startTime + DEADLINE_MS;
-    const health = createDefaultHealth(sessionId);
-    health.gatheredAt = startTime;
 
-    // Set paths
-    health.transcriptPath = transcriptPath || '';
-    // Priority: 1) start_directory from JSON, 2) cwd from environment, 3) decoded transcript path
-    health.projectPath = jsonInput?.start_directory || process.cwd() || this.extractProjectPath(transcriptPath);
-
-    // Preserve firstSeen from existing health (if this is not a new session)
-    const existingHealth = this.healthStore.readSessionHealth(sessionId);
-    if (existingHealth?.firstSeen) {
-      health.firstSeen = existingHealth.firstSeen;
-      health.sessionDuration = Date.now() - existingHealth.firstSeen;
-    } else {
-      health.firstSeen = Date.now();
-      health.sessionDuration = 0;
-    }
-
-    // 0. Auth profile detection (run early before billing fetch)
-    // We'll update this later once we have billing data
-    const authProfiles = this.runtimeStateStore.read().authProfiles;
-    health.launch = AuthProfileDetector.detectProfile(
-      health.projectPath,
-      existingHealth?.billing || null,
-      authProfiles
-    );
-
-    // 0b. Session-aware keychain resolution (derive configDir + keychainService from transcript path)
+    // Derive session context for broker
     const { configDir, keychainService } = KeychainResolver.resolveFromTranscript(transcriptPath);
-    if (configDir) {
-      health.launch.configDir = configDir;
-      health.launch.keychainService = keychainService || undefined;
+    const existingHealth = this.healthStore.readSessionHealth(sessionId);
+    const projectPath = jsonInput?.start_directory || process.cwd() || this.extractProjectPath(transcriptPath);
 
-      // Derive auth profile from configDir → hot-swap slot mapping
-      // This is more precise than generic detection since it's derived from the session's transcript path
-      const matchedSlot = HotSwapQuotaReader.getSlotByConfigDir(configDir);
-      if (matchedSlot) {
-        health.launch.authProfile = matchedSlot.email;
-        health.launch.detectionMethod = 'path'; // configDir-based is a path-derived method
-        console.error(`[DataGatherer] Session matched → ${keychainService} (${redactEmail(matchedSlot.email)})`);
-      } else {
-        console.error(`[DataGatherer] Session → ${keychainService} (no slot match)`);
+    // DELEGATE: All data gathering to UnifiedDataBroker (steps 0-10b)
+    const health = await UnifiedDataBroker.gatherAll(
+      sessionId,
+      transcriptPath,
+      jsonInput,
+      {
+        healthStorePath: this.healthStorePath,
+        existingHealth,
+        projectPath,
+        configDir,
+        keychainService,
+        deadline,
       }
-    }
-
-    // 0c. Tmux context capture (if running in tmux)
-    if (process.env.TMUX_SESSION_NAME) {
-      health.tmux = {
-        session: process.env.TMUX_SESSION_NAME,
-        window: process.env.TMUX_WINDOW_INDEX || '0',
-        pane: process.env.TMUX_PANE_INDEX || '0',
-        width: parseInt(process.env.STATUSLINE_WIDTH || '120', 10),
-        height: parseInt(process.env.TMUX_PANE_HEIGHT || '30', 10)
-      };
-    }
-
-    // 1. Transcript health (critical for data loss detection)
-    // OPTIMIZATION: Use incremental scanner for 20x speedup
-    if (transcriptPath) {
-      health.transcript = this.incrementalScanner.checkHealth(sessionId, transcriptPath);
-    }
-
-    // 2. Model (multi-source validation)
-    const settingsModel = this.getSettingsModel();
-    health.model = this.modelResolver.resolve(transcriptPath, jsonInput, settingsModel);
-    health.model.updatedAt = Date.now();
-
-    // 3. Context window (from JSON input)
-    health.context = this.calculateContext(jsonInput);
-    health.context.updatedAt = Date.now();
-
-    // 4. Git status (cached)
-    // NOTE: lastChecked is now set BEFORE fetch, so cached git data
-    // gets the fetch time, not the post-return time. This fixes the bug
-    // where cached git data showed "just checked" when it was actually 30s old.
-    try {
-      const gitFetchStart = Date.now();
-      const gitData = await this.gitModule.fetch(sessionId);
-      if (gitData) {
-        health.git = {
-          branch: gitData.branch || '',
-          ahead: gitData.ahead || 0,
-          behind: gitData.behind || 0,
-          dirty: gitData.dirty || 0,
-          lastChecked: gitFetchStart
-        };
-      }
-    } catch {
-      // Git not available - keep defaults
-    }
-
-    // 5. Billing data - SHARED across all sessions (billing is global, not per-session)
-    // TIME BUDGET: Billing is the slowest step (OAuth + ccusage can take 20s+).
-    // If we've already spent too long on prior steps, skip billing and use stale data.
-    // This guarantees writeSessionHealth() is always reached before the 30s SIGKILL.
-    const billingStartTime = Date.now();
-    const billingBudgetMs = Math.max(0, deadline - billingStartTime - 5000); // Reserve 5s for post-billing steps
-
-    const slotStatus = configDir ? HotSwapQuotaReader.getSlotStatus(
-      HotSwapQuotaReader.getSlotByConfigDir(configDir)?.slotId || ''
-    ) : 'unknown';
-
-    // INTENT COORDINATION: Check if billing is stale and signal refresh intent
-    const billingIsStale = !FreshnessManager.isBillingFresh(existingHealth?.billing?.lastFetched);
-    if (billingIsStale) {
-      RefreshIntentManager.signalRefreshNeeded('billing');
-    }
-
-    // Check if another daemon is already refreshing billing
-    const anotherDaemonRefreshing = billingIsStale && RefreshIntentManager.isRefreshInProgress('billing');
-
-    if (billingBudgetMs < 2000) {
-      // Not enough time for billing — use stale data
-      console.error(`[DataGatherer] Skipping billing (only ${billingBudgetMs}ms left in budget)`);
-      if (existingHealth?.billing?.costToday > 0) {
-        health.billing = { ...existingHealth.billing, isFresh: false };
-      }
-    } else if (anotherDaemonRefreshing) {
-      // Another daemon is handling the refresh — use stale cache, avoid duplicate work
-      console.error('[DataGatherer] Billing refresh in progress by another daemon, using stale cache');
-      if (existingHealth?.billing?.costToday > 0) {
-        health.billing = { ...existingHealth.billing, isFresh: false };
-      }
-    } else {
-      // Signal that WE are refreshing
-      if (billingIsStale) {
-        RefreshIntentManager.signalRefreshInProgress('billing');
-      }
-
-      // Race billing fetch against remaining time budget
-      const billingPromise = this.fetchBilling(
-        health, configDir, keychainService, slotStatus, authProfiles, existingHealth
-      );
-      const timeoutPromise = new Promise<void>(resolve => setTimeout(resolve, billingBudgetMs));
-
-      await Promise.race([billingPromise, timeoutPromise]);
-
-      // If billing didn't complete in time, use stale
-      if (!health.billing.isFresh && !health.billing.costToday && existingHealth?.billing?.costToday > 0) {
-        health.billing = { ...existingHealth.billing, isFresh: false };
-      }
-
-      // Clear intent on success, clear inprogress on failure
-      if (health.billing.isFresh) {
-        RefreshIntentManager.clearIntent('billing');
-      } else {
-        RefreshIntentManager.clearInProgress('billing');
-      }
-    }
-
-    // 5b. Weekly/Daily quota
-    // Priority:
-    // 1. QuotaBrokerClient (merged-quota-cache.json — single source of truth)
-    // 2. HotSwapQuotaReader (fallback if broker not installed yet, NO auto-refresh)
-    // 3. OAuth data already in health.billing
-    // 4. subscription.yaml (user-managed fallback)
-    //
-    // NOTE: The statusline NEVER writes quota data. The broker is the sole writer.
-    // The old auto-refresh block was removed — it used the wrong keychain token
-    // (session's token) to fetch data that was written to a different slot's entry.
-
-    if (QuotaBrokerClient.isAvailable()) {
-      // PRIMARY: Read from broker's merged cache
-      const brokerQuota = QuotaBrokerClient.getActiveQuota(configDir || undefined);
-      if (brokerQuota) {
-        health.billing.weeklyBudgetRemaining = brokerQuota.weeklyBudgetRemaining;
-        health.billing.weeklyBudgetPercentUsed = brokerQuota.weeklyPercentUsed;
-        health.billing.weeklyResetDay = brokerQuota.weeklyResetDay;
-        health.billing.weeklyDataStale = brokerQuota.isStale;
-        health.billing.weeklyLastModified = brokerQuota.lastFetched;
-
-        if (brokerQuota.dailyPercentUsed > 0) {
-          health.billing.budgetPercentUsed = brokerQuota.dailyPercentUsed;
-        }
-
-        const ageSec = Math.floor((Date.now() - brokerQuota.lastFetched) / 1000);
-        console.error(`[DataGatherer] Broker quota: ${brokerQuota.slotId} (${redactEmail(brokerQuota.email)}, age: ${ageSec}s, stale: ${brokerQuota.isStale})`);
-      }
-    } else {
-      // FALLBACK: Broker not available — use HotSwapQuotaReader (read-only, no auto-refresh)
-      const hotSwapQuota = HotSwapQuotaReader.getActiveQuota(configDir || undefined);
-
-      if (hotSwapQuota) {
-        health.billing.weeklyBudgetRemaining = hotSwapQuota.weeklyBudgetRemaining;
-        health.billing.weeklyBudgetPercentUsed = hotSwapQuota.weeklyPercentUsed;
-        health.billing.weeklyResetDay = hotSwapQuota.weeklyResetDay;
-        health.billing.weeklyDataStale = hotSwapQuota.isStale;
-        health.billing.weeklyLastModified = hotSwapQuota.lastFetched;
-
-        if (hotSwapQuota.dailyPercentUsed > 0) {
-          health.billing.budgetPercentUsed = hotSwapQuota.dailyPercentUsed;
-        }
-
-        const ageSec = Math.floor((Date.now() - hotSwapQuota.lastFetched) / 1000);
-        console.error(`[DataGatherer] Hot-swap quota (fallback): ${hotSwapQuota.slotId} (${redactEmail(hotSwapQuota.email)}, age: ${ageSec}s, stale: ${hotSwapQuota.isStale})`);
-      } else {
-        // No hot-swap data — fall through to OAuth or subscription.yaml
-        const hasOAuthWeeklyData = health.billing.weeklyBudgetRemaining !== undefined ||
-                                   health.billing.weeklyBudgetPercentUsed !== undefined;
-
-        if (hasOAuthWeeklyData) {
-          health.billing.weeklyDataStale = false;
-          health.billing.weeklyLastModified = Date.now();
-        } else {
-          const subscriptionQuota = SubscriptionReader.getWeeklyQuota();
-          if (subscriptionQuota) {
-            health.billing.weeklyBudgetRemaining = subscriptionQuota.hoursRemaining;
-            health.billing.weeklyBudgetPercentUsed = subscriptionQuota.percentUsed;
-            health.billing.weeklyResetDay = subscriptionQuota.resetDay;
-            health.billing.weeklyDataStale = subscriptionQuota.isStale;
-            health.billing.weeklyLastModified = subscriptionQuota.lastModified;
-          }
-        }
-
-        const sessionQuota = SubscriptionReader.getCurrentSessionQuota();
-        if (sessionQuota && sessionQuota.percentUsed > 0) {
-          health.billing.budgetPercentUsed = sessionQuota.percentUsed;
-        }
-      }
-    }
-
-    // 5c. Session cost - ALWAYS calculate from local transcript (separate from account daily cost)
-    // This shows how much THIS SPECIFIC SESSION has cost, not the account's daily total
-    if (transcriptPath && existsSync(transcriptPath)) {
-      try {
-        const sessionCost = await LocalCostCalculator.calculateCost(transcriptPath);
-        if (sessionCost && sessionCost.costUSD >= 0) {
-          health.billing.sessionCost = sessionCost.costUSD;
-          health.billing.sessionTokens = sessionCost.totalTokens;
-          health.billing.sessionBurnRate = sessionCost.costPerHour || undefined;
-        }
-      } catch {
-        // Session cost calculation failed - not critical
-      }
-    }
-
-    // 6. Secrets scan (if transcript exists)
-    // OPTIMIZATION: Use gitleaks for professional secret detection (if installed)
-    if (health.transcript.exists && transcriptPath) {
-      try {
-        const gitleaksResult = await this.gitleaksScanner.scan(sessionId, transcriptPath);
-        health.alerts.secretsDetected = gitleaksResult.hasSecrets;
-        health.alerts.secretTypes = gitleaksResult.secretTypes;
-      } catch {
-        // GitLeaks failed - fall back to regex scan
-        const secrets = this.scanForSecrets(transcriptPath);
-        health.alerts.secretsDetected = secrets.hasSecrets;
-        health.alerts.secretTypes = secrets.types;
-      }
-    }
-
-    // 7. Data loss risk detection
-    const config = this.healthStore.readConfig();
-    health.alerts.transcriptStale = this.transcriptMonitor.isTranscriptStale(
-      health.transcript,
-      config.thresholds.transcriptStaleMinutes
     );
-    health.alerts.dataLossRisk =
-      health.alerts.transcriptStale && this.isSessionActive(jsonInput);
 
-    // 8. Calculate overall health status
-    health.health = this.calculateOverallHealth(health, config);
+    // -----------------------------------------------------------------------
+    // POST-PROCESSING (steps 11-14): File writes, cleanup, notifications
+    // -----------------------------------------------------------------------
 
-    // 9. Add project metadata and performance metrics
-    health.project = {
-      language: AuthProfileDetector.detectProjectLanguage(health.projectPath),
-      gitRemote: this.extractGitRemote(health.projectPath),
-      repoName: AuthProfileDetector.extractRepoName(
-        health.projectPath,
-        this.extractGitRemote(health.projectPath)
-      )
-    };
-
-    health.performance = {
-      gatherDuration: Date.now() - startTime,
-      billingFetchDuration: health.billing.isFresh ? (Date.now() - billingStartTime) : undefined,
-      transcriptScanDuration: undefined // Will be added by incremental scanner if available
-    };
-
-    // 9b. Failover notification (read local JSONL — fast, non-blocking)
-    health.failoverNotification = FailoverSubscriber.getNotification() || undefined;
-
-    // 10. CRITICAL FIX: Compute billing.isFresh from timestamp (replaces stored boolean)
-    // Previously isFresh was stored as true and never recomputed — 4-day-old data showed fresh.
-    health.billing.isFresh = FreshnessManager.isBillingFresh(health.billing.lastFetched);
-
-    // 10b. Pre-format output for all terminal widths (Phase 0: Performance Architecture)
-    // CRITICAL: Must happen BEFORE writeSessionHealth() so formattedOutput is included in JSON
-    health.formattedOutput = StatuslineFormatter.formatAllVariants(health);
-
-    // 11. Write to health store (NOW includes formattedOutput!)
+    // 11. Write to health store (includes formattedOutput from broker)
     this.healthStore.writeSessionHealth(sessionId, health);
 
     // 11b. Write debug state file (non-critical — never fails the gather)
