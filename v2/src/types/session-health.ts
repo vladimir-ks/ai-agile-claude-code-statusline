@@ -46,7 +46,7 @@ export interface GitInfo {
 }
 
 export interface BillingInfo {
-  costToday: number;
+  costToday: number;           // Account daily cost (from ccusage/OAuth - across ALL sessions)
   burnRatePerHour: number;
   budgetRemaining: number;     // minutes
   budgetPercentUsed: number;
@@ -55,6 +55,11 @@ export interface BillingInfo {
   tokensPerMinute?: number | null; // Recent token consumption rate
   isFresh: boolean;
   lastFetched: number;
+
+  // Session-specific cost (from local transcript parsing - THIS session only)
+  sessionCost?: number;        // Cost of THIS session (parsed from transcript)
+  sessionTokens?: number;      // Tokens in THIS session
+  sessionBurnRate?: number;    // Burn rate for THIS session
 
   // Weekly quota (from OAuth API or subscription.yaml)
   weeklyBudgetRemaining?: number;      // Hours until weekly reset (rounded down)

@@ -89,15 +89,31 @@ export class StatuslineFormatter {
     // Time/Budget/Weekly (required)
     const timeBudget = this.fmtTimeBudgetLine(health);
 
-    // Optional components
+    // Optional components - Cost: show BOTH account daily cost AND session cost
+    // costToday = account daily cost (from ccusage/OAuth - stale if ccusage hangs)
+    // sessionCost = THIS session's cost (from local transcript parsing - always fresh)
     const costToday = health.billing?.costToday || 0;
-    const burnRate = health.billing?.burnRatePerHour || 0;
-    const costFull = (costToday >= 0.01 || burnRate >= 0.01)
-      ? `💰:${c('cost')}${this.formatMoney(costToday)}${rst()}|${c('burnRate')}${this.formatMoney(burnRate)}/h${rst()}`
-      : '';
-    const costOnly = (costToday >= 0.01)
-      ? `💰:${c('cost')}${this.formatMoney(costToday)}${rst()}`
-      : '';
+    const sessionCost = health.billing?.sessionCost || 0;
+    const burnRate = health.billing?.sessionBurnRate || health.billing?.burnRatePerHour || 0;
+    const billingFresh = health.billing?.isFresh ?? false;
+
+    // Format: 💰:$232|$6.3/h (session cost | burn rate)
+    // Account daily cost is now redundant since sessionCost is more accurate
+    let costFull = '';
+    let costOnly = '';
+    if (sessionCost >= 0.01 || costToday >= 0.01) {
+      // Prefer sessionCost (always fresh from transcript), fallback to costToday
+      const displayCost = sessionCost >= 0.01 ? sessionCost : costToday;
+      const costPart = `${c('cost')}${this.formatMoney(displayCost)}${rst()}`;
+      const burnPart = burnRate >= 0.01 ? `${c('burnRate')}${this.formatMoney(burnRate)}/h${rst()}` : '';
+
+      // Full format: 💰:$232|$6.3/h (session cost | burn rate)
+      const parts = [costPart, burnPart].filter(Boolean);
+      costFull = parts.length > 0 ? `💰:${parts.join('|')}` : '';
+
+      // Short format: 💰:$232 (just cost)
+      costOnly = `💰:${costPart}`;
+    }
 
     const totalTokens = health.billing?.totalTokens || 0;
     const tokensPerMin = health.billing?.tokensPerMinute || null;
@@ -354,20 +370,25 @@ export class StatuslineFormatter {
     // STEP 3: Build optional components with drop logic
     // Prepare all optional components
     const costToday = health.billing?.costToday || 0;
-    const burnRate = health.billing?.burnRatePerHour || 0;
+    const sessionCost = health.billing?.sessionCost || 0;
+    const burnRate = health.billing?.sessionBurnRate || health.billing?.burnRatePerHour || 0;
+    const billingFresh = health.billing?.isFresh ?? false;
     const totalTokens = health.billing?.totalTokens || 0;
     const tokensPerMin = health.billing?.tokensPerMinute || null;
     const turns = health.transcript?.messageCount || 0;
 
-    // Format optional components
-    const cost = this.formatMoney(costToday);
-    const rate = this.formatMoney(burnRate);
-    const costFull = (costToday >= 0.01 || burnRate >= 0.01)
-      ? `💰:${c('cost')}${cost}${rst()}|${c('burnRate')}${rate}/h${rst()}`
-      : '';
-    const costOnly = (costToday >= 0.01)
-      ? `💰:${c('cost')}${cost}${rst()}`
-      : '';
+    // Format optional components - prefer sessionCost over costToday
+    let costFull = '';
+    let costOnly = '';
+    if (sessionCost >= 0.01 || costToday >= 0.01) {
+      const displayCost = sessionCost >= 0.01 ? sessionCost : costToday;
+      const costPart = `${c('cost')}${this.formatMoney(displayCost)}${rst()}`;
+      const burnPart = burnRate >= 0.01 ? `${c('burnRate')}${this.formatMoney(burnRate)}/h${rst()}` : '';
+
+      const parts = [costPart, burnPart].filter(Boolean);
+      costFull = parts.length > 0 ? `💰:${parts.join('|')}` : '';
+      costOnly = `💰:${costPart}`;
+    }
 
     const tokens = this.formatTokens(totalTokens);
     const tpm = tokensPerMin ? `(${this.formatTokens(tokensPerMin)}tpm)` : '';

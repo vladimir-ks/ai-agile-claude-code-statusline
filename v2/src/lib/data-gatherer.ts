@@ -268,6 +268,21 @@ class DataGatherer {
       }
     }
 
+    // 5c. Session cost - ALWAYS calculate from local transcript (separate from account daily cost)
+    // This shows how much THIS SPECIFIC SESSION has cost, not the account's daily total
+    if (transcriptPath && existsSync(transcriptPath)) {
+      try {
+        const sessionCost = await LocalCostCalculator.calculateCost(transcriptPath);
+        if (sessionCost && sessionCost.costUSD >= 0) {
+          health.billing.sessionCost = sessionCost.costUSD;
+          health.billing.sessionTokens = sessionCost.totalTokens;
+          health.billing.sessionBurnRate = sessionCost.costPerHour || undefined;
+        }
+      } catch {
+        // Session cost calculation failed - not critical
+      }
+    }
+
     // 6. Secrets scan (if transcript exists)
     // OPTIMIZATION: Use gitleaks for professional secret detection (if installed)
     if (health.transcript.exists && transcriptPath) {

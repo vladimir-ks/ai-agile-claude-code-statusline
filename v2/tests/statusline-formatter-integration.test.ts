@@ -414,18 +414,20 @@ describe('Smart Component Visibility', () => {
     expect(output).not.toContain('$0.50|'); // Total not shown
   });
 
-  test('cost shows both when total >=$1', () => {
+  test('cost shows session cost and burn rate', () => {
     const health = createDefaultHealth('high-cost');
-    health.billing.costToday = 5.25;
-    health.billing.burnRatePerHour = 2.1;
+    health.billing.costToday = 5.25;       // Account daily cost
+    health.billing.sessionCost = 12.50;    // Session cost
+    health.billing.sessionBurnRate = 2.1;  // Session burn rate
+    health.billing.isFresh = true;
 
     const variants = StatuslineFormatter.formatAllVariants(health);
     const output = variants.width200.join('\n');
 
-    // Should show both total and burn rate
+    // Should show session cost prominently
     expect(output).toContain('💰:');
-    expect(output).toContain('$5.25');
-    expect(output).toContain('/h');
+    expect(output).toContain('$12.5');     // Session cost
+    expect(output).toContain('/h');         // Burn rate
   });
 
   test('git hides all counts when clean repo', () => {

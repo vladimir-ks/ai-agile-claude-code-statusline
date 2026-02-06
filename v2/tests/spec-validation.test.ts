@@ -271,20 +271,29 @@ describe('SPEC: Output Format', () => {
   // SPEC: Cost Component
   // =========================================================================
   describe('Cost Component (💰)', () => {
-    test('shows cost with burn rate', () => {
+    test('shows session cost with burn rate', () => {
       createHealthFile('cost-full', {
         sessionId: 'cost-full',
         model: { value: 'Claude' },
         context: { tokensLeft: 100000, percentUsed: 25 },
         git: { branch: '', ahead: 0, behind: 0, dirty: 0 },
         transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-        billing: { costToday: 45.5, burnRatePerHour: 12.3, budgetRemaining: 120, isFresh: true },
+        billing: {
+          costToday: 5.0,           // Account daily cost (not shown if stale)
+          sessionCost: 45.5,        // Session cost (always shown)
+          sessionBurnRate: 12.3,    // Session burn rate
+          budgetRemaining: 120,
+          isFresh: true
+        },
         alerts: {}
       });
 
       const output = runDisplay('{"session_id":"cost-full"}');
 
-      expect(output).toContain('💰:$45.5|$12.3/h');
+      // Now shows: 💰:$45.5|$5/d|$12.3/h (session|account/day|rate)
+      expect(output).toContain('💰:');
+      expect(output).toContain('$45.5');  // Session cost
+      expect(output).toContain('/h');      // Burn rate
     });
 
     test('hidden when cost is zero', () => {
