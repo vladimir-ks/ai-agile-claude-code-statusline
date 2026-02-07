@@ -93,12 +93,14 @@ export class QuotaBrokerClient {
    * Get quota for the active slot (broker-aware)
    *
    * Detection priority:
+   * 0. keychainService match (most reliable for hot-swap)
+   * 0.5. email match (when auth profile detected)
    * 1. configDir match (session-aware)
-   * 2. active_slot from broker
+   * 2. active_slot from broker (last resort)
    * 3. Single slot
    * 4. Lowest-rank (best available)
    */
-  static getActiveQuota(configDir?: string): {
+  static getActiveQuota(configDir?: string, keychainService?: string, authEmail?: string): {
     dailyPercentUsed: number;
     weeklyPercentUsed: number;
     weeklyBudgetRemaining: number;
@@ -119,22 +121,59 @@ export class QuotaBrokerClient {
 
     let matchedSlotId: string | undefined;
     let slot: MergedQuotaSlot | null = null;
+    let matchStrategy: string = 'none';
 
-    // Strategy 1: Match by configDir
-    if (configDir) {
+    // Strategy 0: Match by keychainService (MOST RELIABLE for hot-swap)
+    // When multiple accounts share ~/.claude, keychain service name uniquely identifies the account
+    if (keychainService) {
       for (const [id, s] of slotEntries) {
-        if (s.config_dir && s.config_dir === configDir) {
+        if (s.keychain_service && s.keychain_service === keychainService) {
           slot = s;
           matchedSlotId = id;
+          matchStrategy = 'keychain_service';
           break;
         }
       }
     }
 
-    // Strategy 2: active_slot from broker
+    // Strategy 0.5: Match by email (when auth profile was detected)
+    // This is the key fix for hot-swap scenarios where all accounts share ~/.claude
+    if (!slot && authEmail) {
+      for (const [id, s] of slotEntries) {
+        if (s.email && s.email.toLowerCase() === authEmail.toLowerCase()) {
+          slot = s;
+          matchedSlotId = id;
+          matchStrategy = 'email';
+          break;
+        }
+      }
+    }
+
+    // Strategy 1: Match by configDir (works when accounts have separate config directories)
+    if (!slot && configDir) {
+      for (const [id, s] of slotEntries) {
+        if (s.config_dir && s.config_dir === configDir) {
+          slot = s;
+          matchedSlotId = id;
+          matchStrategy = 'config_dir';
+          break;
+        }
+      }
+    }
+
+    // Strategy 2: active_slot from broker (FALLBACK - may be wrong for multi-account)
     if (!slot && data.active_slot && data.slots[data.active_slot]) {
       slot = data.slots[data.active_slot];
       matchedSlotId = data.active_slot;
+      matchStrategy = 'active_slot';
+
+      // Log warning if we're falling back to broker's active_slot
+      // This is often wrong in multi-account scenarios
+      console.warn(
+        `[QuotaBrokerClient] Using broker's active_slot=${data.active_slot} as fallback. ` +
+        `This may be incorrect if keychainService or configDir don't match. ` +
+        `keychainService=${keychainService}, configDir=${configDir}`
+      );
     }
 
     // Strategy 3: Single slot

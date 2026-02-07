@@ -221,6 +221,51 @@ describe('QuotaBrokerClient', () => {
       expect(result!.email).toBe('other@example.com');
     });
 
+    test('Strategy 0.5: matches by authEmail (hot-swap fix)', () => {
+      const data = makeCache({
+        active_slot: 'slot-1', // Broker says slot-1 is active
+        slots: {
+          'slot-1': makeSlot({
+            email: 'rimidalvk@gmail.com',
+            config_dir: null, // No config_dir set (hot-swap scenario)
+            rank: 2
+          }),
+          'slot-2': makeSlot({
+            email: 'vlad@vladks.com',
+            config_dir: null, // No config_dir set
+            rank: 1
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      // Session is using vladks.com account (from auth detection)
+      // Without email matching, would fall back to active_slot (slot-1) = WRONG
+      // With email matching, should select slot-2 = CORRECT
+      const result = QuotaBrokerClient.getActiveQuota(
+        undefined, // configDir not available or doesn't match
+        undefined, // keychainService not available
+        'vlad@vladks.com' // authEmail detected from session
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.slotId).toBe('slot-2');
+      expect(result!.email).toBe('vlad@vladks.com');
+    });
+
+    test('Strategy 0.5: email match is case-insensitive', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({ email: 'Test@Example.COM', config_dir: null })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.getActiveQuota(undefined, undefined, 'test@example.com');
+      expect(result).not.toBeNull();
+      expect(result!.slotId).toBe('slot-1');
+    });
+
     test('Strategy 2: falls back to active_slot', () => {
       const data = makeCache({ active_slot: 'slot-2' });
       writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');

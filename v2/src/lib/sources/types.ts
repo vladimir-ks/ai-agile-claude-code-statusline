@@ -64,6 +64,8 @@ export interface GatherContext {
   existingHealth: SessionHealth | null;
   /** Project path (from JSON input, cwd, or transcript path) */
   projectPath: string;
+  /** Detected auth profile email (populated after Tier 2, used by Tier 3) */
+  authEmail?: string;
 }
 
 // ---------------------------------------------------------------------------

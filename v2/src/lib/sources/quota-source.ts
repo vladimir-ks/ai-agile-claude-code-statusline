@@ -37,11 +37,13 @@ export const quotaSource: DataSourceDescriptor<QuotaSourceData> = {
 
   async fetch(ctx: GatherContext): Promise<QuotaSourceData> {
     const configDir = ctx.configDir || undefined;
+    const keychainService = ctx.keychainService || undefined;
+    const authEmail = ctx.authEmail || undefined;
     const fetchedAt = Date.now();
 
     // Strategy 1: QuotaBrokerClient (primary)
     if (QuotaBrokerClient.isAvailable()) {
-      const brokerQuota = QuotaBrokerClient.getActiveQuota(configDir);
+      const brokerQuota = QuotaBrokerClient.getActiveQuota(configDir, keychainService, authEmail);
       if (brokerQuota) {
         return {
           weeklyBudgetRemaining: brokerQuota.weeklyBudgetRemaining,

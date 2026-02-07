@@ -163,6 +163,12 @@ export class UnifiedDataBroker {
       }
     }
 
+    // CRITICAL: Update context with detected authEmail for Tier 3 quota matching
+    // This enables email-based slot selection in QuotaBrokerClient
+    if (health.launch.authProfile) {
+      ctx.authEmail = health.launch.authProfile;
+    }
+
     // -----------------------------------------------------------------------
     // TIER 3: Global cache → stale check → single-flight refresh → merge
     // -----------------------------------------------------------------------
