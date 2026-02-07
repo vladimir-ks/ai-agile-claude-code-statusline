@@ -328,7 +328,7 @@ describe('Billing Data Flow Simulation', () => {
       { category: 'billing_ccusage', freshMs: 120_000, staleMs: 600_000 },
       { category: 'billing_oauth', freshMs: 120_000, staleMs: 600_000 },
       { category: 'git_status', freshMs: 30_000, staleMs: 300_000 },
-      { category: 'weekly_quota', freshMs: 300_000, staleMs: 86_400_000 },
+      { category: 'weekly_quota', freshMs: 300_000, staleMs: 3_600_000 }, // Updated from 24h to 1h for tighter staleness detection
     ];
 
     for (const tc of testCases) {

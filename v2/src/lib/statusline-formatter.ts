@@ -608,7 +608,26 @@ export class StatuslineFormatter {
     const lastFetched = health.billing?.lastFetched || health.gatheredAt || Date.now();
     const ageMinutes = Math.floor(FreshnessManager.getAge(lastFetched) / 60000);
     const billingIndicator = FreshnessManager.getContextAwareIndicator(lastFetched, 'billing_ccusage');
-    const staleMarker = billingIndicator ? `${c('critical')}${billingIndicator}${rst()}` : '';
+
+    // DEFENSE IN DEPTH: Force critical indicator if billing data >1 hour old
+    const billingAge = Date.now() - lastFetched;
+    const EMERGENCY_THRESHOLD = 3600_000; // 1 hour
+    const forceBillingIndicator = billingAge > EMERGENCY_THRESHOLD ? '🔺' : '';
+
+    // Use worst case
+    const finalBillingIndicator = billingIndicator === '🔺' || forceBillingIndicator === '🔺'
+      ? '🔺'
+      : (billingIndicator === '⚠' ? '⚠' : (forceBillingIndicator || ''));
+
+    const staleMarker = finalBillingIndicator ? `${c('critical')}${finalBillingIndicator}${rst()}` : '';
+
+    // Log if defense catch triggered
+    if (forceBillingIndicator === '🔺' && !billingIndicator) {
+      console.error(
+        `[Formatter] DEFENSE CATCH: Billing data is ${Math.floor(billingAge / 60000)}min old ` +
+        `but FreshnessManager returned '${billingIndicator}'. Forcing 🔺 indicator.`
+      );
+    }
 
     // Budget
     if (health.billing?.budgetRemaining || health.billing?.budgetRemaining === 0) {
@@ -642,13 +661,41 @@ export class StatuslineFormatter {
       const pct = Math.max(0, Math.min(100, health.billing.weeklyBudgetPercentUsed || 0));
       const resetDay = health.billing.weeklyResetDay || 'Mon';
 
-      // Weekly staleness via FreshnessManager
+      // Weekly staleness via FreshnessManager (context-aware)
       const weeklyIndicator = FreshnessManager.getContextAwareIndicator(
         health.billing.weeklyLastModified, 'weekly_quota'
       );
-      const weeklyMarker = weeklyIndicator ? `${c('critical')}${weeklyIndicator}${rst()}` : '';
+
+      // DEFENSE IN DEPTH: Redundant age check to catch data corruption
+      // If data is >1 hour old, FORCE show critical indicator regardless of FreshnessManager
+      const weeklyAge = Date.now() - (health.billing.weeklyLastModified || 0);
+      const EMERGENCY_THRESHOLD = 3600_000; // 1 hour
+      const forceIndicator = weeklyAge > EMERGENCY_THRESHOLD ? '🔺' : '';
+
+      // Use worst case: if either check says critical, show 🔺
+      const finalIndicator = weeklyIndicator === '🔺' || forceIndicator === '🔺'
+        ? '🔺'
+        : (weeklyIndicator === '⚠' ? '⚠' : (forceIndicator || ''));
+
+      const weeklyMarker = finalIndicator ? `${c('critical')}${finalIndicator}${rst()}` : '';
+
+      // Log warning if redundant check caught stale data that FreshnessManager missed
+      if (forceIndicator === '🔺' && !weeklyIndicator) {
+        console.error(
+          `[Formatter] DEFENSE CATCH: Weekly quota data is ${Math.floor(weeklyAge / 60000)}min old ` +
+          `but FreshnessManager returned '${weeklyIndicator}'. Forcing 🔺 indicator.`
+        );
+      }
 
       parts.push(`📅:${c('weeklyBudget')}${hours}h(${pct}%)@${resetDay}${rst()}${weeklyMarker}`);
+
+      // OBSERVABILITY: Log when displaying stale weekly quota data
+      if (weeklyAge > EMERGENCY_THRESHOLD) {
+        console.error(
+          `[Formatter] WARNING: Displaying stale weekly quota data: ` +
+          `${hours}h (${pct}%) age=${Math.floor(weeklyAge / 60000)}min indicator='${finalIndicator}'`
+        );
+      }
     }
 
     // Slot indicator (Phase 1 — Session Lifecycle)

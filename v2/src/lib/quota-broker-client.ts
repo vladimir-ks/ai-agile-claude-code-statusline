@@ -157,7 +157,27 @@ export class QuotaBrokerClient {
 
     if (!slot) return null;
 
-    const isStale = data.is_fresh === false || !slot.is_fresh;
+    // CRITICAL: Don't trust is_fresh field alone - validate actual data age
+    // Defense against broker bugs where is_fresh=true but data is hours old
+    const WEEKLY_QUOTA_FRESH_THRESHOLD = 300_000; // 5 minutes (matches FreshnessManager)
+    const dataAge = Date.now() - (slot.last_fetched || 0);
+    const actuallyStale = dataAge > WEEKLY_QUOTA_FRESH_THRESHOLD;
+
+    // isStale is TRUE if:
+    // 1. Broker says it's not fresh (data.is_fresh === false OR slot.is_fresh === false)
+    // 2. OR actual age exceeds threshold (defense against broker data corruption)
+    const isStale = data.is_fresh === false || !slot.is_fresh || actuallyStale;
+
+    // Log warning if broker data contradicts actual age
+    if (!actuallyStale && (data.is_fresh === false || !slot.is_fresh)) {
+      // Broker says stale but data is actually fresh - unusual but not critical
+    } else if (actuallyStale && slot.is_fresh !== false) {
+      // CRITICAL: Broker says fresh but data is actually stale
+      console.error(
+        `[QuotaBrokerClient] WARNING: Broker data corruption detected for ${matchedSlotId}. ` +
+        `is_fresh=${slot.is_fresh} but data age is ${Math.floor(dataAge / 60000)}min. Forcing isStale=true.`
+      );
+    }
 
     return {
       dailyPercentUsed: slot.five_hour_util,

@@ -29,7 +29,8 @@ const TEST_DIR = '/tmp/session-aware-token-test';
 const TEST_HEALTH_DIR = `${TEST_DIR}/session-health`;
 
 // Mock hot-swap-quota.json data with config_dir fields
-const MOCK_QUOTA_CACHE: HotSwapQuotaCache = {
+// NOTE: Use function to get fresh timestamps for each test (not static)
+const getMockQuotaCache = (): HotSwapQuotaCache => ({
   'slot-1': {
     email: 'user-a@example.com',
     five_hour_util: 30,
@@ -37,7 +38,7 @@ const MOCK_QUOTA_CACHE: HotSwapQuotaCache = {
     weekly_budget_remaining_hours: 120,
     weekly_reset_day: 'Thu',
     daily_reset_time: '17:00',
-    last_fetched: Date.now() - 30000, // 30s ago
+    last_fetched: Date.now() - 30000, // 30s ago (fresh)
     is_fresh: true,
     config_dir: `${HOME}/_claude-configs/hot-swap/registration/slot-1`,
     keychain_hash: '4a0e8cbc',
@@ -49,12 +50,12 @@ const MOCK_QUOTA_CACHE: HotSwapQuotaCache = {
     weekly_budget_remaining_hours: 48,
     weekly_reset_day: 'Wed',
     daily_reset_time: '23:00',
-    last_fetched: Date.now() - 60000, // 60s ago
+    last_fetched: Date.now() - 60000, // 60s ago (fresh)
     is_fresh: true,
     config_dir: `${HOME}/_claude-configs/hot-swap/registration/slot-2`,
     keychain_hash: 'db267d92',
   },
-};
+});
 
 describe('Session-Aware Token Resolution', () => {
   beforeAll(() => {
@@ -214,7 +215,7 @@ describe('Session-Aware Token Resolution', () => {
 
     test('matches slot by config_dir when provided', () => {
       // Write mock cache with config_dir fields
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const slot1ConfigDir = `${HOME}/_claude-configs/hot-swap/registration/slot-1`;
@@ -227,7 +228,7 @@ describe('Session-Aware Token Resolution', () => {
     });
 
     test('matches slot-2 by config_dir', () => {
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const slot2ConfigDir = `${HOME}/_claude-configs/hot-swap/registration/slot-2`;
@@ -240,7 +241,7 @@ describe('Session-Aware Token Resolution', () => {
     });
 
     test('falls back to other strategies when configDir does not match', () => {
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       // Use a configDir that matches no slot
@@ -252,7 +253,7 @@ describe('Session-Aware Token Resolution', () => {
     });
 
     test('falls back to other strategies when configDir is undefined', () => {
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const result = HotSwapQuotaReader.getActiveQuota(undefined);
@@ -264,7 +265,7 @@ describe('Session-Aware Token Resolution', () => {
     test('config_dir matching takes priority over active_account registry', () => {
       // If configDir matches slot-1 but active_account is slot-2,
       // configDir match should win
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const slot1ConfigDir = `${HOME}/_claude-configs/hot-swap/registration/slot-1`;
@@ -359,7 +360,7 @@ describe('Session-Aware Token Resolution', () => {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
       }
 
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       try {
@@ -495,7 +496,7 @@ describe('Session-Aware Token Resolution', () => {
       }
 
       try {
-        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
         HotSwapQuotaReader.clearCache();
 
         const slot1Dir = `${HOME}/_claude-configs/hot-swap/registration/slot-1`;
@@ -520,7 +521,7 @@ describe('Session-Aware Token Resolution', () => {
       }
 
       try {
-        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
         HotSwapQuotaReader.clearCache();
 
         const result = HotSwapQuotaReader.getSlotByConfigDir('/nonexistent/path');
@@ -544,7 +545,7 @@ describe('Session-Aware Token Resolution', () => {
       }
 
       try {
-        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
         HotSwapQuotaReader.clearCache();
 
         const slot2Dir = `${HOME}/_claude-configs/hot-swap/registration/slot-2`;
@@ -569,7 +570,7 @@ describe('Session-Aware Token Resolution', () => {
       }
 
       try {
-        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
         HotSwapQuotaReader.clearCache();
 
         // Simulate what data-gatherer.ts now does:
@@ -649,7 +650,7 @@ describe('Session-Aware Token Resolution', () => {
       }
 
       try {
-        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+        writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
         HotSwapQuotaReader.clearCache();
 
         const slot1Dir = `${HOME}/_claude-configs/hot-swap/registration/slot-1`;
@@ -803,7 +804,7 @@ accounts:
 active_account: slot-1
 `;
       writeFileSync(PROD_SESSIONS, sessionsYaml, 'utf-8');
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       // Query slot-1 (active)
@@ -936,7 +937,7 @@ accounts:
 active_account: slot-1
 `;
       writeFileSync(PROD_SESSIONS, phase1, 'utf-8');
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(MOCK_QUOTA_CACHE), 'utf-8');
+      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const allActive = HotSwapQuotaReader.getAllSlotStatuses();

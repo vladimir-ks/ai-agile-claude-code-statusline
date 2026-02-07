@@ -34,7 +34,7 @@ export const CATEGORIES: Record<string, FreshnessCategory> = {
   transcript:          { freshMs: 300_000,   cooldownMs: 0,       staleMs: 600_000 },    // 5min fresh, 10min critical
   model:               { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh
   context:             { freshMs: 5_000,     cooldownMs: 0 },                            // 5s fresh (real-time from stdin)
-  weekly_quota:        { freshMs: 300_000,   cooldownMs: 0,       staleMs: 86_400_000 }, // 5min fresh, 24h critical
+  weekly_quota:        { freshMs: 300_000,   cooldownMs: 0,       staleMs: 3600_000 },   // 5min fresh, 1h critical (was 24h - too lenient)
   quota_broker:        { freshMs: 30_000,    cooldownMs: 0,       staleMs: 300_000 },    // 30s fresh, 5min critical
   version_check:       { freshMs: 14_400_000,cooldownMs: 0 },                            // 4h fresh
   auth_profile:        { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh
@@ -160,7 +160,7 @@ export class FreshnessManager {
     // 1. Fresh → no indicator
     if (age < cat.freshMs) return '';
 
-    // 2. Critical age → always 🔺
+    // 2. Critical age → ALWAYS 🔺 (defense in depth - never hide critical staleness)
     if (cat.staleMs && age >= cat.staleMs) return '🔺';
 
     // 3. Check intent state for context
@@ -170,6 +170,12 @@ export class FreshnessManager {
       // Intent exists — check how long it's been pending
       if (intentAge >= 5 * 60_000) return '🔺';  // > 5min: refresh broken
       if (intentAge >= 30_000) return '⚠';       // > 30s: overdue
+
+      // CRITICAL FIX: Even if refresh is pending (< 30s), check if data itself is extremely stale
+      // This prevents masking 9-hour-old data just because a refresh was recently triggered
+      const EMERGENCY_STALE_THRESHOLD = 3600_000; // 1 hour
+      if (age >= EMERGENCY_STALE_THRESHOLD) return '🔺';
+
       return '';                                   // < 30s: pending, normal
     }
 
