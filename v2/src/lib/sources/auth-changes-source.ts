@@ -19,6 +19,40 @@ import { UnifiedTranscriptScanner } from '../transcript-scanner/unified-transcri
 import { SessionLockManager } from '../session-lock-manager';
 import { existsSync } from 'fs';
 
+// Structured logging
+interface LogContext {
+  component: string;
+  operation?: string;
+  sessionId?: string;
+  error?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+function logError(message: string, context: LogContext): void {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level: 'ERROR',
+    ...context,
+    message,
+    ...(context.error && {
+      error: context.error instanceof Error ? context.error.message : String(context.error),
+    }),
+  };
+  console.error(JSON.stringify(logEntry));
+}
+
+function logInfo(message: string, context: LogContext): void {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level: 'INFO',
+    ...context,
+    message,
+  };
+  console.log(JSON.stringify(logEntry));
+}
+
 const scanner = new UnifiedTranscriptScanner();
 
 export interface AuthChangesData {
@@ -75,7 +109,15 @@ export const authChangesSource: DataSourceDescriptor<AuthChangesData> = {
         const writeSuccess = SessionLockManager.write(updatedLock);
         if (writeSuccess) {
           sessionEmailUpdated = true;
-          console.log(`[AuthChangesSource] Updated session ${ctx.sessionId} email: ${currentLock.email} → ${latest.email}`);
+          logInfo('Session email updated', {
+            component: 'AuthChangesSource',
+            operation: 'updateSessionLock',
+            sessionId: ctx.sessionId,
+            metadata: {
+              oldEmail: currentLock.email,
+              newEmail: latest.email,
+            },
+          });
         }
       }
 
@@ -87,7 +129,12 @@ export const authChangesSource: DataSourceDescriptor<AuthChangesData> = {
         sessionEmailUpdated,
       };
     } catch (error) {
-      console.error('[AuthChangesSource] Failed to detect auth changes:', error);
+      logError('Failed to detect auth changes', {
+        component: 'AuthChangesSource',
+        operation: 'fetch',
+        sessionId: ctx.sessionId,
+        error,
+      });
       return emptyResult;
     }
   },

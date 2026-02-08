@@ -18,6 +18,50 @@ import { homedir } from 'os';
 import { join } from 'path';
 import type { SessionHealth } from '../types/session-health';
 
+// Structured logging for observability
+interface LogContext {
+  component: string;
+  operation?: string;
+  sessionId?: string;
+  error?: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+function logError(message: string, context: LogContext): void {
+  const timestamp = new Date().toISOString();
+  const { component, operation, sessionId, error, metadata } = context;
+
+  const logEntry = {
+    timestamp,
+    level: 'ERROR',
+    component,
+    message,
+    ...(operation && { operation }),
+    ...(sessionId && { sessionId }),
+    ...(error && { error: error instanceof Error ? error.message : String(error) }),
+    ...(metadata && { metadata }),
+  };
+
+  console.error(JSON.stringify(logEntry));
+}
+
+function logInfo(message: string, context: LogContext): void {
+  const timestamp = new Date().toISOString();
+  const { component, operation, sessionId, metadata } = context;
+
+  const logEntry = {
+    timestamp,
+    level: 'INFO',
+    component,
+    message,
+    ...(operation && { operation }),
+    ...(sessionId && { sessionId }),
+    ...(metadata && { metadata }),
+  };
+
+  console.log(JSON.stringify(logEntry));
+}
+
 export interface TelemetryEntry {
   id?: number;
   timestamp: number;
@@ -54,6 +98,7 @@ export class TelemetryDatabase {
   private static instance: Database | null = null;
   private static readonly DB_PATH = join(homedir(), '.claude/session-health/telemetry.db');
   private static readonly RETENTION_DAYS = 30;
+  private static readonly SCHEMA_VERSION = 1;
 
   /**
    * Get or create database connection (singleton)
@@ -81,13 +126,42 @@ export class TelemetryDatabase {
   }
 
   /**
-   * Initialize database schema
+   * Initialize database schema with version tracking
    */
   private static initSchema(): void {
     const db = this.instance!;
 
+    // Create schema_version table for migrations
     db.exec(`
-      CREATE TABLE IF NOT EXISTS telemetry (
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at INTEGER NOT NULL
+      )
+    `);
+
+    // Check current schema version
+    let currentVersion = 0;
+    try {
+      const result = db.prepare('SELECT MAX(version) as version FROM schema_version').get() as any;
+      currentVersion = result?.version || 0;
+    } catch {
+      // Table doesn't exist yet, version = 0
+    }
+
+    // Apply migrations if needed
+    if (currentVersion < this.SCHEMA_VERSION) {
+      this.migrate(db, currentVersion, this.SCHEMA_VERSION);
+    }
+  }
+
+  /**
+   * Apply database migrations
+   */
+  private static migrate(db: Database, fromVersion: number, toVersion: number): void {
+    if (fromVersion < 1 && toVersion >= 1) {
+      // Migration 1: Initial schema
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS telemetry (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp INTEGER NOT NULL,
         sessionId TEXT NOT NULL,
@@ -120,10 +194,27 @@ export class TelemetryDatabase {
       )
     `);
 
-    // Indexes for common queries
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_timestamp ON telemetry(timestamp)`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_sessionId ON telemetry(sessionId)`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_authProfile ON telemetry(authProfile)`);
+      // Indexes for common queries
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_timestamp ON telemetry(timestamp)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_sessionId ON telemetry(sessionId)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_authProfile ON telemetry(authProfile)`);
+
+      // Record migration
+      db.exec(`INSERT INTO schema_version (version, applied_at) VALUES (1, ${Date.now()})`);
+
+      logInfo('Database schema initialized', {
+        component: 'TelemetryDatabase',
+        operation: 'migrate',
+        metadata: { version: 1 },
+      });
+    }
+
+    // Future migrations go here (if fromVersion < 2 && toVersion >= 2)
+    // Example:
+    // if (fromVersion < 2 && toVersion >= 2) {
+    //   db.exec('ALTER TABLE telemetry ADD COLUMN newField TEXT');
+    //   db.exec(`INSERT INTO schema_version (version, applied_at) VALUES (2, ${Date.now()})`);
+    // }
   }
 
   /**
@@ -168,7 +259,11 @@ export class TelemetryDatabase {
 
       return true;
     } catch (error) {
-      console.error('[TelemetryDatabase] Failed to record entry:', error);
+      logError('Failed to record telemetry entry', {
+        component: 'TelemetryDatabase',
+        operation: 'record',
+        error,
+      });
       return false;
     }
   }
@@ -178,14 +273,35 @@ export class TelemetryDatabase {
    * Convenience wrapper for record()
    */
   static recordFromHealth(health: SessionHealth, displayTimeMs: number): boolean {
+    // Extract scanTimeMs from performance metrics if available
+    const scanTimeMs = health.performance?.gatherDuration || 0;
+
+    // Extract cacheHit from transcript metadata if available
+    const cacheHit = health.transcript?.exists === true &&
+                     health.transcript?.messageCount > 0;
+
+    // Detect auth changes by comparing launch profile with current state
+    // (if they differ, an auth change occurred during this session)
+    const hasAuthChanges = false; // Default to false, will be updated by auth-changes-source
+
+    // Extract slotId from SessionLock if available
+    let slotId: string | null = null;
+    try {
+      const { SessionLockManager } = require('./session-lock-manager');
+      const lock = SessionLockManager.read(health.sessionId);
+      slotId = lock?.slotId || null;
+    } catch {
+      // SessionLock not available - not critical
+    }
+
     const entry: TelemetryEntry = {
       timestamp: Date.now(),
       sessionId: health.sessionId,
 
-      // Performance (extract from metrics if available)
+      // Performance
       displayTimeMs,
-      scanTimeMs: 0, // Not directly available in SessionHealth
-      cacheHit: false, // Not directly available
+      scanTimeMs,
+      cacheHit,
 
       // Session
       authProfile: health.launch.authProfile || 'default',
@@ -200,13 +316,13 @@ export class TelemetryDatabase {
 
       // Health
       hasSecrets: health.alerts.secretsDetected,
-      hasAuthChanges: false, // Not directly tracked in SessionHealth
+      hasAuthChanges,
       transcriptStale: health.alerts.transcriptStale,
       billingStale: !health.billing.isFresh,
 
       // Metadata
       version: health.status.claudeVersion || 'unknown',
-      slotId: null, // Could be extracted from SessionLock
+      slotId,
     };
 
     return this.record(entry);
@@ -226,24 +342,59 @@ export class TelemetryDatabase {
       let sql = 'SELECT * FROM telemetry WHERE 1=1';
       const params: any[] = [];
 
-      if (options.since) {
+      // Validate timestamp ranges
+      if (options.since !== undefined) {
+        if (!Number.isInteger(options.since) || options.since < 0) {
+          logError('Invalid since parameter', {
+            component: 'TelemetryDatabase',
+            operation: 'query',
+            metadata: { since: options.since },
+          });
+          return [];
+        }
         sql += ' AND timestamp >= ?';
         params.push(options.since);
       }
 
-      if (options.until) {
+      if (options.until !== undefined) {
+        if (!Number.isInteger(options.until) || options.until < 0) {
+          logError('Invalid until parameter', {
+            component: 'TelemetryDatabase',
+            operation: 'query',
+            metadata: { until: options.until },
+          });
+          return [];
+        }
         sql += ' AND timestamp <= ?';
         params.push(options.until);
       }
 
-      if (options.sessionId) {
+      // Validate sessionId (prevent injection)
+      if (options.sessionId !== undefined) {
+        if (typeof options.sessionId !== 'string' || options.sessionId.length === 0) {
+          logError('Invalid sessionId parameter', {
+            component: 'TelemetryDatabase',
+            operation: 'query',
+            metadata: { sessionId: options.sessionId },
+          });
+          return [];
+        }
         sql += ' AND sessionId = ?';
         params.push(options.sessionId);
       }
 
       sql += ' ORDER BY timestamp DESC';
 
-      if (options.limit) {
+      // Validate limit (prevent DoS)
+      if (options.limit !== undefined) {
+        if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 10000) {
+          logError('Invalid limit parameter (must be 1-10000)', {
+            component: 'TelemetryDatabase',
+            operation: 'query',
+            metadata: { limit: options.limit },
+          });
+          return [];
+        }
         sql += ' LIMIT ?';
         params.push(options.limit);
       }
@@ -261,7 +412,11 @@ export class TelemetryDatabase {
         billingStale: row.billingStale === 1,
       }));
     } catch (error) {
-      console.error('[TelemetryDatabase] Query failed:', error);
+      logError('Query failed', {
+        component: 'TelemetryDatabase',
+        operation: 'query',
+        error,
+      });
       return [];
     }
   }
@@ -290,7 +445,11 @@ export class TelemetryDatabase {
       const result = stmt.get(sessionId) as any;
       return result;
     } catch (error) {
-      console.error('[TelemetryDatabase] Failed to get session stats:', error);
+      logError('Failed to get session stats', {
+        component: 'TelemetryDatabase',
+        operation: 'getSessionStats',
+        error,
+      });
       return null;
     }
   }
@@ -330,7 +489,11 @@ export class TelemetryDatabase {
         totalCost: result.avgDailyCost || 0,
       };
     } catch (error) {
-      console.error('[TelemetryDatabase] Failed to get daily stats:', error);
+      logError('Failed to get daily stats', {
+        component: 'TelemetryDatabase',
+        operation: 'getDailyStats',
+        error,
+      });
       return null;
     }
   }
@@ -349,7 +512,11 @@ export class TelemetryDatabase {
 
       const deletedCount = result.changes || 0;
       if (deletedCount > 0) {
-        console.log(`[TelemetryDatabase] Cleaned up ${deletedCount} old entries`);
+        logInfo('Cleaned up old entries', {
+          component: 'TelemetryDatabase',
+          operation: 'cleanup',
+          metadata: { deletedCount },
+        });
       }
 
       // Vacuum to reclaim space
@@ -357,18 +524,50 @@ export class TelemetryDatabase {
 
       return deletedCount;
     } catch (error) {
-      console.error('[TelemetryDatabase] Cleanup failed:', error);
+      logError('Cleanup failed', {
+        component: 'TelemetryDatabase',
+        operation: 'cleanup',
+        error,
+      });
       return 0;
     }
   }
 
   /**
    * Close database connection
+   * Should be called on shutdown to release resources
    */
   static close(): void {
     if (this.instance) {
-      this.instance.close();
-      this.instance = null;
+      try {
+        this.instance.close();
+        logInfo('Database connection closed', {
+          component: 'TelemetryDatabase',
+          operation: 'close',
+        });
+      } catch (error) {
+        logError('Failed to close database', {
+          component: 'TelemetryDatabase',
+          operation: 'close',
+          error,
+        });
+      } finally {
+        this.instance = null;
+      }
+    }
+  }
+
+  /**
+   * Get current schema version
+   * Useful for debugging and migration verification
+   */
+  static getSchemaVersion(): number {
+    try {
+      const db = this.getDb();
+      const result = db.prepare('SELECT MAX(version) as version FROM schema_version').get() as any;
+      return result?.version || 0;
+    } catch {
+      return 0;
     }
   }
 
