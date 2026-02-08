@@ -32,8 +32,6 @@ import { execSync } from 'child_process';
 import GitModule from '../modules/git-module';
 import CCUsageSharedModule from '../modules/ccusage-shared-module';
 import { AnthropicOAuthAPI } from '../modules/anthropic-oauth-api';
-import IncrementalTranscriptScanner from './incremental-transcript-scanner';
-import GitLeaksScanner from './gitleaks-scanner';
 import CleanupManager from './cleanup-manager';
 import RuntimeStateStore from './runtime-state-store';
 import { sessionHealthToRuntimeSession } from '../types/runtime-state';
@@ -60,8 +58,6 @@ class DataGatherer {
   private healthStore: HealthStore;
   private healthStorePath: string | undefined;
   private transcriptMonitor: TranscriptMonitor;
-  private incrementalScanner: IncrementalTranscriptScanner;
-  private gitleaksScanner: GitLeaksScanner;
   private cleanupManager: CleanupManager;
   private modelResolver: ModelResolver;
   private gitModule: GitModule;
@@ -72,8 +68,6 @@ class DataGatherer {
     this.healthStorePath = healthStorePath;
     this.healthStore = new HealthStore(healthStorePath);
     this.transcriptMonitor = new TranscriptMonitor();
-    this.incrementalScanner = new IncrementalTranscriptScanner();
-    this.gitleaksScanner = new GitLeaksScanner();
     this.cleanupManager = new CleanupManager(healthStorePath);
     this.modelResolver = new ModelResolver();
     this.runtimeStateStore = new RuntimeStateStore(healthStorePath);
