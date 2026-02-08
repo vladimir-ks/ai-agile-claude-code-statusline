@@ -1,162 +1,124 @@
 /**
- * Line Parser - JSONL parsing with validation and error handling
+ * Line Parser - Parse JSONL content into structured lines
  *
- * Parses JSONL (JSON Lines) format used by Claude Code transcripts.
- * Handles malformed lines gracefully, provides detailed error context.
- *
- * Performance: Single-pass parsing, minimal allocations.
+ * Performance: O(n) where n = number of lines
+ * Error handling: NEVER throws, gracefully handles malformed JSON
  */
 
 import type { ParsedLine } from './types';
 
 export class LineParser {
   /**
-   * Parse JSONL content into structured lines
+   * Parse JSONL content into ParsedLine array
    *
-   * @param content - Raw JSONL content (Buffer or string)
-   * @param startLineNumber - Starting line number (for offset tracking)
-   * @returns Array of parsed lines with validation status
+   * @param content - Raw JSONL content (newline-delimited JSON)
+   * @param startLine - Starting line number (for error reporting)
+   * @returns Array of ParsedLine objects (including failed parses)
+   *
+   * Error handling:
+   * - Invalid JSON → data=null, parseError set
+   * - Empty lines → filtered out
+   * - Never throws
    */
-  static parse(
-    content: Buffer | string,
-    startLineNumber: number = 0
-  ): ParsedLine[] {
-    const text = typeof content === 'string' ? content : content.toString('utf-8');
-    const lines = text.split('\n');
+  static parse(content: string, startLine: number = 0): ParsedLine[] {
+    // Edge case: empty content
+    if (!content || content.trim() === '') {
+      return [];
+    }
+
+    // Split by newline, filter empty
+    const lines = content.split('\n').filter(line => line.trim() !== '');
+
+    // Parse each line
     const parsed: ParsedLine[] = [];
-
     for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i];
-      const trimmed = raw.trim();
+      const lineNumber = startLine + i; // startLine is already 1-based or 0 if not specified
+      const rawLine = lines[i];
 
-      // Skip empty lines
-      if (!trimmed) {
-        continue;
-      }
+      let data: any | null = null;
+      let parseError: string | null = null;
 
       try {
-        const data = JSON.parse(trimmed);
-        parsed.push({
-          valid: true,
-          data,
-          raw,
-          lineNumber: startLineNumber + i,
-        });
+        data = JSON.parse(rawLine);
       } catch (error) {
-        // Malformed JSON - keep raw line for debugging
-        parsed.push({
-          valid: false,
-          raw,
-          lineNumber: startLineNumber + i,
-        });
+        // Parse failed - store error
+        parseError = error instanceof Error ? error.message : 'JSON parse failed';
       }
+
+      parsed.push({
+        lineNumber,
+        rawLine,
+        data,
+        parseError
+      });
     }
 
     return parsed;
   }
 
   /**
-   * Parse single JSONL line
+   * Parse single line (utility)
    *
-   * @param line - Single line of JSONL
-   * @param lineNumber - Line number in file
-   * @returns Parsed line
+   * @param line - Single JSONL line
+   * @param lineNumber - Line number (for error reporting)
+   * @returns ParsedLine object
    */
-  static parseLine(line: string, lineNumber: number = 0): ParsedLine {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return {
-        valid: false,
-        raw: line,
-        lineNumber,
-      };
-    }
+  static parseLine(line: string, lineNumber: number): ParsedLine {
+    let data: any | null = null;
+    let parseError: string | null = null;
 
     try {
-      const data = JSON.parse(trimmed);
-      return {
-        valid: true,
-        data,
-        raw: line,
-        lineNumber,
-      };
-    } catch {
-      return {
-        valid: false,
-        raw: line,
-        lineNumber,
-      };
+      data = JSON.parse(line);
+    } catch (error) {
+      parseError = error instanceof Error ? error.message : 'JSON parse failed';
     }
+
+    return {
+      lineNumber,
+      rawLine: line,
+      data,
+      parseError
+    };
   }
 
   /**
-   * Validate parsed line has expected structure for Claude Code transcript
+   * Count valid lines (successfully parsed)
    *
-   * @param line - Parsed line
-   * @returns Whether line looks like valid transcript entry
+   * @param lines - Array of ParsedLine objects
+   * @returns Count of lines with data !== null
    */
-  static isValidTranscriptEntry(line: ParsedLine): boolean {
-    if (!line.valid || !line.data) {
-      return false;
-    }
-
-    const data = line.data;
-
-    // Check for common transcript fields
-    const hasType = typeof data.type === 'string';
-    const hasSender = typeof data.sender === 'string';
-    const hasTimestamp = typeof data.ts === 'number' || typeof data.timestamp === 'number';
-
-    // At minimum, should have type or sender
-    return hasType || hasSender || hasTimestamp;
+  static countValid(lines: ParsedLine[]): number {
+    return lines.filter(line => line.data !== null).length;
   }
 
   /**
-   * Extract text content from parsed line (handles multiple formats)
+   * Count parse errors
    *
-   * @param line - Parsed line
-   * @returns Text content or empty string
+   * @param lines - Array of ParsedLine objects
+   * @returns Count of lines with parseError !== null
    */
-  static extractText(line: ParsedLine): string {
-    if (!line.valid || !line.data) {
-      return '';
-    }
-
-    const data = line.data;
-
-    // Try common text fields
-    if (typeof data.text === 'string') {
-      return data.text;
-    }
-    if (typeof data.content === 'string') {
-      return data.content;
-    }
-    if (typeof data.message === 'string') {
-      return data.message;
-    }
-
-    // Fallback: stringify data
-    return line.raw;
+  static countErrors(lines: ParsedLine[]): number {
+    return lines.filter(line => line.parseError !== null).length;
   }
 
   /**
-   * Get statistics about parsing result
+   * Filter to only valid lines
    *
-   * @param lines - Parsed lines
-   * @returns Parsing statistics
+   * @param lines - Array of ParsedLine objects
+   * @returns Only lines with data !== null
    */
-  static getStats(lines: ParsedLine[]): {
-    total: number;
-    valid: number;
-    invalid: number;
-    validPercent: number;
-  } {
-    const total = lines.length;
-    const valid = lines.filter(l => l.valid).length;
-    const invalid = total - valid;
-    const validPercent = total > 0 ? Math.floor((valid / total) * 100) : 0;
+  static filterValid(lines: ParsedLine[]): ParsedLine[] {
+    return lines.filter(line => line.data !== null);
+  }
 
-    return { total, valid, invalid, validPercent };
+  /**
+   * Filter to only error lines
+   *
+   * @param lines - Array of ParsedLine objects
+   * @returns Only lines with parseError !== null
+   */
+  static filterErrors(lines: ParsedLine[]): ParsedLine[] {
+    return lines.filter(line => line.parseError !== null);
   }
 }
 

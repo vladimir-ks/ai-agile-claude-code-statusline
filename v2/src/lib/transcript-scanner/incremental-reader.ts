@@ -1,145 +1,131 @@
 /**
- * Incremental Reader - Byte-level incremental transcript reading
+ * Incremental Reader - Read new bytes from transcript since last scan
  *
- * Reads only new bytes since last scan, using file offset tracking.
- * Achieves 20x speedup over full file reads for typical incremental updates.
- *
- * Strategy:
- * 1. Check mtime + size → cache hit? Return empty (0ms)
- * 2. Read only bytes from lastOffset to EOF
- * 3. Return new content + updated offset
+ * Performance: O(new_bytes), not O(file_size)
+ * Strategy: Byte-level offset tracking with mtime validation
  */
 
-import { existsSync, openSync, fstatSync, readSync, closeSync } from 'fs';
-
-export interface IncrementalReadResult {
-  /** New bytes read since lastOffset */
-  newBytes: Buffer;
-
-  /** Updated offset (file size) */
-  newOffset: number;
-
-  /** Current file modification time (ms) */
-  mtime: number;
-
-  /** File size in bytes */
-  size: number;
-
-  /** Whether this was a cache hit (no new data) */
-  cacheHit: boolean;
-}
+import { existsSync, statSync, openSync, readSync, closeSync } from 'fs';
+import type { ReadResult } from './types';
 
 export class IncrementalReader {
   /**
-   * Read new bytes from transcript file since last offset
+   * Read new bytes from transcript since last scan
    *
-   * @param path - Path to transcript file
-   * @param lastOffset - Byte offset from previous read (0 for first read)
-   * @param lastMtime - File mtime from previous read (0 for first read)
-   * @returns Incremental read result
+   * @param path - Absolute path to transcript file
+   * @param lastOffset - Byte position of last read (0 = full scan)
+   * @param lastMtime - File mtime at last read (ms timestamp)
+   * @returns ReadResult with new content and metadata
+   *
+   * Performance:
+   * - Cache hit (no changes): <1ms
+   * - Incremental read (100KB): <20ms
+   *
+   * Error handling:
+   * - File doesn't exist: throw Error
+   * - File not readable: throw Error
+   * - Negative offset: throw Error
+   *
+   * Edge cases:
+   * - File shrunk (size < lastOffset): Reset to full scan
+   * - File cleared (size = 0): Return empty
+   * - Offset beyond EOF: Return empty (cache hit)
    */
   static read(
     path: string,
-    lastOffset: number = 0,
-    lastMtime: number = 0
-  ): IncrementalReadResult {
-    // File doesn't exist
+    lastOffset: number,
+    lastMtime: number
+  ): ReadResult {
+    // Validate inputs
+    if (lastOffset < 0) {
+      throw new Error(`Invalid offset: ${lastOffset} (must be >= 0)`);
+    }
+
+    // Check file exists
     if (!existsSync(path)) {
-      return {
-        newBytes: Buffer.alloc(0),
-        newOffset: 0,
-        mtime: 0,
-        size: 0,
-        cacheHit: false,
-      };
+      throw new Error(`File does not exist: ${path}`);
     }
 
-    let fd: number | null = null;
+    // Get current stats
+    let stats;
     try {
-      fd = openSync(path, 'r');
-      const stats = fstatSync(fd);
-
-      // Cache hit: mtime and size unchanged
-      if (stats.mtimeMs === lastMtime && stats.size === lastOffset) {
-        closeSync(fd);
-        return {
-          newBytes: Buffer.alloc(0),
-          newOffset: lastOffset,
-          mtime: lastMtime,
-          size: stats.size,
-          cacheHit: true,
-        };
-      }
-
-      // File shrunk (possible if user cleared transcript)
-      if (stats.size < lastOffset) {
-        // Read full file
-        const buffer = Buffer.alloc(stats.size);
-        readSync(fd, buffer, 0, stats.size, 0);
-        closeSync(fd);
-
-        return {
-          newBytes: buffer,
-          newOffset: stats.size,
-          mtime: stats.mtimeMs,
-          size: stats.size,
-          cacheHit: false,
-        };
-      }
-
-      // Read only new bytes
-      const bytesToRead = stats.size - lastOffset;
-      if (bytesToRead === 0) {
-        // Size unchanged but mtime changed (touch?)
-        closeSync(fd);
-        return {
-          newBytes: Buffer.alloc(0),
-          newOffset: lastOffset,
-          mtime: stats.mtimeMs,
-          size: stats.size,
-          cacheHit: true,
-        };
-      }
-
-      const buffer = Buffer.alloc(bytesToRead);
-      const bytesRead = readSync(fd, buffer, 0, bytesToRead, lastOffset);
-      closeSync(fd);
-
-      return {
-        newBytes: buffer.slice(0, bytesRead),
-        newOffset: lastOffset + bytesRead,
-        mtime: stats.mtimeMs,
-        size: stats.size,
-        cacheHit: false,
-      };
+      stats = statSync(path);
     } catch (error) {
-      if (fd !== null) {
-        try {
-          closeSync(fd);
-        } catch {
-          // Ignore close errors
-        }
-      }
+      throw new Error(`Cannot stat file: ${path}`);
+    }
 
-      // On error, return empty result
+    // Check if file is actually a directory
+    if (stats.isDirectory()) {
+      throw new Error(`Path is a directory: ${path}`);
+    }
+
+    const currentSize = stats.size;
+    const currentMtime = stats.mtimeMs;
+
+    // FAST PATH: Cache hit (no changes)
+    if (currentMtime === lastMtime && currentSize === lastOffset) {
       return {
-        newBytes: Buffer.alloc(0),
-        newOffset: lastOffset,
-        mtime: lastMtime,
-        size: 0,
-        cacheHit: false,
+        newBytes: '',
+        newOffset: currentSize,
+        mtime: currentMtime,
+        size: currentSize,
+        cacheHit: true
       };
     }
-  }
 
-  /**
-   * Read full file (for first scan or when offset tracking is unavailable)
-   *
-   * @param path - Path to transcript file
-   * @returns Full file content + metadata
-   */
-  static readFull(path: string): IncrementalReadResult {
-    return this.read(path, 0, 0);
+    // EDGE CASE: File shrunk (cleared/rotated)
+    if (currentSize < lastOffset) {
+      // Reset to full scan
+      lastOffset = 0;
+    }
+
+    // EDGE CASE: Offset beyond EOF (shouldn't happen, but handle gracefully)
+    if (lastOffset >= currentSize) {
+      return {
+        newBytes: '',
+        newOffset: currentSize,
+        mtime: currentMtime,
+        size: currentSize,
+        cacheHit: true
+      };
+    }
+
+    // Calculate bytes to read
+    const newBytes = currentSize - lastOffset;
+
+    // EDGE CASE: Empty file or no new content
+    if (newBytes === 0) {
+      return {
+        newBytes: '',
+        newOffset: currentSize,
+        mtime: currentMtime,
+        size: currentSize,
+        cacheHit: true
+      };
+    }
+
+    // Read new bytes
+    let content: string;
+    try {
+      const buffer = Buffer.alloc(newBytes);
+      const fd = openSync(path, 'r');
+      try {
+        readSync(fd, buffer, 0, newBytes, lastOffset);
+        content = buffer.toString('utf-8');
+      } finally {
+        closeSync(fd);
+      }
+    } catch (error) {
+      throw new Error(`Failed to read file: ${path}`);
+    }
+
+    return {
+      newBytes: content,
+      newOffset: currentSize,
+      mtime: currentMtime,
+      size: currentSize,
+      cacheHit: false
+    };
   }
 }
 

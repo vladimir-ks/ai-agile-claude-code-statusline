@@ -7,60 +7,47 @@
  * Performance: O(1) get/set, automatic cleanup on access.
  */
 
-import type { ScanResult, CacheStats } from './types';
+import type { ScanResult } from './types';
 
 interface CacheEntry {
   result: ScanResult;
-  expiry: number;        // Absolute timestamp (Date.now() + ttl)
-  size: number;          // Approximate size in bytes
+  expiry: number;
+  size: number;  // Approximate size in bytes
 }
 
 export class ResultCache {
   private static cache = new Map<string, CacheEntry>();
-  private static readonly DEFAULT_TTL = 10_000;           // 10s
-  private static readonly MAX_ENTRIES = 100;              // Max sessions
-  private static readonly MAX_SIZE_BYTES = 10_000_000;    // 10MB
-
-  // Stats tracking
-  private static hits = 0;
-  private static misses = 0;
+  private static readonly DEFAULT_TTL = 10_000;  // 10s
+  private static readonly MAX_ENTRIES = 100;     // Max sessions
+  private static readonly MAX_SIZE_BYTES = 10_000_000;  // 10MB
 
   /**
    * Get cached result for session
    *
    * @param sessionId - Session identifier
    * @returns Cached result or null if expired/missing
-   *
-   * Performance: O(1)
-   * Side effects: Deletes expired entries
    */
   static get(sessionId: string): ScanResult | null {
     const entry = this.cache.get(sessionId);
     if (!entry) {
-      this.misses++;
       return null;
     }
 
     // Check expiry
     if (Date.now() > entry.expiry) {
       this.cache.delete(sessionId);
-      this.misses++;
       return null;
     }
 
-    this.hits++;
     return entry.result;
   }
 
   /**
-   * Store result in cache with TTL
+   * Store result in cache
    *
    * @param sessionId - Session identifier
    * @param result - Scan result to cache
-   * @param ttl - Time-to-live in milliseconds (optional, defaults to 10s)
-   *
-   * Performance: O(1) amortized (eviction may be O(n))
-   * Side effects: May evict oldest entries if MAX_ENTRIES exceeded
+   * @param ttl - TTL in milliseconds (optional, defaults to 10s)
    */
   static set(sessionId: string, result: ScanResult, ttl: number = this.DEFAULT_TTL): void {
     // Estimate result size (rough approximation)
@@ -69,7 +56,7 @@ export class ResultCache {
     const entry: CacheEntry = {
       result,
       expiry: Date.now() + ttl,
-      size
+      size,
     };
 
     this.cache.set(sessionId, entry);
@@ -92,8 +79,6 @@ export class ResultCache {
    */
   static clear(): void {
     this.cache.clear();
-    this.hits = 0;
-    this.misses = 0;
   }
 
   /**
@@ -101,7 +86,11 @@ export class ResultCache {
    *
    * @returns Cache stats
    */
-  static getStats(): CacheStats {
+  static getStats(): {
+    entries: number;
+    totalSize: number;
+    hitRate: number;
+  } {
     let totalSize = 0;
     let validEntries = 0;
     const now = Date.now();
@@ -113,35 +102,15 @@ export class ResultCache {
       }
     }
 
-    const total = this.hits + this.misses;
-    const hitRate = total > 0 ? this.hits / total : 0;
-
     return {
       entries: validEntries,
       totalSize,
-      hitRate
+      hitRate: 0,  // TODO: Track hits/misses
     };
   }
 
   /**
-   * Cleanup expired entries (manual GC)
-   */
-  static cleanup(): void {
-    const now = Date.now();
-    for (const [sessionId, entry] of this.cache.entries()) {
-      if (now > entry.expiry) {
-        this.cache.delete(sessionId);
-      }
-    }
-  }
-
-  /**
    * Evict expired or excess entries
-   *
-   * Strategy:
-   * 1. Remove all expired entries
-   * 2. If total size > MAX_SIZE_BYTES, remove oldest until under limit
-   * 3. If still > MAX_ENTRIES, remove oldest (by expiry)
    */
   private static evictIfNeeded(): void {
     const now = Date.now();
@@ -153,32 +122,14 @@ export class ResultCache {
       }
     }
 
-    // Second pass: Check total size
-    let totalSize = 0;
-    for (const entry of this.cache.values()) {
-      totalSize += entry.size;
-    }
-
-    if (totalSize > this.MAX_SIZE_BYTES) {
-      // Evict oldest entries until under size limit
-      const entries = Array.from(this.cache.entries());
-      entries.sort((a, b) => a[1].expiry - b[1].expiry); // Sort by expiry (oldest first)
-
-      for (const [sessionId, entry] of entries) {
-        if (totalSize <= this.MAX_SIZE_BYTES) break;
-        this.cache.delete(sessionId);
-        totalSize -= entry.size;
-      }
-    }
-
-    // Third pass: Check entry count limit
+    // Second pass: Check size limits
     if (this.cache.size <= this.MAX_ENTRIES) {
       return;
     }
 
     // Evict oldest entries (LRU approximation via expiry)
     const entries = Array.from(this.cache.entries());
-    entries.sort((a, b) => a[1].expiry - b[1].expiry); // Sort by expiry (oldest first)
+    entries.sort((a, b) => a[1].expiry - b[1].expiry);
 
     const toRemove = this.cache.size - this.MAX_ENTRIES;
     for (let i = 0; i < toRemove; i++) {
@@ -198,6 +149,18 @@ export class ResultCache {
       return JSON.stringify(result).length * 2;  // UTF-16 overhead
     } catch {
       return 1000;  // Fallback estimate
+    }
+  }
+
+  /**
+   * Cleanup expired entries (call periodically)
+   */
+  static cleanup(): void {
+    const now = Date.now();
+    for (const [sessionId, entry] of this.cache.entries()) {
+      if (now > entry.expiry) {
+        this.cache.delete(sessionId);
+      }
     }
   }
 }
