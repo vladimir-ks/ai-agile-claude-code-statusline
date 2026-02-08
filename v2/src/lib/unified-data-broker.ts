@@ -36,6 +36,7 @@ import { modelSource } from './sources/model-source';
 import { transcriptSource } from './sources/transcript-source';
 import { secretsSource } from './sources/secrets-source';
 import { authSource } from './sources/auth-source';
+import { authChangesSource } from './sources/auth-changes-source';
 import { sessionCostSource } from './sources/session-cost-source';
 import { gitSource } from './sources/git-source';
 import { billingSource } from './sources/billing-source';
@@ -53,6 +54,7 @@ function ensureRegistered(): void {
   DataSourceRegistry.register(transcriptSource);
   DataSourceRegistry.register(secretsSource);
   DataSourceRegistry.register(authSource);
+  DataSourceRegistry.register(authChangesSource);
   DataSourceRegistry.register(sessionCostSource);
   // Tier 3
   DataSourceRegistry.register(gitSource);
