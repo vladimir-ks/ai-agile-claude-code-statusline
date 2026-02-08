@@ -22,6 +22,16 @@
 import { TelemetryDatabase } from '../lib/telemetry-database';
 import type { TelemetryEntry } from '../lib/telemetry-database';
 
+// Graceful exit with cleanup
+function gracefulExit(code: number): void {
+  try {
+    TelemetryDatabase.close();
+  } catch {
+    // Ignore cleanup errors on exit
+  }
+  process.exit(code);
+}
+
 // -------------------------------------------------------------------------
 // Formatting Helpers
 // -------------------------------------------------------------------------
@@ -69,12 +79,12 @@ function box(title: string, content: string, width: number = 80): string {
 // Commands
 // -------------------------------------------------------------------------
 
-function showSessionStats(sessionId: string): void {
+function showSessionStats(sessionId: string): boolean {
   const stats = TelemetryDatabase.getSessionStats(sessionId);
 
   if (!stats) {
     console.error(`❌ No data found for session: ${sessionId}`);
-    process.exit(1);
+    return false;
   }
 
   const entries = TelemetryDatabase.query({ sessionId, limit: 10 });
@@ -104,15 +114,16 @@ Total Cost:       ${formatCost(stats.totalCost)}
   }
 
   console.log('');
+  return true;
 }
 
-function showDailyStats(date?: Date): void {
+function showDailyStats(date?: Date): boolean {
   const targetDate = date || new Date();
   const stats = TelemetryDatabase.getDailyStats(targetDate);
 
   if (!stats) {
     console.error(`❌ No data found for date: ${targetDate.toDateString()}`);
-    process.exit(1);
+    return false;
   }
 
   console.log('\n' + box(`Daily Statistics: ${targetDate.toDateString()}`, `
@@ -123,9 +134,10 @@ Total Cost:       ${formatCost(stats.totalCost)}
   `));
 
   console.log('');
+  return true;
 }
 
-function showSummary(): void {
+function showSummary(): boolean {
   const now = Date.now();
   const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
 
@@ -133,7 +145,7 @@ function showSummary(): void {
 
   if (entries.length === 0) {
     console.error('❌ No data available for the last 7 days');
-    process.exit(1);
+    return false;
   }
 
   // Calculate aggregates
@@ -169,14 +181,15 @@ function showSummary(): void {
   `));
 
   console.log('');
+  return true;
 }
 
-function showProfiles(): void {
+function showProfiles(): boolean {
   const entries = TelemetryDatabase.query({ limit: 1000 });
 
   if (entries.length === 0) {
     console.error('❌ No telemetry data available');
-    process.exit(1);
+    return false;
   }
 
   // Group by auth profile
@@ -223,9 +236,10 @@ function showProfiles(): void {
   }
 
   console.log('');
+  return true;
 }
 
-function runCleanup(): void {
+function runCleanup(): boolean {
   console.log('🧹 Cleaning up old telemetry entries (>30 days)...\n');
   const deletedCount = TelemetryDatabase.cleanup();
 
@@ -236,13 +250,14 @@ function runCleanup(): void {
   }
 
   console.log('');
+  return true;
 }
 
 // -------------------------------------------------------------------------
 // CLI
 // -------------------------------------------------------------------------
 
-function showHelp(): void {
+function showHelp(): boolean {
   console.log(`
 📊 Telemetry Dashboard - Statusline V2 Metrics
 
@@ -264,61 +279,78 @@ Examples:
   bun telemetry-dashboard.ts profiles
   bun telemetry-dashboard.ts cleanup
   `);
+  return true;
+}
+
+/**
+ * Main CLI entry point (testable)
+ * Returns exit code instead of calling process.exit() directly
+ */
+export function runCLI(args: string[]): number {
+  try {
+    if (args.length === 0 || args[0] === 'summary') {
+      return showSummary() ? 0 : 1;
+    }
+
+    const command = args[0];
+
+    switch (command) {
+      case 'session':
+        if (args.length < 2) {
+          console.error('❌ Missing session ID\n');
+          showHelp();
+          return 1;
+        }
+        return showSessionStats(args[1]) ? 0 : 1;
+
+      case 'daily':
+        if (args.length >= 2) {
+          const date = new Date(args[1]);
+          if (isNaN(date.getTime())) {
+            console.error('❌ Invalid date format. Use YYYY-MM-DD\n');
+            return 1;
+          }
+          return showDailyStats(date) ? 0 : 1;
+        } else {
+          return showDailyStats() ? 0 : 1;
+        }
+
+      case 'profiles':
+        return showProfiles() ? 0 : 1;
+
+      case 'cleanup':
+        return runCleanup() ? 0 : 1;
+
+      case 'help':
+      case '--help':
+      case '-h':
+        showHelp();
+        return 0;
+
+      default:
+        console.error(`❌ Unknown command: ${command}\n`);
+        showHelp();
+        return 1;
+    }
+  } catch (error) {
+    console.error('❌ Fatal error:', error instanceof Error ? error.message : String(error));
+    return 1;
+  }
 }
 
 function main(): void {
   const args = process.argv.slice(2);
+  const exitCode = runCLI(args);
 
-  if (args.length === 0 || args[0] === 'summary') {
-    showSummary();
-    return;
-  }
+  // Graceful cleanup before exit
+  TelemetryDatabase.close();
 
-  const command = args[0];
-
-  switch (command) {
-    case 'session':
-      if (args.length < 2) {
-        console.error('❌ Missing session ID\n');
-        showHelp();
-        process.exit(1);
-      }
-      showSessionStats(args[1]);
-      break;
-
-    case 'daily':
-      if (args.length >= 2) {
-        const date = new Date(args[1]);
-        if (isNaN(date.getTime())) {
-          console.error('❌ Invalid date format. Use YYYY-MM-DD\n');
-          process.exit(1);
-        }
-        showDailyStats(date);
-      } else {
-        showDailyStats();
-      }
-      break;
-
-    case 'profiles':
-      showProfiles();
-      break;
-
-    case 'cleanup':
-      runCleanup();
-      break;
-
-    case 'help':
-    case '--help':
-    case '-h':
-      showHelp();
-      break;
-
-    default:
-      console.error(`❌ Unknown command: ${command}\n`);
-      showHelp();
-      process.exit(1);
+  if (exitCode !== 0) {
+    gracefulExit(exitCode);
   }
 }
 
-// Run CLI
-main();
+// Run CLI if executed directly (not imported)
+if (import.meta.main) {
+  main();
+}

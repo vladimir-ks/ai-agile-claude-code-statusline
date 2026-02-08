@@ -443,6 +443,12 @@ export class TelemetryDatabase {
       `);
 
       const result = stmt.get(sessionId) as any;
+
+      // Return null if no data (invocationCount = 0)
+      if (!result || result.invocationCount === 0) {
+        return null;
+      }
+
       return result;
     } catch (error) {
       logError('Failed to get session stats', {
@@ -482,6 +488,12 @@ export class TelemetryDatabase {
       `);
 
       const result = stmt.get(startOfDay.getTime(), endOfDay.getTime()) as any;
+
+      // Return null if no data (invocationCount = 0)
+      if (!result || result.invocationCount === 0) {
+        return null;
+      }
+
       return {
         invocationCount: result.invocationCount,
         uniqueSessions: result.uniqueSessions,
