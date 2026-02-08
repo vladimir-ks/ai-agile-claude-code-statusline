@@ -1,18 +1,19 @@
 /**
  * Secrets Source — Tier 2 (per-session)
  *
- * Scans transcript for leaked secrets using:
- *   1. GitLeaks (professional scanner, if installed)
- *   2. Regex fallback (built-in patterns)
+ * Scans transcript for leaked secrets using UnifiedTranscriptScanner's
+ * SecretDetector. Detects GitHub tokens, AWS keys, Stripe keys, private
+ * keys, and other sensitive credentials.
  *
  * Updates health.alerts.secretsDetected and secretTypes.
  */
 
 import type { DataSourceDescriptor, GatherContext } from './types';
 import type { SessionHealth } from '../../types/session-health';
-import GitLeaksScanner from '../gitleaks-scanner';
+import { UnifiedTranscriptScanner } from '../transcript-scanner/unified-transcript-scanner';
+import { existsSync } from 'fs';
 
-const gitleaksScanner = new GitLeaksScanner();
+const scanner = new UnifiedTranscriptScanner();
 
 export interface SecretsSourceData {
   hasSecrets: boolean;
@@ -31,15 +32,28 @@ export const secretsSource: DataSourceDescriptor<SecretsSourceData> = {
       return { hasSecrets: false, secretTypes: [], scanned: false };
     }
 
+    // Check if file exists
+    if (!existsSync(ctx.transcriptPath)) {
+      return { hasSecrets: false, secretTypes: [], scanned: false };
+    }
+
     try {
-      const result = await gitleaksScanner.scan(ctx.sessionId, ctx.transcriptPath);
+      // Scan using UnifiedTranscriptScanner
+      const scanResult = scanner.scan(ctx.sessionId, ctx.transcriptPath);
+
+      // Extract unique secret types
+      const secretTypes = Array.from(
+        new Set(scanResult.secrets.map((s) => s.type))
+      );
+
       return {
-        hasSecrets: result.hasSecrets,
-        secretTypes: result.secretTypes,
+        hasSecrets: scanResult.secrets.length > 0,
+        secretTypes,
         scanned: true,
       };
-    } catch {
-      // GitLeaks failed — scanned flag remains false
+    } catch (error) {
+      // Scanner failed — scanned flag remains false
+      console.error('[SecretsSource] Scan failed:', error);
       return { hasSecrets: false, secretTypes: [], scanned: false };
     }
   },
