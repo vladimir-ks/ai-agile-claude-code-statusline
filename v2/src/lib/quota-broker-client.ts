@@ -27,7 +27,24 @@ const STALE_THRESHOLD_S = 300; // 5 minutes
 export class QuotaBrokerClient {
   private static readonly CACHE_PATH = `${homedir()}/.claude/session-health/merged-quota-cache.json`;
   private static readonly LOCK_PATH = `${homedir()}/.claude/session-health/.quota-fetch.lock`;
-  private static readonly BROKER_SCRIPT = `${homedir()}/_claude-configs/hot-swap/scripts/quota-broker.sh`;
+
+  // Configurable broker script path for cloud configs migration
+  // Priority: ENV var → cloud_configs → legacy _claude-configs
+  private static getBrokerScript(): string {
+    // 1. Environment variable (highest priority)
+    if (process.env.QUOTA_BROKER_SCRIPT) {
+      return process.env.QUOTA_BROKER_SCRIPT;
+    }
+
+    // 2. cloud_configs path (new standard after migration)
+    const cloudConfigsPath = `${homedir()}/cloud_configs/hot-swap/scripts/quota-broker.sh`;
+    if (existsSync(cloudConfigsPath)) {
+      return cloudConfigsPath;
+    }
+
+    // 3. _claude-configs path (legacy, backward compat)
+    return `${homedir()}/_claude-configs/hot-swap/scripts/quota-broker.sh`;
+  }
 
   /**
    * Read merged quota data (with memory caching)
@@ -131,6 +148,10 @@ export class QuotaBrokerClient {
           slot = s;
           matchedSlotId = id;
           matchStrategy = 'keychain_service';
+          console.log(
+            `[QuotaBrokerClient] ✓ Matched slot ${id} by keychainService="${keychainService}" ` +
+            `(email: ${s.email}, util: ${s.seven_day_util}%)`
+          );
           break;
         }
       }
@@ -144,6 +165,10 @@ export class QuotaBrokerClient {
           slot = s;
           matchedSlotId = id;
           matchStrategy = 'email';
+          console.log(
+            `[QuotaBrokerClient] ✓ Matched slot ${id} by authEmail="${authEmail}" ` +
+            `(util: ${s.seven_day_util}%)`
+          );
           break;
         }
       }
@@ -156,25 +181,19 @@ export class QuotaBrokerClient {
           slot = s;
           matchedSlotId = id;
           matchStrategy = 'config_dir';
+          console.log(
+            `[QuotaBrokerClient] ✓ Matched slot ${id} by configDir="${configDir}" ` +
+            `(email: ${s.email}, util: ${s.seven_day_util}%)`
+          );
           break;
         }
       }
     }
 
-    // Strategy 2: active_slot from broker (FALLBACK - may be wrong for multi-account)
-    if (!slot && data.active_slot && data.slots[data.active_slot]) {
-      slot = data.slots[data.active_slot];
-      matchedSlotId = data.active_slot;
-      matchStrategy = 'active_slot';
-
-      // Log warning if we're falling back to broker's active_slot
-      // This is often wrong in multi-account scenarios
-      console.warn(
-        `[QuotaBrokerClient] Using broker's active_slot=${data.active_slot} as fallback. ` +
-        `This may be incorrect if keychainService or configDir don't match. ` +
-        `keychainService=${keychainService}, configDir=${configDir}`
-      );
-    }
+    // Strategy 2: active_slot from broker - REMOVED (unreliable)
+    // This fallback was causing wrong quota data in multi-account scenarios.
+    // Better to return null and force explicit matching than to show wrong data.
+    // OLD CODE: Used data.active_slot when keychain/email/configDir didn't match
 
     // Strategy 3: Single slot
     if (!slot && slotEntries.length === 1) {
@@ -194,7 +213,17 @@ export class QuotaBrokerClient {
       }
     }
 
-    if (!slot) return null;
+    if (!slot) {
+      console.error(
+        `[QuotaBrokerClient] ❌ NO MATCH FOUND for quota slot. ` +
+        `keychainService="${keychainService}", ` +
+        `authEmail="${authEmail}", ` +
+        `configDir="${configDir}". ` +
+        `Available slots: ${slotEntries.map(([id, s]) => `${id}(${s.email})`).join(', ')}. ` +
+        `This indicates a configuration mismatch - broker data doesn't match current session.`
+      );
+      return null;
+    }
 
     // CRITICAL: Don't trust is_fresh field alone - validate actual data age
     // Defense against broker bugs where is_fresh=true but data is hours old
@@ -305,15 +334,24 @@ export class QuotaBrokerClient {
    */
   private static spawnBroker(): void {
     try {
-      if (!existsSync(this.BROKER_SCRIPT)) return;
+      const brokerScript = this.getBrokerScript();
 
-      const child = spawn('bash', [this.BROKER_SCRIPT], {
+      if (!existsSync(brokerScript)) {
+        console.warn(
+          `[QuotaBrokerClient] Broker script not found at ${brokerScript}. ` +
+          `Checked: ENV:QUOTA_BROKER_SCRIPT, ~/cloud_configs/, ~/_claude-configs/`
+        );
+        return;
+      }
+
+      const child = spawn('bash', [brokerScript], {
         detached: true,
         stdio: 'ignore'
       });
       child.unref();
-    } catch {
+    } catch (error) {
       // Non-critical — broker spawn failed, data stays stale
+      console.warn(`[QuotaBrokerClient] Failed to spawn broker:`, error);
     }
   }
 

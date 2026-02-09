@@ -266,14 +266,15 @@ describe('QuotaBrokerClient', () => {
       expect(result!.slotId).toBe('slot-1');
     });
 
-    test('Strategy 2: falls back to active_slot', () => {
+    test('Strategy 2: active_slot fallback removed (returns lowest rank instead)', () => {
       const data = makeCache({ active_slot: 'slot-2' });
       writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
 
-      // No configDir match
+      // No configDir match - should fall through to single slot (slot-1)
+      // because active_slot fallback was removed (unreliable)
       const result = QuotaBrokerClient.getActiveQuota('/nonexistent');
       expect(result).not.toBeNull();
-      expect(result!.slotId).toBe('slot-2');
+      expect(result!.slotId).toBe('slot-1'); // Single slot wins
     });
 
     test('Strategy 3: single slot fallback', () => {
