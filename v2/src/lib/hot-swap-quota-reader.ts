@@ -73,8 +73,10 @@ const SLOT_STATUSES_CACHE_TTL = 60000; // 60 seconds
 
 // Discoverable paths for claude-sessions.yaml
 // The hot-swap system stores its registry here
+// Priority: cloud_configs (new standard) → _claude-configs (legacy) → .claude
 const HOT_SWAP_SESSIONS_PATHS = [
-  `${homedir()}/_claude-configs/hot-swap/claude-sessions.yaml`,
+  `${homedir()}/cloud_configs/hot-swap/claude-sessions.yaml`,  // New standard (post-migration)
+  `${homedir()}/_claude-configs/hot-swap/claude-sessions.yaml`, // Legacy (backward compat)
   `${homedir()}/.claude/hot-swap/claude-sessions.yaml`,
   `${homedir()}/.claude/config/claude-sessions.yaml`,
 ];

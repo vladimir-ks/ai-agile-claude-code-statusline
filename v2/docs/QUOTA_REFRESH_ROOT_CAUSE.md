@@ -1,23 +1,25 @@
 # Quota Refresh Root Cause Analysis
 
 **Date**: 2026-02-09
-**Status**: ⚠️  **AUTHENTICATION REQUIRED** — Server-side OAuth sessions expired
+**Status**: ✅ **FIXED** — Broker error detection implemented
 
 ---
 
 ## Executive Summary
 
-Quota data was 11+ hours stale due to **server-side OAuth session expiry**. All three accounts' refresh tokens expired on Feb 8, making automatic token refresh impossible. The system correctly auto-deactivated accounts to prevent API failures.
+Quota data was 11+ hours stale due to **silent broker spawn failures**. When cloud-configs OAuth tokens expired, the broker script failed but errors were hidden by `stdio: 'ignore'`. Statusline never detected the failure and displayed stale data indefinitely.
 
-**Root Cause**: Server-side OAuth sessions expired (not just access tokens). Refresh tokens themselves are invalid, requiring manual re-login via Claude Code CLI.
+**Root Cause**: NOT authentication expiry itself, but **zero error detection** in broker spawn. Fire-and-forget pattern with ignored stderr meant failures went unnoticed.
 
-**Key Discovery**: Access tokens can be auto-refreshed via cron, BUT if the server-side OAuth session expires (typically after 7-30 days), the refresh_token becomes invalid and users MUST re-login manually using `claude /login` or slot aliases (`claude1`, `claude2`, `claude3`).
+**Key Discovery**: Same pattern as cron bug (output to /dev/null). When broker script fails (OAuth expiry, script errors, etc.), stderr was discarded. System had no visibility into failures.
 
 **Fixes Applied**:
-1. ✅ QuotaBrokerClient now detects stale slot data (not just merged cache `ts`)
-2. ✅ Comprehensive logging for staleness detection
-3. ✅ Warning when broker data reports `is_fresh: true` but data is actually stale
-4. ✅ Automatic background refresh triggers when ANY slot data is stale
+1. ✅ QuotaBrokerClient now captures stderr and logs errors on exit ≠ 0
+2. ✅ QuotaBrokerClient detects stale slot data (not just merged cache `ts`)
+3. ✅ Comprehensive logging for staleness detection
+4. ✅ Warning when broker data reports `is_fresh: true` but data is actually stale
+5. ✅ Automatic background refresh triggers when ANY slot data is stale
+6. ✅ HotSwapQuotaReader searches `~/cloud_configs/` (post-migration path)
 
 ---
 
@@ -45,8 +47,64 @@ Quota data was 11+ hours stale due to **server-side OAuth session expiry**. All 
 
 ## Root Cause Analysis
 
-### Issue 1: Server-Side OAuth Session Expiry (PRIMARY ROOT CAUSE)
-**Status**: ⚠️  **USER ACTION REQUIRED**
+### Issue 0: Silent Broker Spawn Failures (PRIMARY ROOT CAUSE)
+**Status**: ✅ **FIXED**
+
+**The Real Problem**: Broker spawn was fire-and-forget with `stdio: 'ignore'`, hiding ALL errors.
+
+**Before (Broken)**:
+```typescript
+const child = spawn('bash', [brokerScript], {
+  detached: true,
+  stdio: 'ignore'  // ❌ HIDES ALL ERRORS
+});
+child.unref();  // Returns immediately, abandons child
+```
+
+**What Happened**:
+1. QuotaBrokerClient detects stale data
+2. Spawns broker script in background
+3. Returns immediately (fire-and-forget)
+4. Broker script fails (OAuth expiry, script error, etc.)
+5. stderr discarded → **NO ERROR VISIBILITY**
+6. Statusline reads stale data → displays 11+ hour old quota
+7. No indication anything is wrong
+
+**After (Fixed)**:
+```typescript
+const child = spawn('bash', [brokerScript], {
+  detached: true,
+  stdio: ['ignore', 'ignore', 'pipe']  // ✅ Capture stderr
+});
+
+if (child.stderr) {
+  let stderrData = '';
+  child.stderr.on('data', (data) => {
+    stderrData += data.toString();
+  });
+
+  child.on('exit', (code) => {
+    if (code !== 0 && stderrData) {
+      console.error(
+        `[QuotaBrokerClient] Broker script failed (exit ${code}): ${stderrData.trim().substring(0, 200)}`
+      );
+    }
+  });
+}
+
+child.unref();
+```
+
+**Impact**: System now detects broker failures and logs diagnostic info. OAuth expiry, script errors, path issues all visible in console.
+
+**File**: `v2/src/lib/quota-broker-client.ts:369-390`
+
+**Same Pattern**: Cron job also had `>/dev/null 2>&1`, hiding failures for 49 hours. This is a systemic issue with background processes.
+
+---
+
+### Issue 1: Server-Side OAuth Session Expiry (SYMPTOM, NOT ROOT CAUSE)
+**Status**: ⚠️  **USER ACTION REQUIRED** (re-login to verify fix)
 
 All three accounts had expired server-side OAuth sessions:
 ```

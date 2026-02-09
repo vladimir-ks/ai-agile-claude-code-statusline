@@ -363,7 +363,7 @@ export class QuotaBrokerClient {
   }
 
   /**
-   * Spawn broker script in background (fire-and-forget)
+   * Spawn broker script in background with error detection
    * Only called when data is stale AND no lock is alive
    */
   private static spawnBroker(): void {
@@ -380,8 +380,25 @@ export class QuotaBrokerClient {
 
       const child = spawn('bash', [brokerScript], {
         detached: true,
-        stdio: 'ignore'
+        stdio: ['ignore', 'ignore', 'pipe']  // Capture stderr for error detection
       });
+
+      // Capture stderr to detect silent failures (OAuth expiry, script errors)
+      if (child.stderr) {
+        let stderrData = '';
+        child.stderr.on('data', (data) => {
+          stderrData += data.toString();
+        });
+
+        child.on('exit', (code) => {
+          if (code !== 0 && stderrData) {
+            console.error(
+              `[QuotaBrokerClient] Broker script failed (exit ${code}): ${stderrData.trim().substring(0, 200)}`
+            );
+          }
+        });
+      }
+
       child.unref();
     } catch (error) {
       // Non-critical — broker spawn failed, data stays stale
