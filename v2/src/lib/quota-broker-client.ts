@@ -75,17 +75,51 @@ export class QuotaBrokerClient {
         return null;
       }
 
-      // Compute freshness
+      // Compute freshness of merged cache file
       const nowSeconds = Math.floor(now / 1000);
       parsed.age_seconds = Math.max(0, nowSeconds - parsed.ts);
       parsed.is_fresh = parsed.age_seconds <= STALE_THRESHOLD_S;
+
+      // CRITICAL: Also check if ANY slot data is stale
+      // The merged cache `ts` can be fresh (broker ran recently) while slot data is old
+      let anySlotStale = false;
+      let allSlotsInactive = true;
+      if (parsed.slots) {
+        for (const [slotId, slot] of Object.entries(parsed.slots)) {
+          // Check if slot is active
+          if (slot.status !== 'inactive') {
+            allSlotsInactive = false;
+          }
+
+          // Check slot data freshness
+          const slotAge = nowSeconds - Math.floor((slot.last_fetched || 0) / 1000);
+          if (slotAge > STALE_THRESHOLD_S) {
+            anySlotStale = true;
+            console.warn(
+              `[QuotaBrokerClient] Slot ${slotId} (${slot.email}) data is stale ` +
+              `(age: ${Math.floor(slotAge / 60)}min, status: ${slot.status || 'unknown'})`
+            );
+          }
+        }
+      }
+
+      // CRITICAL: All accounts inactive = authentication failure
+      if (allSlotsInactive && Object.keys(parsed.slots || {}).length > 0) {
+        console.error(
+          `[QuotaBrokerClient] ⚠️  CRITICAL: All quota accounts are INACTIVE! ` +
+          `Quota data cannot be refreshed. Re-authenticate via hot-swap CLI or 'claude[N]' commands.`
+        );
+      }
 
       // Update memory cache
       cachedData = parsed;
       cacheTimestamp = now;
 
-      // Layer 3: If stale, trigger background refresh
-      if (!parsed.is_fresh && !this.isLockAlive()) {
+      // Layer 3: If merged cache OR any slot is stale, trigger background refresh
+      if ((!parsed.is_fresh || anySlotStale) && !this.isLockAlive()) {
+        console.log(
+          `[QuotaBrokerClient] Triggering background refresh (merged_cache_stale=${!parsed.is_fresh}, slot_data_stale=${anySlotStale})`
+        );
         this.spawnBroker();
       }
 
