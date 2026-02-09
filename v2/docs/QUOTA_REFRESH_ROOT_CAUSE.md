@@ -1,15 +1,17 @@
 # Quota Refresh Root Cause Analysis
 
 **Date**: 2026-02-09
-**Status**: ✅ **FIXED** — Auto-refresh now works, authentication required
+**Status**: ⚠️  **AUTHENTICATION REQUIRED** — Server-side OAuth sessions expired
 
 ---
 
 ## Executive Summary
 
-Quota data was 11+ hours stale NOT due to code bugs, but due to **expired authentication tokens**. All three accounts were auto-deactivated by the system on Feb 8 at 1:36 PM when tokens expired. The system correctly prevented API failures by stopping refresh attempts.
+Quota data was 11+ hours stale due to **server-side OAuth session expiry**. All three accounts' refresh tokens expired on Feb 8, making automatic token refresh impossible. The system correctly auto-deactivated accounts to prevent API failures.
 
-**Root Cause**: Authentication failure, not refresh mechanism failure.
+**Root Cause**: Server-side OAuth sessions expired (not just access tokens). Refresh tokens themselves are invalid, requiring manual re-login via Claude Code CLI.
+
+**Key Discovery**: Access tokens can be auto-refreshed via cron, BUT if the server-side OAuth session expires (typically after 7-30 days), the refresh_token becomes invalid and users MUST re-login manually using `claude /login` or slot aliases (`claude1`, `claude2`, `claude3`).
 
 **Fixes Applied**:
 1. ✅ QuotaBrokerClient now detects stale slot data (not just merged cache `ts`)
@@ -43,20 +45,28 @@ Quota data was 11+ hours stale NOT due to code bugs, but due to **expired authen
 
 ## Root Cause Analysis
 
-### Issue 1: Expired Tokens (PRIMARY)
-**Status**: User action required
+### Issue 1: Server-Side OAuth Session Expiry (PRIMARY ROOT CAUSE)
+**Status**: ⚠️  **USER ACTION REQUIRED**
 
-All three accounts had expired OAuth tokens:
+All three accounts had expired server-side OAuth sessions:
 ```
-slot-1 (vlad@vladks.com):     deactivated Feb 8, 1:36 PM
-slot-2 (rimidalvk@gmail.com):  deactivated Feb 8, 1:36 PM
-slot-3 (v@ainsys.com):         deactivated Feb 8, 1:36 PM
-Reason: error_session_expired
+slot-1 (vlad@vladks.com):     Server-side session expired
+slot-2 (rimidalvk@gmail.com):  Server-side session expired
+slot-3 (v@ainsys.com):         Server-side session expired
+Token expiry: Feb 8, 2026 (49 hours ago)
+Refresh attempt: Failed with "invalid refresh_token"
 ```
 
-**Why Tokens Expired**: OAuth access tokens have limited lifespan (typically 1-7 days). The refresh-token mechanism needs to be invoked to get fresh tokens.
+**Why This Happened**:
+- OAuth flow has TWO types of tokens:
+  - **Access Token** (short-lived, ~1-7 days) — can be auto-refreshed
+  - **Refresh Token** (longer-lived, ~7-30 days) — requires re-login when expired
+- On Feb 8, the server-side OAuth sessions expired
+- Cron job (refresh-token.sh --daemon) runs hourly but **silently fails** due to `>/dev/null 2>&1`
+- Logs showed: "Server-side session expired. User needs to run: claude /login"
+- Without monitoring the log file, failures went unnoticed for 49 hours
 
-**System Behavior**: ✅ **CORRECT** — Auto-deactivated to prevent repeated API failures
+**System Behavior**: ✅ **CORRECT** — System auto-deactivated accounts, attempted auto-refresh via cron, logged failures, prevented API spam
 
 ### Issue 2: False Freshness Flags
 **Status**: ✅ FIXED
@@ -200,23 +210,20 @@ echo '{"session_id":"test"}' | bun v2/src/display-only.ts
 
 ## Resolution Steps
 
-### Step 1: Re-authenticate Accounts
-Each account needs fresh OAuth tokens:
+### Step 1: Re-authenticate Accounts (REQUIRED)
+Each account needs fresh OAuth session via manual login:
 
 ```bash
 # For each slot, run the respective command to re-login:
-claude1  # Logs into slot-1 (vlad@vladks.com)
-claude2  # Logs into slot-2 (rimidalvk@gmail.com)
-claude3  # Logs into slot-3 (v@ainsys.com)
+claude1  # Logs into slot-1 (vlad@vladks.com) via browser
+claude2  # Logs into slot-2 (rimidalvk@gmail.com) via browser
+claude3  # Logs into slot-3 (v@ainsys.com) via browser
 ```
 
-**OR** use the hot-swap script:
-```bash
-cd ~/_claude-configs/hot-swap/scripts
-./refresh-token.sh slot-1
-./refresh-token.sh slot-2
-./refresh-token.sh slot-3
-```
+**IMPORTANT**:
+- refresh-token.sh CANNOT fix this — server-side sessions are expired
+- Must use browser-based OAuth flow via `claude /login` or slot aliases
+- Each slot must be logged into separately to create fresh keychain entries
 
 ### Step 2: Reactivate Accounts
 After successful login, reactivate in claude-sessions.yaml:
@@ -289,33 +296,78 @@ Should show quota without 🔺 indicator.
 
 ## Prevention
 
-### Automated Token Refresh
-Set up periodic token refresh via cron:
+### 1. Monitor Token Refresh Logs
+Cron job runs hourly but logs to file (not visible):
 
 ```bash
-# ~/.crontab
-# Refresh tokens daily at 2 AM
-0 2 * * * /path/to/_claude-configs/hot-swap/scripts/refresh-all-tokens.sh
+# Check refresh log regularly
+tail -f ~/.claude/session-health/token-refresh.log
+
+# Or set up alert when sessions expire
+grep -i "session expired" ~/.claude/session-health/token-refresh.log && \
+  osascript -e 'display notification "Claude accounts need re-login" with title "Auth Expired"'
 ```
 
-### Monitoring
+### 2. Cron Job Visibility
+Current cron redirects all output to /dev/null, hiding failures:
+```bash
+# Current (silent failures):
+0 * * * * bash /path/to/refresh-token.sh --daemon >/dev/null 2>&1
+
+# Recommended (errors visible):
+0 * * * * bash /path/to/refresh-token.sh --daemon 2>&1 | grep -i error
+```
+
+### 3. Monitoring Dashboard
 Watch for inactive accounts:
 
 ```bash
+# Check all slot statuses
+yq eval '.accounts | to_entries | .[] | .key + ": " + .value.status' \
+  ~/_claude-configs/hot-swap/claude-sessions.yaml
+
 # Alert if all accounts inactive
-yq eval '.accounts.[] | select(.status == "inactive") | .email' claude-sessions.yaml | wc -l
+inactive_count=$(yq eval '.accounts.[] | select(.status == "inactive")' \
+  claude-sessions.yaml | wc -l)
+total_count=$(yq eval '.accounts | length' claude-sessions.yaml)
+if [ "$inactive_count" -eq "$total_count" ]; then
+  echo "⚠️  ALL ACCOUNTS INACTIVE - Re-login required"
+fi
+```
+
+### 4. Proactive Re-login
+Re-login BEFORE sessions expire (OAuth sessions last ~7-30 days):
+
+```bash
+# Check token expiry dates
+security find-generic-password -s "Claude Code-credentials-db267d92" -w 2>/dev/null | \
+  jq -r '.claudeAiOauth | "Expires: " + (.expiresAt / 1000 | todate)'
+
+# Set reminder to re-login every 2 weeks
+# (prevents emergency situations)
 ```
 
 ---
 
 ## Status
 
-✅ **Auto-refresh mechanism: WORKING**
-✅ **Staleness detection: FIXED**
-✅ **Diagnostic logging: ADDED**
-❌ **Authentication: REQUIRED** (user action)
+✅ **Auto-refresh mechanism: WORKING** (cron runs hourly)
+✅ **Staleness detection: FIXED** (dual-level: merged cache + slot data)
+✅ **Diagnostic logging: ADDED** (comprehensive slot staleness warnings)
+✅ **Token refresh attempt: WORKING** (refresh-token.sh attempted auto-refresh)
+❌ **Server-side OAuth sessions: EXPIRED** (requires manual re-login)
+⚠️  **Cron job monitoring: POOR** (failures hidden by >/dev/null 2>&1)
 
-**Next Step**: User must re-authenticate accounts to enable quota refresh.
+**Root Cause Confirmed**: Server-side OAuth sessions expired on Feb 8. System correctly:
+1. Detected expiry
+2. Attempted auto-refresh via cron
+3. Failed with "invalid refresh_token"
+4. Logged failure to ~/.claude/session-health/token-refresh.log
+5. Auto-deactivated accounts to prevent API spam
+
+**Failure Point**: Cron job output redirected to /dev/null, so failures went unnoticed for 49 hours.
+
+**Next Step**: User must re-authenticate via `claude1`, `claude2`, `claude3` to create fresh OAuth sessions.
 
 ---
 
