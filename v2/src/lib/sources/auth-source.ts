@@ -14,6 +14,7 @@ import type { SessionHealth } from '../../types/session-health';
 import { AuthProfileDetector } from '../../modules/auth-profile-detector';
 import { KeychainResolver } from '../../modules/keychain-resolver';
 import { HotSwapQuotaReader } from '../hot-swap-quota-reader';
+import { NotificationManager } from '../notification-manager';
 
 export interface AuthSourceData {
   authProfile: string;
@@ -77,6 +78,16 @@ export const authSource: DataSourceDescriptor<AuthSourceData> = {
     }
     if (data.keychainService) {
       target.launch.keychainService = data.keychainService;
+    }
+
+    // Register active slot notification (intermittent display)
+    if (data.authProfile && data.slotId) {
+      const message = `Active: ${data.authProfile} (${data.slotId})`;
+      // Priority 3 (low) - informational only, below warnings
+      NotificationManager.register('active_slot', message, 3);
+    } else if (data.authProfile) {
+      const message = `Active: ${data.authProfile}`;
+      NotificationManager.register('active_slot', message, 3);
     }
   },
 };

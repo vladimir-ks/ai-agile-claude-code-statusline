@@ -204,7 +204,7 @@ export class StatuslineFormatter {
     if (line3) lines.push(line3);
 
     // Lines 4-5: Notifications (Phase 2 — intermittent display)
-    const notifications = this.buildNotifications(health.sessionId, effectiveWidth);
+    const notifications = this.buildNotifications(health, effectiveWidth);
     lines.push(...notifications);
 
     return lines;
@@ -750,19 +750,8 @@ export class StatuslineFormatter {
    * Format health status / alerts
    */
   private static fmtHealthStatus(health: SessionHealth): string {
-    // Check for secrets first (highest priority alert)
-    if (health.alerts?.secretsDetected && health.alerts?.secretTypes?.length > 0) {
-      // Filter out file paths (anything starting with /)
-      const secretNames = health.alerts.secretTypes
-        .filter(type => !type.startsWith('/'))
-        .slice(0, 3); // Max 3 types
-
-      if (secretNames.length === 1) {
-        return `${c('critical')}⚠️ ${secretNames[0]}${rst()}`;
-      } else if (secretNames.length > 1) {
-        return `${c('critical')}⚠️ ${secretNames.length} secrets${rst()}`;
-      }
-    }
+    // Secrets moved to notification layer (line 4+) for intermittent display
+    // See buildNotifications() for secret warning display logic
 
     // Failover notification (transient — recent hot-swap event)
     if (health.failoverNotification) {
@@ -875,10 +864,26 @@ export class StatuslineFormatter {
    *
    * Display pattern: Show 30s → Hide 5min → Repeat
    */
-  private static buildNotifications(sessionId: string, maxWidth: number): string[] {
+  private static buildNotifications(health: SessionHealth, maxWidth: number): string[] {
     const lines: string[] = [];
 
     try {
+      // Register secret detection as notification (if detected)
+      if (health.alerts?.secretsDetected && health.alerts?.secretTypes?.length > 0) {
+        const secretNames = health.alerts.secretTypes
+          .filter(type => !type.startsWith('/'))
+          .slice(0, 3);
+
+        if (secretNames.length > 0) {
+          const message = secretNames.length === 1
+            ? secretNames[0]
+            : `${secretNames.length} secrets detected`;
+
+          // Register with high priority (8/10) - higher than version updates, lower than critical errors
+          NotificationManager.register('secrets_detected', message, 8);
+        }
+      }
+
       // Get active notifications (sorted by priority)
       const active = NotificationManager.getActive();
 
@@ -891,6 +896,14 @@ export class StatuslineFormatter {
         let line = '';
 
         switch (type) {
+          case 'secrets_detected':
+            line = `${c('critical')}⚠️ ${notification.message}${rst()}`; // Red - critical
+            break;
+
+          case 'active_slot':
+            line = `${c('contextBar')}👤 ${notification.message}${rst()}`; // Cyan - informational
+            break;
+
           case 'version_update':
             line = `${c('cost')}⚠️ ${notification.message}${rst()}`; // Yellow
             break;

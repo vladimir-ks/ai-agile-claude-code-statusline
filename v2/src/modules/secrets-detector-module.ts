@@ -28,7 +28,8 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // API Keys - HIGH severity
   { name: 'OpenAI/Anthropic API Key', pattern: /sk-[a-zA-Z0-9]{20,}/g, severity: 'high' },
   { name: 'AWS Access Key', pattern: /AKIA[0-9A-Z]{16}/g, severity: 'high' },
-  { name: 'AWS Secret Key', pattern: /[a-zA-Z0-9/+=]{40}/g, severity: 'medium' },  // Very generic, might false positive
+  // AWS Secret Key pattern removed - too generic, causes false positives
+  // AWS access keys (AKIA...) are sufficient for detection
   { name: 'Google API Key', pattern: /AIza[0-9A-Za-z_-]{35}/g, severity: 'high' },
 
   // Tokens - HIGH severity

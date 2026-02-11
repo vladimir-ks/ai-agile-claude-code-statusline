@@ -5,6 +5,8 @@
  * State: ~/.claude/session-health/notifications.json
  *
  * Notification types:
+ * - secrets_detected: Secrets found in transcript (high priority)
+ * - active_slot: Show which account is active (informational)
  * - version_update: New Claude Code version available
  * - slot_switch: Recommended to switch slots
  * - restart_ready: Auto-restart conditions met (dry-run indicator)
@@ -14,7 +16,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkS
 import { homedir } from 'os';
 import { dirname } from 'path';
 
-export type NotificationType = 'version_update' | 'slot_switch' | 'restart_ready';
+export type NotificationType = 'version_update' | 'slot_switch' | 'restart_ready' | 'secrets_detected' | 'active_slot';
 
 export interface Notification {
   type: NotificationType;
