@@ -246,7 +246,10 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       // The `timeout` command reliably kills the process on macOS
       const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const timeoutSec = Math.floor(this.config.timeout / 1000);
-      const cmd = `timeout ${timeoutSec} ccusage blocks --json --active --offline --since ${today}`;
+      // Layer 4: ulimit -v caps virtual memory at 512MB to prevent ccusage memory bombs (seen 3GB+)
+      // Graceful fallback: ulimit may silently fail on some macOS configs, timeout provides backup protection
+      const memLimitKB = 512 * 1024; // 512MB in KB
+      const cmd = `ulimit -v ${memLimitKB} 2>/dev/null; timeout ${timeoutSec} ccusage blocks --json --active --offline --since ${today}`;
 
       console.error(`[CCUsage] Running: ${cmd}`);
       const startTime = Date.now();

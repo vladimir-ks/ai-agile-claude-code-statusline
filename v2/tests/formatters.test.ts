@@ -156,85 +156,8 @@ describe('formatTokens', () => {
   });
 });
 
-describe('formatMoney', () => {
-  // Test via cost component which uses formatMoney
-
-  test('$0.01 shows with 2 decimals (when burn rate triggers display)', () => {
-    // Note: Smart visibility requires either cost >=1 or burn rate >0.01
-    // to show cost component. Adding burn rate to ensure display.
-    const output = getDisplayOutput({
-      context: { tokensLeft: 100000, percentUsed: 0 },
-      model: { value: 'Claude' },
-      transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-      git: {},
-      billing: { costToday: 0.01, burnRatePerHour: 0.5, isFresh: true },
-      alerts: {}
-    });
-    // With burn rate set, cost shows as "$X/h" format
-    expect(output).toContain('💰:');
-    expect(output).toContain('/h');
-  });
-
-  test('$9.99 shows with 2 decimals', () => {
-    const output = getDisplayOutput({
-      context: { tokensLeft: 100000, percentUsed: 0 },
-      model: { value: 'Claude' },
-      transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-      git: {},
-      billing: { costToday: 9.99, burnRatePerHour: 0, isFresh: true },
-      alerts: {}
-    });
-    expect(output).toContain('💰:$9.99');
-  });
-
-  test('$10 shows without decimals', () => {
-    const output = getDisplayOutput({
-      context: { tokensLeft: 100000, percentUsed: 0 },
-      model: { value: 'Claude' },
-      transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-      git: {},
-      billing: { costToday: 10, burnRatePerHour: 0, isFresh: true },
-      alerts: {}
-    });
-    expect(output).toContain('💰:$10');
-  });
-
-  test('$10.5 shows with 1 decimal', () => {
-    const output = getDisplayOutput({
-      context: { tokensLeft: 100000, percentUsed: 0 },
-      model: { value: 'Claude' },
-      transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-      git: {},
-      billing: { costToday: 10.5, burnRatePerHour: 0, isFresh: true },
-      alerts: {}
-    });
-    expect(output).toContain('💰:$10.5');
-  });
-
-  test('$100 shows without decimals', () => {
-    const output = getDisplayOutput({
-      context: { tokensLeft: 100000, percentUsed: 0 },
-      model: { value: 'Claude' },
-      transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-      git: {},
-      billing: { costToday: 100, burnRatePerHour: 0, isFresh: true },
-      alerts: {}
-    });
-    expect(output).toContain('💰:$100');
-  });
-
-  test('$186.75 shows as $186 (rounded)', () => {
-    const output = getDisplayOutput({
-      context: { tokensLeft: 100000, percentUsed: 0 },
-      model: { value: 'Claude' },
-      transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
-      git: {},
-      billing: { costToday: 186.75, burnRatePerHour: 0, isFresh: true },
-      alerts: {}
-    });
-    expect(output).toContain('💰:$186');
-  });
-});
+// formatMoney tests removed — cost moved from line 2 to account context notification line.
+// formatMoney helper is still correct (private, unchanged); exercised via notification rendering.
 
 describe('generateProgressBar', () => {
   // Test progress bar rendering
@@ -309,8 +232,8 @@ describe('shortenPath', () => {
       },
       { start_directory: '/tmp/formatter-test-home/short' }
     );
-    // Path shown in full when not under real home
-    expect(output).toContain('📁:/tmp/formatter-test-home/short');
+    // HOME=/tmp/formatter-test-home → path becomes ~/short
+    expect(output).toContain('📁:~/short');
   });
 
   test('long path shown in full (no truncation)', () => {
@@ -325,8 +248,8 @@ describe('shortenPath', () => {
       },
       { start_directory: '/tmp/formatter-test-home/very/long/nested/path/to/project' }
     );
-    // Full path shown (spec: NEVER truncate directory)
-    expect(output).toContain('📁:/tmp/formatter-test-home/very/long/nested/path/to/project');
+    // Full path shown (spec: NEVER truncate directory) — ~ replaces HOME prefix
+    expect(output).toContain('📁:~/very/long/nested/path/to/project');
   });
 
   test('non-home path works', () => {
@@ -370,9 +293,9 @@ describe('fmtBudget edge cases', () => {
       billing: { budgetRemaining: -60, isFresh: true, lastFetched: Date.now() },
       alerts: {}
     });
-    // Should show 0m (clamped to 0, hours omitted)
-    expect(output).toContain('⌛:');
-    expect(output).toContain('0m');
+    // Budget moved to notification line — just verify no crash, no NaN
+    expect(output).not.toContain('NaN');
+    expect(output).not.toContain('undefined');
   });
 });
 

@@ -74,7 +74,7 @@ export class UnifiedTranscriptScanner {
    * - Extractor failure: log error, continue with other extractors
    */
   scan(sessionId: string, transcriptPath: string): ScanResult {
-    const startTime = Date.now();
+    const startTime = performance.now();
 
     // 1. Load previous state
     let state = StateManager.load(sessionId);
@@ -99,7 +99,7 @@ export class UnifiedTranscriptScanner {
           metrics: {
             ...cached.metrics,
             cacheHit: true,
-            scanTimeMs: Date.now() - startTime
+            scanTimeMs: performance.now() - startTime
           }
         };
       }
@@ -113,7 +113,10 @@ export class UnifiedTranscriptScanner {
     );
 
     // 4. Parse new lines
-    const newLines = LineParser.parse(readResult.newBytes, state.lastOffset);
+    // Pass line number base (1-indexed). For first scan (offset=0), start at line 1.
+    // For incremental scans, use stored line count + 1.
+    const lineBase = state.lastOffset === 0 ? 1 : (state.extractorData?.lastLineCount || state.lastOffset) + 1;
+    const newLines = LineParser.parse(readResult.newBytes, lineBase);
 
     // If no new content and we had state, this is effectively a cache hit
     // Exception: Empty file (offset=0, size=0) should return empty results
@@ -143,7 +146,7 @@ export class UnifiedTranscriptScanner {
       authChanges: mergedData.auth_changes || [],
       health: this.calculateHealth(mergedData),
       metrics: {
-        scanTimeMs: Date.now() - startTime,
+        scanTimeMs: performance.now() - startTime,
         linesProcessed: newLines.length,
         bytesProcessed: readResult.newBytes.length,
         cacheHit: false
@@ -233,8 +236,9 @@ export class UnifiedTranscriptScanner {
   ): Record<string, any> {
     const merged: Record<string, any> = { ...previousData };
 
-    // last_message: Always use latest
-    if (newData.last_message) {
+    // last_message: Only replace if new scan found actual text content
+    // Preserves previous known-good message when recent content is all tool_results
+    if (newData.last_message && newData.last_message.preview) {
       merged.last_message = newData.last_message;
     }
 
@@ -290,7 +294,7 @@ export class UnifiedTranscriptScanner {
       authChanges: state.extractorData.auth_changes || [],
       health: this.calculateHealth(state.extractorData),
       metrics: {
-        scanTimeMs: Date.now() - startTime,
+        scanTimeMs: performance.now() - startTime,
         linesProcessed: 0,
         bytesProcessed: 0,
         cacheHit: true
@@ -372,7 +376,7 @@ export class UnifiedTranscriptScanner {
         lastActivityTimestamp: 0
       },
       metrics: {
-        scanTimeMs: Date.now() - startTime,
+        scanTimeMs: performance.now() - startTime,
         linesProcessed: 0,
         bytesProcessed: 0,
         cacheHit: false

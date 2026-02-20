@@ -15,12 +15,21 @@ import type { ParsedLine, Command } from '../types';
 import type { DataExtractor } from '../types';
 
 /**
- * Command pattern: /command-name [args...]
- * Captures command and arguments until end of argument list
- * Stops at common sentence patterns like " to ", " and ", " then "
- * or sentence-ending punctuation
+ * Known slash commands (all that Claude Code supports)
  */
-const COMMAND_REGEX = /\/([a-z][a-z0-9-]*)(?:\s+([^\n]+?))?(?=\s+(?:to|and|then|but|or)\s|[.!?;]\s|$)/gi;
+const KNOWN_COMMANDS = new Set([
+  'login', 'logout', 'swap-auth', 'clear', 'commit', 'help',
+  'status', 'config', 'compact', 'review', 'init', 'continue',
+  'permissions', 'doctor', 'memory', 'cost', 'bug', 'model',
+  'terminal-setup', 'vim', 'ide', 'listen', 'mcp', 'add-dir',
+]);
+
+/**
+ * Command pattern: /command-name [args...]
+ * Requires word boundary before slash (start of text, space, or newline)
+ * Captures command name — arguments are extracted separately via next-command boundary
+ */
+const COMMAND_REGEX = /(?:^|(?<=\s))\/([a-z][a-z0-9-]*)/gi;
 
 export class CommandDetector implements DataExtractor<Command[]> {
   readonly id = 'commands';
@@ -57,24 +66,41 @@ export class CommandDetector implements DataExtractor<Command[]> {
       const text = this.extractText(line.data);
       if (!text) continue;
 
-      // Find all commands in text
-      COMMAND_REGEX.lastIndex = 0; // Reset regex state
+      // Find all command positions first, then extract args between them
+      COMMAND_REGEX.lastIndex = 0;
+      const matches: Array<{ name: string; index: number }> = [];
       let match;
 
       while ((match = COMMAND_REGEX.exec(text)) !== null) {
         const commandName = match[1];
-        const argsString = (match[2] || '').trim();
+        if (!KNOWN_COMMANDS.has(commandName)) continue;
 
-        // Parse arguments (space-separated, respect quotes)
+        // Exclude URL context: /command preceded by :// or URL path
+        const before = text.substring(Math.max(0, match.index - 10), match.index + 1);
+        if (before.includes('://') || /\.[a-z]{2,}\//.test(before)) continue;
+
+        // Exclude word-attached: must be at start or preceded by whitespace
+        if (match.index > 0 && !/\s/.test(text[match.index - 1])) continue;
+
+        matches.push({ name: commandName, index: match.index });
+      }
+
+      // Extract args: text between this command end and next command start (or end of text)
+      for (let m = 0; m < matches.length; m++) {
+        const cmdMatch = matches[m];
+        const cmdEnd = cmdMatch.index + cmdMatch.name.length + 1; // +1 for leading /
+        const nextStart = m + 1 < matches.length ? matches[m + 1].index : text.length;
+        const rawArgs = text.substring(cmdEnd, nextStart).trim();
+        // Truncate at sentence conjunctions (stop words) — args don't span past "to", "and", etc.
+        const argsString = rawArgs.replace(/\s+(to|and|then|but|or)\s+.*$/i, '').trim();
+
         const args = this.parseArgs(argsString);
-
-        // Extract timestamp
         const timestamp = line.data.timestamp
           ? new Date(line.data.timestamp).getTime()
-          : 0;
+          : Date.now();
 
         commands.push({
-          command: `/${commandName}`,
+          command: `/${cmdMatch.name}`,
           timestamp,
           args,
           line: line.lineNumber

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { join } from 'path';
 import { withFormattedOutput } from './helpers/with-formatted-output';
+import { NotificationManager } from '../src/lib/notification-manager';
 
 const TEST_HEALTH_DIR = '/tmp/test-display-only-health';
 const DISPLAY_SCRIPT = join(__dirname, '../src/display-only.ts');
@@ -43,6 +44,11 @@ describe('Display-Only Layer', () => {
       rmSync('/tmp/test-display-home', { recursive: true });
     }
     mkdirSync(testHome, { recursive: true });
+
+    // Clear notification state to prevent inter-test leakage
+    // (notifications are file-based, shared across test runs)
+    NotificationManager.clearAll();
+    NotificationManager.clearCache();
   });
 
   afterEach(() => {
@@ -181,7 +187,7 @@ describe('Display-Only Layer', () => {
       expect(stripped.length).toBeLessThanOrEqual(130);
     });
 
-    test('shows secrets warning when detected', () => {
+    test('secrets detection disabled — no warning shown', () => {
       const health = {
         sessionId: 'secrets-test',
         projectPath: '/test',
@@ -200,11 +206,11 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"secrets-test"}');
 
-      // New format: ⚠️ API or ⚠️ 2 secrets (shown in health status at beginning)
-      expect(output).toContain('⚠️');
+      // Secrets detection disabled (too many false positives) — no secrets notification
+      expect(output).not.toContain('⚠️ API Key');
     });
 
-    test('shows transcript warning when stale', () => {
+    test('transcript stale does not show 📝 on line 1 (moved to notification layer)', () => {
       const health = {
         sessionId: 'stale-test',
         projectPath: '/test',
@@ -223,11 +229,11 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"stale-test"}');
 
-      // Redesigned: Subtle indicator shows transcript age (📝:10m) instead of alarming text
-      expect(output).toContain('📝:10m');
+      // 📝 indicator removed from line 1 — handled by notification layer
+      expect(output).not.toContain('📝:10m');
     });
 
-    test('shows data loss risk indicator', () => {
+    test('data loss risk does not show 📝 on line 1 (moved to notification layer)', () => {
       const health = {
         sessionId: 'risk-test',
         projectPath: '/test',
@@ -246,8 +252,8 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"risk-test"}');
 
-      // Redesigned: Shows age with warning symbol (📝:15m⚠) instead of alarming red dot
-      expect(output).toContain('📝:15m⚠');
+      // 📝 indicator removed from line 1 — handled by notification layer
+      expect(output).not.toContain('📝:15m⚠');
     });
 
     test('no trailing newline', () => {
@@ -481,6 +487,31 @@ describe('Display-Only Layer', () => {
       const { output } = runDisplay('{"session_id":"model-test-2"}');
 
       expect(output).toContain('🤖:CachedSonnet');
+    });
+
+    test('extracts version from stdin model.id', () => {
+      // Real Claude Code sends model.id with full version string
+      const { output } = runDisplay('{"session_id":"model-test-3","model":{"id":"claude-opus-4-6"}}');
+
+      expect(output).toContain('🤖:Opus4.6');
+    });
+
+    test('handles stdin with model.id (prefers id over display_name)', () => {
+      // When both id and display_name present, id should win (has version info)
+      const { output } = runDisplay(
+        '{"session_id":"model-test-4","model":{"id":"claude-sonnet-4-5-20250929","display_name":"Opus"}}'
+      );
+
+      // Should use id (Sonnet 4.5), not display_name (Opus)
+      expect(output).toContain('🤖:Sonnet4.5');
+      expect(output).not.toContain('Opus');
+    });
+
+    test('handles stdin with only model.id (no display_name)', () => {
+      // Model.id alone should be sufficient for formatting
+      const { output } = runDisplay('{"session_id":"model-test-5","model":{"id":"claude-haiku-4-5-20251001"}}');
+
+      expect(output).toContain('🤖:Haiku4.5');
     });
   });
 

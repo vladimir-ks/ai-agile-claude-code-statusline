@@ -15,6 +15,7 @@ import type { SessionHealth } from '../../types/session-health';
 import { QuotaBrokerClient } from '../quota-broker-client';
 import { HotSwapQuotaReader } from '../hot-swap-quota-reader';
 import { SubscriptionReader } from '../subscription-reader';
+import { NotificationManager } from '../notification-manager';
 import { redactEmail } from '../sanitize';
 
 export interface QuotaSourceData {
@@ -25,6 +26,7 @@ export interface QuotaSourceData {
   weeklyLastModified?: number;
   dailyPercentUsed?: number;
   sessionPercentUsed?: number;
+  slotStatus?: string;  // 'active' | 'inactive' — inactive slots are expected stale
   source: 'broker' | 'hotswap' | 'oauth' | 'subscription' | 'none';
   fetchedAt: number;
 }
@@ -54,6 +56,7 @@ export const quotaSource: DataSourceDescriptor<QuotaSourceData> = {
           dailyPercentUsed: brokerQuota.dailyPercentUsed > 0
             ? brokerQuota.dailyPercentUsed
             : undefined,
+          slotStatus: brokerQuota.slotStatus,
           source: 'broker',
           fetchedAt,
         };
@@ -119,6 +122,24 @@ export const quotaSource: DataSourceDescriptor<QuotaSourceData> = {
     }
     if (data.sessionPercentUsed !== undefined) {
       target.billing.budgetPercentUsed = data.sessionPercentUsed;
+    }
+
+    // Staleness notification: alert when data is stale AND refresh is likely broken
+    // Skip for inactive slots — their staleness is expected (broker skips inactive accounts)
+    if (data.weeklyDataStale && data.weeklyLastModified && data.slotStatus !== 'inactive') {
+      const ageMin = Math.round((Date.now() - data.weeklyLastModified) / 60000);
+      if (ageMin > 30) {
+        NotificationManager.register(
+          'quota_stale',
+          `⚠ Quota data ${ageMin}min stale — check launchd agent`,
+          9
+        );
+      } else {
+        NotificationManager.remove('quota_stale');
+      }
+    } else {
+      // Data is fresh OR slot is inactive — remove stale notification
+      NotificationManager.remove('quota_stale');
     }
   },
 };

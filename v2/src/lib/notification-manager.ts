@@ -16,7 +16,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkS
 import { homedir } from 'os';
 import { dirname } from 'path';
 
-export type NotificationType = 'version_update' | 'slot_switch' | 'restart_ready' | 'secrets_detected' | 'active_slot';
+export type NotificationType = 'version_update' | 'slot_switch' | 'restart_ready' | 'secrets_detected' | 'active_slot' | 'quota_stale';
 
 export interface Notification {
   type: NotificationType;
@@ -239,6 +239,27 @@ export class NotificationManager {
     active.sort((a, b) => b[1].priority - a[1].priority);
 
     return active;
+  }
+
+  /**
+   * Get all registered (non-dismissed) notifications sorted by priority.
+   * Unlike getActive(), this ignores the show/hide cycle — always returns all.
+   * Used for idle display where notifications should be always-visible.
+   */
+  static getAllRegistered(): Array<[NotificationType, Notification]> {
+    const state = this.readState();
+    const result: Array<[NotificationType, Notification]> = [];
+
+    for (const [type, notification] of Object.entries(state.notifications)) {
+      if (!notification.dismissed) {
+        result.push([type as NotificationType, notification]);
+      }
+    }
+
+    // Sort by priority descending (highest first)
+    result.sort((a, b) => b[1].priority - a[1].priority);
+
+    return result;
   }
 
   /**

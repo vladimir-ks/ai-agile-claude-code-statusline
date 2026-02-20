@@ -46,9 +46,9 @@ class ModelResolver {
     }
 
     // Source 2: JSON input
-    // FIX: Claude Code provides display_name, id, or model_id - not 'name'
+    // Prefer model.id (has version: "claude-opus-4-6") over display_name (just "Opus")
     if (jsonInput?.model) {
-      const modelName = jsonInput.model.display_name || jsonInput.model.id || jsonInput.model.model_id;
+      const modelName = jsonInput.model.id || jsonInput.model.model_id || jsonInput.model.display_name;
       if (modelName) {
         sources.jsonInput = {
           value: this.formatModelName(modelName),
@@ -206,15 +206,22 @@ class ModelResolver {
   formatModelName(modelId: string): string {
     const lower = modelId.toLowerCase();
 
+    // Extract version: "claude-opus-4-6" → "4.6", "claude-sonnet-4-5-20250929" → "4.5"
+    const dashVersion = lower.match(/(\d+)-(\d+)(?:-\d|$)/);
+    // Also detect already-formatted: "Opus4.5" → keep version via dot match (only if model name present)
+    const isKnownModel = /^(opus|sonnet|haiku)/.test(lower);
+    const dotVersion = isKnownModel ? lower.match(/(\d+\.\d+)/) : null;
+    const version = dashVersion ? `${dashVersion[1]}.${dashVersion[2]}` : (dotVersion ? dotVersion[1] : '');
+
     if (lower.includes('opus')) {
-      return 'Opus4.5';
+      return `Opus${version}`;
     } else if (lower.includes('sonnet')) {
-      return 'Sonnet4.5';
+      return `Sonnet${version}`;
     } else if (lower.includes('haiku')) {
-      return 'Haiku4.5';
+      return `Haiku${version}`;
     }
 
-    // Pass through unknown models
+    // Pass through unknown models (display_name like "Opus" stays as-is)
     return modelId;
   }
 

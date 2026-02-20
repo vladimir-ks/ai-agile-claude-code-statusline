@@ -8,6 +8,11 @@
  * - NEVER blocks the display layer
  * - Can be slow, can fail - display still works with cached data
  *
+ * SINGLETON GUARANTEE:
+ * - Uses ProcessLock to ensure exactly ONE daemon runs at a time
+ * - If another daemon holds the lock → exit(0) immediately (expected, not error)
+ * - Lock released on exit, SIGTERM, SIGKILL timeout (stale detection at 35s)
+ *
  * INVOCATION:
  * - Called by thin wrapper AFTER display-only has output
  * - Runs in background (fire and forget)
@@ -25,6 +30,7 @@
  */
 
 import DataGatherer from './lib/data-gatherer';
+import ProcessLock from './lib/process-lock';
 import { ClaudeCodeInput } from './types/session-health';
 import { appendFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir } from 'os';
@@ -63,7 +69,44 @@ function log(level: 'INFO' | 'WARN' | 'ERROR', message: string): void {
   }
 }
 
+// Process-level safety nets — prevent crashes from propagating
+process.on('uncaughtException', (err) => {
+  log('ERROR', `Uncaught exception: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  log('ERROR', `Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`);
+  process.exit(1);
+});
+
+// Singleton lock — guarantees exactly ONE daemon process globally
+const DAEMON_LOCK_PATH = `${homedir()}/.claude/session-health/.data-daemon.lock`;
+const daemonLock = new ProcessLock({
+  lockPath: DAEMON_LOCK_PATH,
+  timeout: 35000,       // 35s stale detection (slightly > 30s kill timeout from bulletproof.sh)
+  retryInterval: 0,     // No retry — fail immediately
+  maxRetries: 1         // Single attempt only (acquire calls tryAcquire once with maxRetries=1)
+});
+
 async function main(): Promise<void> {
+  // CRITICAL: Acquire singleton lock BEFORE any work
+  const lockResult = await daemonLock.acquire();
+
+  if (!lockResult.acquired) {
+    // Another daemon is running — this is EXPECTED behavior (not an error)
+    // With tmux calling bulletproof.sh every 1-5s, most invocations will hit this path
+    process.exit(0);
+  }
+
+  // Ensure lock is released on ALL exit paths (normal, error, signal, timeout SIGKILL)
+  const releaseLock = () => {
+    try { daemonLock.release(); } catch { /* best effort */ }
+  };
+  process.on('exit', releaseLock);
+  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+
   const startTime = Date.now();
 
   try {
@@ -103,6 +146,8 @@ async function main(): Promise<void> {
     if (stack) {
       log('ERROR', `Stack: ${stack}`);
     }
+  } finally {
+    releaseLock();
   }
 }
 

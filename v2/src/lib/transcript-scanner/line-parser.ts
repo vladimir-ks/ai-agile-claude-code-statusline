@@ -20,7 +20,7 @@ export class LineParser {
    * - Empty lines → filtered out
    * - Never throws
    */
-  static parse(content: string, startLine: number = 0): ParsedLine[] {
+  static parse(content: string, startLine: number = 1): ParsedLine[] {
     // Edge case: empty content
     if (!content || content.trim() === '') {
       return [];

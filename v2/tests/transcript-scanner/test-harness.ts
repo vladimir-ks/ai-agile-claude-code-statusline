@@ -293,8 +293,9 @@ export function createTempTranscript(content: string): string {
 /**
  * Create temporary state directory
  */
+let stateCounter = 0;
 export function createTempStateDir(): string {
-  const tempDir = join(tmpdir(), `scanner-state-${Date.now()}`);
+  const tempDir = join(tmpdir(), `scanner-state-${Date.now()}-${++stateCounter}-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(tempDir, { recursive: true });
   return tempDir;
 }
@@ -406,12 +407,20 @@ export function cleanupTempFiles(paths: string[]): void {
 
 export const SECRET_PATTERNS = {
   github_pat: 'ghp_1234567890abcdefghijklmnopqrstuvwxyz',
-  github_fine_grained: 'github_pat_11A23456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+  // Fine-grained format: github_pat_ + 22 alnum/underscore + _ + 59 alnum (total 93 chars)
+  github_fine_grained: 'github_pat_11ABCDEFGHIJKLMNOPQRST_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456',
   aws_access: 'AKIA' + 'IOSFODNN7EXAMPLE', // Obfuscated to pass GitHub push protection
   aws_secret: 'wJalrXUtnFEMI/' + 'K7MDENG/bPxRfiCYEXAMPLEKEY',
   generic_api: 'api_key="sk_' + 'live_1234567890abcdefghijklmnopqrst"', // Not real Stripe key
   slack_token: 'xoxb-1234567890-12345678' + '90123-ABCdefGHIjklMNOpqrsTUVwx',
-  private_key: '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----'
+  // Real base64 content (>200 chars, >80% base64 density) to pass content validator.
+  // Short placeholders like "MIIEpAIBAAKCAQEA..." are now correctly rejected as false positives.
+  private_key: '-----BEGIN RSA PRIVATE KEY-----\n' +
+    'MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2yPB' +
+    'gMjhxKaGFkLqRyMcRgZLwGFcGBSDkAuSOPxqVWHEGDMK5JHRmFvCYnSSyzBNIKnE' +
+    'hVbP8FwFbVeRJdK0MHQeZPf8bSHIkP2zhP+xXVHRKjK3GQH/ATctQ8LnYzTNaYsj' +
+    'ZKxBD4PH2qFbDYOakJ7TGQBZSf5BQHIAJ6H0F0QIHJ5EhM+DnAOawBcO1a1LQ2M\n' +
+    '-----END RSA PRIVATE KEY-----'
 };
 
 // ============================================================================

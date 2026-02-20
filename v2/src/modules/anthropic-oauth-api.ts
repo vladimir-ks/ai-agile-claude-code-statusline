@@ -493,24 +493,45 @@ export class AnthropicOAuthAPI {
       const expiresIn = data.expires_in || 3600; // Default 1 hour
       const newExpiresAt = Date.now() + (expiresIn * 1000);
 
-      // Update keychain with new credentials
-      const updatedCreds = {
-        claudeAiOauth: {
-          accessToken: data.access_token,
-          refreshToken: data.refresh_token || refreshToken, // Use new refresh token if provided
-          expiresAt: newExpiresAt,
-          scopes: data.scopes || ['user:inference', 'user:profile'],
-          subscriptionType: data.subscription_type,
-          rateLimitTier: data.rate_limit_tier
-        }
-      };
+      // CRITICAL: Read existing blob first to preserve oauthAccount identity data.
+      // Previous bug: creating fresh object destroyed oauthAccount section.
+      // The bash refresh-token.sh uses jq merge (preserves), we must do the same.
+      const existingBlob = this.readKeychainBlob(serviceName) || {};
+      if (!existingBlob.claudeAiOauth) existingBlob.claudeAiOauth = {};
 
-      await this.updateKeychainCredentials(serviceName, updatedCreds);
+      // Merge only changed OAuth fields — preserve everything else (oauthAccount, etc.)
+      existingBlob.claudeAiOauth.accessToken = data.access_token;
+      existingBlob.claudeAiOauth.refreshToken = data.refresh_token || refreshToken;
+      existingBlob.claudeAiOauth.expiresAt = newExpiresAt;
+      // Only overwrite these if the refresh response provides them
+      if (data.scopes) existingBlob.claudeAiOauth.scopes = data.scopes;
+      if (data.subscription_type) existingBlob.claudeAiOauth.subscriptionType = data.subscription_type;
+      if (data.rate_limit_tier) existingBlob.claudeAiOauth.rateLimitTier = data.rate_limit_tier;
+
+      await this.updateKeychainCredentials(serviceName, existingBlob);
       console.error(`[AnthropicOAuthAPI] Token refreshed successfully, expires ${new Date(newExpiresAt).toISOString()}`);
 
       return data.access_token;
     } catch (error) {
       console.error('[AnthropicOAuthAPI] Token refresh error:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Read the raw keychain blob for a service (preserves all sections).
+   * Returns the full parsed JSON object or null on failure.
+   */
+  private static readKeychainBlob(serviceName: string): Record<string, any> | null {
+    try {
+      const { execSync } = require('child_process');
+      const raw = execSync(
+        `security find-generic-password -s "${serviceName}" -w 2>/dev/null`,
+        { encoding: 'utf-8', timeout: 2000, stdio: ['pipe', 'pipe', 'ignore'] }
+      ).trim();
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch {
       return null;
     }
   }
@@ -537,7 +558,7 @@ export class AnthropicOAuthAPI {
       }
 
       execSync(
-        `security add-generic-password -s "${serviceName}" -a "vmks" -w '${credJson.replace(/'/g, "'\\''")}' -U`,
+        `security add-generic-password -s "${serviceName}" -a "vmks" -U -w '${credJson.replace(/'/g, "'\\''")}'`,
         {
           encoding: 'utf-8',
           stdio: 'ignore',

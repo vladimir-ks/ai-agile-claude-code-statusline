@@ -207,12 +207,12 @@ describe('Safety: Error Indicators', () => {
     expect(output).toContain('🤖:Claude');
   });
 
-  test('bulletproof wrapper shows timeout fallback', () => {
-    // The wrapper should output ⚠:timeout if display times out
-    // We can't easily force a timeout, but we can verify the code handles it
+  test('bulletproof wrapper has timeout protection', () => {
+    // The wrapper uses timeout to protect against hung display
+    // On timeout, output is empty (clean fallback — Claude Code handles empty gracefully)
     const script = readFileSync(BULLETPROOF_SCRIPT, 'utf-8');
     expect(script).toContain('timeout');
-    expect(script).toContain('⚠:timeout');
+    expect(script).toContain('DISPLAY_OUTPUT');
   });
 });
 

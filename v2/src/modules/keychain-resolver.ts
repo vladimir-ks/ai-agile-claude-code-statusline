@@ -34,6 +34,10 @@ export interface KeychainEntry {
   subscriptionType: string | null;
   rateLimitTier: string | null;
   isExpired: boolean;
+  /** Account UUID from oauthAccount section (survives token refresh) */
+  accountUuid: string | null;
+  /** Email address from oauthAccount section (survives token refresh) */
+  emailAddress: string | null;
 }
 
 export class KeychainResolver {
@@ -122,13 +126,18 @@ export class KeychainResolver {
       // Determine expiry: expired if expiresAt is set and in the past (with 60s buffer)
       const isExpired = expiresAt !== null && expiresAt < (now + 60000);
 
+      // Extract identity from oauthAccount section (preserved across token refreshes)
+      const account = cred.oauthAccount || null;
+
       return {
         accessToken: oauth.accessToken,
         refreshToken: oauth.refreshToken || null,
         expiresAt,
         subscriptionType: oauth.subscriptionType || null,
         rateLimitTier: oauth.rateLimitTier || null,
-        isExpired: expiresAt !== null ? isExpired : false
+        isExpired: expiresAt !== null ? isExpired : false,
+        accountUuid: account?.accountUuid || null,
+        emailAddress: account?.emailAddress || null,
       };
     } catch {
       return null;

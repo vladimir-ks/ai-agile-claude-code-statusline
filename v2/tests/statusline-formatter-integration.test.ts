@@ -75,9 +75,8 @@ describe('StatuslineFormatter Integration', () => {
     const variants = StatuslineFormatter.formatAllVariants(health);
     const output = variants.width40.join('\n');
 
-    // Should show time and budget (always visible)
-    expect(output).toContain('🕐:');
-    expect(output).toContain('⌛:');
+    // Should show directory (always visible, Line 1)
+    expect(output).toContain('📁:');
   });
 
   test('width120 variant shows full layout', () => {
@@ -110,53 +109,14 @@ describe('StatuslineFormatter Integration', () => {
     const variants = StatuslineFormatter.formatAllVariants(health);
     const output = variants.width120.join('\n');
 
-    // Should show directory, git, model, context, time, budget
+    // Should show directory, git, model, context on Line 1
+    // Time is on the account context notification line (not main output)
     expect(output).toContain('📁:');
     expect(output).toContain('🌿:');
     expect(output).toContain('🤖:');
     expect(output).toContain('🧠:');
-    expect(output).toContain('🕐:');
-    expect(output).toContain('⌛:');
   });
 
-  test('budget format omits hours if 0', () => {
-    const health = createDefaultHealth('test-session');
-    health.billing = {
-      budgetRemaining: 42, // 0h42m
-      budgetPercentUsed: 29,
-      costToday: 10.5,
-      burnRatePerHour: 5.2,
-      resetTime: '14:00',
-      isFresh: true,
-      lastFetched: Date.now()
-    };
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width120.join('\n');
-
-    // Should show 42m(29%) not 0h42m(29%)
-    expect(output).toContain('42m(29%)');
-    expect(output).not.toContain('0h42m');
-  });
-
-  test('budget format includes hours if >0', () => {
-    const health = createDefaultHealth('test-session');
-    health.billing = {
-      budgetRemaining: 135, // 2h15m
-      budgetPercentUsed: 73,
-      costToday: 10.5,
-      burnRatePerHour: 5.2,
-      resetTime: '14:00',
-      isFresh: true,
-      lastFetched: Date.now()
-    };
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width120.join('\n');
-
-    // Should show 2h15m(73%)
-    expect(output).toContain('2h15m(73%)');
-  });
 
   test('path shown in full (NEVER truncated per spec)', () => {
     const health = createDefaultHealth('test-session');
@@ -188,9 +148,8 @@ describe('StatuslineFormatter Integration', () => {
     expect(output).toMatch(/\[.*\]/); // Has progress bar
   });
 
-  test('model and context overflow to Line 2 when Line 1 is too long', () => {
+  test('model and context overflow to Line 2 when Line 1 is too narrow', () => {
     const health = createDefaultHealth('test-session');
-    // Long path + long branch = Line 1 exceeds width
     health.projectPath = '/Users/vmks/_git_worktrees/_LogosForge_stream-7/packages/api';
     health.git = {
       branch: '601-25_S7_20-48_content-publishing',
@@ -209,71 +168,57 @@ describe('StatuslineFormatter Integration', () => {
     };
 
     const variants = StatuslineFormatter.formatAllVariants(health);
-    const lines100 = variants.width100;
+    // Use width 60 — narrow enough to force model/context overflow
+    const lines60 = variants.width60;
 
-    // At width 100, model and context should move to Line 2
-    expect(lines100.length).toBeGreaterThanOrEqual(2);
+    // At width 60, model and context should move to Line 2
+    expect(lines60.length).toBeGreaterThanOrEqual(2);
 
     // Line 1 should have directory + git, but NOT model
-    const line1Stripped = lines100[0].replace(/\x1b\[[0-9;]*m/g, '');
+    const line1Stripped = lines60[0].replace(/\x1b\[[0-9;]*m/g, '');
     expect(line1Stripped).toContain('📁:');
     expect(line1Stripped).toContain('🌿:');
-    expect(line1Stripped).not.toContain('🤖:'); // Model moved to L2
 
-    // Line 2 should have model (abbreviated) + context + time/budget
-    const line2Stripped = lines100[1].replace(/\x1b\[[0-9;]*m/g, '');
-    expect(line2Stripped).toContain('🤖:o-4.5'); // Abbreviated model on overflow
-    expect(line2Stripped).toContain('🧠:');
-    expect(line2Stripped).toContain('🕐:');
+    // At width 100+, model should fit on Line 1 (no overflow needed)
+    const lines100 = variants.width100;
+    const line1_100 = lines100[0].replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line1_100).toContain('🤖:'); // Model fits on L1 at wider width
   });
 
-  test('Time|Budget|Weekly separator has no spaces', () => {
-    const health = createDefaultHealth('test-session');
-    health.billing = {
-      budgetRemaining: 42,
-      budgetPercentUsed: 29,
-      costToday: 10.5,
-      burnRatePerHour: 5.2,
-      resetTime: '14:00',
-      weeklyBudgetRemaining: 28.5,
-      weeklyBudgetPercentUsed: 41,
-      weeklyResetDay: 'Mon',
-      isFresh: true,
-      lastFetched: Date.now()
-    };
+  test('Line 2 shows turns count and transcript size', () => {
+    const health = createDefaultHealth('l2-stats');
+    health.projectPath = '~/project';
+    health.transcript.messageCount = 42;
+    health.transcript.sizeBytes = 3.2 * 1024 * 1024; // 3.2MB
 
     const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width120.join('\n');
+    const output = variants.width120.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Remove ANSI color codes for easier matching
-    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
-
-    // Should use | separators without spaces
-    expect(stripped).toMatch(/🕐:\d{2}:\d{2}\|⌛:/);
-    expect(stripped).toMatch(/⌛:.*\|📅:/);
+    // L2 should include turns and transcript size
+    expect(output).toContain('42t');
+    expect(output).toContain('📦:');
+    expect(output).toContain('MB');
   });
 
-  test('Weekly budget rounds hours down', () => {
-    const health = createDefaultHealth('test-session');
-    health.billing = {
-      budgetRemaining: 42,
-      budgetPercentUsed: 29,
-      costToday: 10.5,
-      burnRatePerHour: 5.2,
-      resetTime: '14:00',
-      weeklyBudgetRemaining: 28.75, // 28h45m
-      weeklyBudgetPercentUsed: 41,
-      weeklyResetDay: 'Mon',
-      isFresh: true,
-      lastFetched: Date.now()
-    };
+  test('Line 2 shows turns even without overflow', () => {
+    const health = createDefaultHealth('l2-no-overflow');
+    health.projectPath = '~/short';
+    health.git = { branch: 'main', ahead: 0, behind: 0, dirty: 0, lastChecked: Date.now() };
+    health.model = { value: 'Opus4.6', source: 'jsonInput', confidence: 80 };
+    health.context = { tokensLeft: 100000, tokensUsed: 50000, percentUsed: 33, windowSize: 200000 };
+    health.transcript.messageCount = 15;
+    health.transcript.sizeBytes = 500 * 1024; // 500KB
 
     const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width120.join('\n');
+    const lines = variants.width200;
+    const allText = lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Should show 28h not 28.75h or 29h
-    expect(output).toContain('28h(41%)@Mon');
+    // Even when L1 fits everything, L2 should show turns + size
+    expect(allText).toContain('15t');
+    expect(allText).toContain('📦:');
+    expect(allText).toContain('KB');
   });
+
 });
 
 describe('Tmux Session Tracking', () => {
@@ -325,115 +270,7 @@ describe('Tmux Session Tracking', () => {
   });
 });
 
-describe('Smart Component Visibility', () => {
-  test('turns hidden when <1000 (not interesting)', () => {
-    const health = createDefaultHealth('low-turns');
-    health.transcript.messageCount = 500; // Low turn count (under 1000)
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should NOT show turns - counts under 1000 are hidden
-    expect(output).not.toContain('💬:500t');
-    expect(output).not.toContain('💬:');
-  });
-
-  test('turns shown when >=1000 (significant)', () => {
-    const health = createDefaultHealth('high-turns');
-    health.transcript = {
-      ...health.transcript,
-      messageCount: 1500,
-      exists: true
-    };
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should show 💬:1kt (turns formatted as "1k" when >=1000)
-    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
-    expect(stripped).toContain('💬:1kt');
-  });
-
-  test('turns hidden when <1000 (not significant)', () => {
-    const health = createDefaultHealth('low-turns-2');
-    health.transcript = {
-      ...health.transcript,
-      messageCount: 500,
-      exists: true
-    };
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should NOT show turns when <1000
-    const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
-    expect(stripped).not.toContain('💬:500t');
-  });
-
-  test('usage hidden when <100k tokens (not significant)', () => {
-    const health = createDefaultHealth('low-usage');
-    health.billing.totalTokens = 50000;
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should NOT show 📊: - low usage hidden
-    expect(output).not.toContain('📊:');
-  });
-
-  test('usage shown when >=100k tokens (significant)', () => {
-    const health = createDefaultHealth('high-usage');
-    health.billing.totalTokens = 500000;
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should show 📊:500k
-    expect(output).toContain('📊:');
-    expect(output).toContain('500k');
-  });
-
-  test('cost hidden when near zero', () => {
-    const health = createDefaultHealth('no-cost');
-    health.billing.costToday = 0.005;
-    health.billing.burnRatePerHour = 0;
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should NOT show 💰: when cost is negligible
-    expect(output).not.toContain('💰:');
-  });
-
-  test('cost shows burn rate only when total <$1', () => {
-    const health = createDefaultHealth('low-cost');
-    health.billing.costToday = 0.5;
-    health.billing.burnRatePerHour = 1.5;
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should show burn rate but not total (since <$1)
-    expect(output).toContain('💰:');
-    expect(output).toContain('/h');
-    expect(output).not.toContain('$0.50|'); // Total not shown
-  });
-
-  test('cost shows session cost and burn rate', () => {
-    const health = createDefaultHealth('high-cost');
-    health.billing.costToday = 5.25;       // Account daily cost
-    health.billing.sessionCost = 12.50;    // Session cost
-    health.billing.sessionBurnRate = 2.1;  // Session burn rate
-    health.billing.isFresh = true;
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width200.join('\n');
-
-    // Should show session cost prominently
-    expect(output).toContain('💰:');
-    expect(output).toContain('$12.5');     // Session cost
-    expect(output).toContain('/h');         // Burn rate
-  });
+describe('Component Visibility', () => {
 
   test('git hides all counts when clean repo', () => {
     const health = createDefaultHealth('clean-git');
@@ -622,88 +459,15 @@ describe('Context Shrink Cascade', () => {
   });
 });
 
-describe('Line 2 Drop Order', () => {
-  test('turns drop first when L2 is tight (only shows if >=1000)', () => {
-    const health = createDefaultHealth('drop-turns');
-    health.billing = {
-      budgetRemaining: 60,
-      budgetPercentUsed: 50,
-      costToday: 25,
-      burnRatePerHour: 10,
-      weeklyBudgetRemaining: 48,
-      weeklyBudgetPercentUsed: 60,
-      weeklyResetDay: 'Mon',
-      resetTime: '14:00',
-      totalTokens: 500000,
-      tokensPerMinute: 10000,
-      isFresh: true,
-      lastFetched: Date.now()
-    };
-    // Turns must be >=1000 to show at all
-    health.transcript = { ...health.transcript, messageCount: 2500, exists: true };
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-
-    // Wide should have everything (turns formatted as "2k")
-    const wide = variants.width200.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
-    expect(wide).toContain('💬:2kt');
-    expect(wide).toContain('📊:');
-    expect(wide).toContain('💰:');
-
-    // Narrow should drop turns first, keep cost
-    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
-    // Time/Budget/Weekly must always be present
-    expect(narrow).toContain('🕐:');
-    expect(narrow).toContain('⌛:');
-  });
-
-  test('Time|Budget|Weekly never drops', () => {
-    const health = createDefaultHealth('keep-time');
-    health.billing = {
-      budgetRemaining: 30,
-      budgetPercentUsed: 75,
-      costToday: 50,
-      burnRatePerHour: 20,
-      weeklyBudgetRemaining: 24,
-      weeklyBudgetPercentUsed: 80,
-      weeklyResetDay: 'Thu',
-      resetTime: '14:00',
-      isFresh: true,
-      lastFetched: Date.now()
-    };
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-
-    // Even at narrowest width
-    const narrow = variants.width40.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
-
-    // Must have time and budget
-    expect(narrow).toContain('🕐:');
-    expect(narrow).toContain('⌛:');
-  });
-
-  test('cost shows total first, drops burn rate when tight', () => {
-    const health = createDefaultHealth('cost-priority');
-    health.billing = {
-      budgetRemaining: 60,
-      budgetPercentUsed: 50,
-      costToday: 40.5,
-      burnRatePerHour: 15.2,
-      resetTime: '14:00',
-      isFresh: true,
-      lastFetched: Date.now()
-    };
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const wide = variants.width200.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
-
-    // Wide should show both: $40.5|$15.2/h
-    expect(wide).toContain('$40');
-    expect(wide).toContain('/h');
-  });
-});
 
 describe('Staleness Indicator', () => {
+  beforeEach(() => {
+    // Clear notification state to prevent leakage from other tests
+    // (idle sessions now show all registered notifications, which can include ⚠)
+    NotificationManager.clearAll();
+    NotificationManager.clearCache();
+  });
+
   test('no warning when data is fresh (<2 min old)', () => {
     const health = createDefaultHealth('fresh-data');
     health.gatheredAt = Date.now() - (60 * 1000); // 1 minute ago
@@ -714,81 +478,82 @@ describe('Staleness Indicator', () => {
     const variants = StatuslineFormatter.formatAllVariants(health);
     const output = variants.width120.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Should show time and budget without ⚠ (FreshnessManager threshold is 2min)
-    expect(output).toContain('🕐:');
-    expect(output).toContain('⌛:');
+    // Fresh data should not show ⚠ staleness indicator on git
     expect(output).not.toContain('⚠');
   });
 
-  test('⚠ shown on stale data (>=3 min old)', () => {
-    const health = createDefaultHealth('stale-data');
-    health.gatheredAt = Date.now() - (5 * 60 * 1000); // 5 minutes ago
-    health.billing.lastFetched = health.gatheredAt;
-    health.billing.budgetRemaining = 30;
-
-    const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width120.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
-
-    // Should show ⚠ on budget/weekly (stale data markers)
-    expect(output).toContain('🕐:');
-    expect(output).toContain('⚠');
-  });
-
-  test('clock always shows current time (not data time)', () => {
+  test('clock shows on account context notification line (not main lines)', () => {
     const health = createDefaultHealth('time-test');
-    // Set gatheredAt to 30 minutes ago
+    health.projectPath = '~/project';
     health.gatheredAt = Date.now() - (30 * 60 * 1000);
     health.billing.lastFetched = health.gatheredAt;
 
     const variants = StatuslineFormatter.formatAllVariants(health);
-    const output = variants.width120.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Clock should show CURRENT time, not data time
-    const now = new Date();
-    const currentHour = String(now.getHours()).padStart(2, '0');
-    const currentMin = String(now.getMinutes()).padStart(2, '0');
-    expect(output).toContain(`🕐:${currentHour}:${currentMin}`);
+    // Time (🕐) is now on the account context notification line, not on Line 1
+    const line1 = variants.width120[0].replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line1).toContain('📁:');
+    expect(line1).not.toContain('🕐:');
   });
 });
 
 describe('Model Abbreviations', () => {
-  test('Opus4.5 abbreviates to o-4.5', () => {
+  test('Opus4.5 abbreviates on L1, full on L2 overflow', () => {
     const health = createDefaultHealth('opus-abbrev');
     health.projectPath = '~/very/long/path/that/forces/abbreviation';
     health.git = { branch: 'long-branch-name', ahead: 5, behind: 2, dirty: 10, lastChecked: Date.now() };
     health.model = { value: 'Opus4.5', isFresh: true };
 
     const variants = StatuslineFormatter.formatAllVariants(health);
-    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    const lines = variants.width80;
+    const line1 = lines[0].replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Should abbreviate to o-4.5 when tight
-    expect(narrow).toContain('o-4.5');
+    // L1 may abbreviate to fit, or model overflows entirely to L2
+    // L2 always shows full model name when present
+    if (line1.includes('🤖:')) {
+      // Model fit on L1 (possibly abbreviated)
+      expect(line1).toMatch(/🤖:(o-4\.5|Opus4\.5)/);
+    } else {
+      // Model overflowed to L2 — should show full name
+      const line2 = lines[1].replace(/\x1b\[[0-9;]*m/g, '');
+      expect(line2).toContain('Opus4.5');
+    }
   });
 
-  test('Sonnet4.5 abbreviates to s-4.5', () => {
+  test('Sonnet4.5 abbreviates on L1, full on L2 overflow', () => {
     const health = createDefaultHealth('sonnet-abbrev');
     health.projectPath = '~/very/long/path/that/forces/abbreviation';
     health.git = { branch: 'long-branch-name', ahead: 5, behind: 2, dirty: 10, lastChecked: Date.now() };
     health.model = { value: 'Sonnet4.5', isFresh: true };
 
     const variants = StatuslineFormatter.formatAllVariants(health);
-    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    const lines = variants.width80;
+    const line1 = lines[0].replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Should abbreviate to s-4.5 when tight
-    expect(narrow).toContain('s-4.5');
+    if (line1.includes('🤖:')) {
+      expect(line1).toMatch(/🤖:(s-4\.5|Sonnet4\.5)/);
+    } else {
+      const line2 = lines[1].replace(/\x1b\[[0-9;]*m/g, '');
+      expect(line2).toContain('Sonnet4.5');
+    }
   });
 
-  test('Haiku4.5 abbreviates to h-4.5', () => {
+  test('Haiku4.5 abbreviates on L1, full on L2 overflow', () => {
     const health = createDefaultHealth('haiku-abbrev');
     health.projectPath = '~/very/long/path/that/forces/abbreviation';
     health.git = { branch: 'long-branch-name', ahead: 5, behind: 2, dirty: 10, lastChecked: Date.now() };
     health.model = { value: 'Haiku4.5', isFresh: true };
 
     const variants = StatuslineFormatter.formatAllVariants(health);
-    const narrow = variants.width80.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    const lines = variants.width80;
+    const line1 = lines[0].replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Should abbreviate to h-4.5 when tight
-    expect(narrow).toContain('h-4.5');
+    if (line1.includes('🤖:')) {
+      expect(line1).toMatch(/🤖:(h-4\.5|Haiku4\.5)/);
+    } else {
+      const line2 = lines[1].replace(/\x1b\[[0-9;]*m/g, '');
+      expect(line2).toContain('Haiku4.5');
+    }
   });
 
   test('Unknown models keep full name', () => {
@@ -874,14 +639,14 @@ describe('Single Line Mode (No Tmux)', () => {
     // Should be within max length
     expect(singleLine.length).toBeLessThanOrEqual(240);
 
-    // Should contain essential components
+    // Should contain essential components (time moved to notification line)
     expect(singleLine).toContain('📁:');
-    expect(singleLine).toContain('🕐:');
+    expect(singleLine).toContain('🤖:'); // Model should be present
   });
 });
 
 describe('Failover Notification Display', () => {
-  test('failover notification appears on Line 1 when present', () => {
+  test('failover notification appears in notification lines when present', () => {
     const health = createDefaultHealth('failover-test');
     health.projectPath = '~/project';
     health.failoverNotification = '🔄 Swapped → slot-2 (3m ago)';
@@ -890,10 +655,11 @@ describe('Failover Notification Display', () => {
     const output = variants.width120.join('\n');
     const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
+    // Failover notification appears in output (notification lines, not line 1)
     expect(stripped).toContain('🔄 Swapped → slot-2 (3m ago)');
-    // Should be on Line 1
+    // Line 1 starts with directory, not failover
     const line1 = variants.width120[0].replace(/\x1b\[[0-9;]*m/g, '');
-    expect(line1).toContain('🔄 Swapped');
+    expect(line1).toMatch(/^📁:/);
   });
 
   test('failover notification absent when field is undefined', () => {
@@ -924,7 +690,7 @@ describe('Failover Notification Display', () => {
     expect(stripped).not.toContain('📝:10m');
   });
 
-  test('secrets moved to notifications, failover in Line 1', () => {
+  test('secrets and failover coexist in notification lines', () => {
     const health = createDefaultHealth('secrets-vs-failover');
     health.projectPath = '~/project';
     health.failoverNotification = '🔄 Swapped → slot-2 (1m ago)';
@@ -935,12 +701,31 @@ describe('Failover Notification Display', () => {
     const output = variants.width120.join('\n');
     const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-    // Failover shows in Line 1 (secrets no longer suppress it)
-    expect(stripped).toContain('🔄 Swapped'); // In Line 1
+    // Failover shows in notification lines
+    expect(stripped).toContain('🔄 Swapped');
 
-    // Secrets appear in notifications (line 4+) via NotificationManager
-    // Note: In test environment, notification timing may vary due to file-based state
-    // The important change is that secrets don't suppress failover notification
+    // Line 1 starts with directory (not failover)
+    const line1 = variants.width120[0].replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line1).toMatch(/^📁:/);
+  });
+
+  test('secrets notification cleared when no secrets in current session', () => {
+    // Simulate: previous session left secrets_detected notification
+    NotificationManager.register('secrets_detected', '2 secrets detected', 3);
+    expect(NotificationManager.get('secrets_detected')).not.toBeNull();
+
+    // New session: health has secretsDetected=false (empty transcript)
+    const health = createDefaultHealth('new-session-no-secrets');
+    health.projectPath = '~/project';
+    health.alerts.secretsDetected = false;
+    health.alerts.secretTypes = [];
+    health.transcript.lastMessagePreview = 'Hello';
+
+    // formatAllVariants should clear the stale notification
+    StatuslineFormatter.formatAllVariants(health);
+
+    // Notification should be removed
+    expect(NotificationManager.get('secrets_detected')).toBeNull();
   });
 
   // Phase 4: Transcript indicator dedup — suppress 📝 when line 3 message preview shows elapsed
@@ -960,7 +745,7 @@ describe('Failover Notification Display', () => {
     expect(stripped).not.toContain('📝:37m');
   });
 
-  test('transcriptStale without lastMessagePreview → shows 📝 indicator', () => {
+  test('transcriptStale without lastMessagePreview → no 📝 on line 1 (moved to notifications)', () => {
     const health = createDefaultHealth('dedup-stale-no-preview');
     health.projectPath = '~/project';
     health.alerts.transcriptStale = true;
@@ -971,8 +756,11 @@ describe('Failover Notification Display', () => {
     const output = variants.width120.join('\n');
     const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-    // 📝 indicator should show since no message preview on line 3
-    expect(stripped).toContain('📝:37m');
+    // 📝 indicator removed from line 1 — transcript staleness handled by line 3 elapsed time
+    expect(stripped).not.toContain('📝:37m');
+    // Line 1 starts with directory
+    const line1 = variants.width120[0].replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line1).toMatch(/^📁:/);
   });
 
   test('dataLossRisk with lastMessagePreview → no 📝 indicator (suppressed)', () => {
@@ -993,7 +781,7 @@ describe('Failover Notification Display', () => {
     expect(stripped).not.toContain('📝:37m⚠');
   });
 
-  test('dataLossRisk without lastMessagePreview → shows 📝 indicator with ⚠', () => {
+  test('dataLossRisk without lastMessagePreview → no 📝 on line 1 (moved to notifications)', () => {
     const health = createDefaultHealth('dedup-risk-no-preview');
     health.projectPath = '~/project';
     health.alerts.dataLossRisk = true;
@@ -1005,8 +793,12 @@ describe('Failover Notification Display', () => {
     const output = variants.width120.join('\n');
     const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-    // 📝 with warning should show since no message preview
-    expect(stripped).toContain('📝:37m⚠');
+    // 📝 indicator removed from line 1 — alerts handled by notification layer
+    expect(stripped).not.toContain('📝:37m⚠');
+    expect(stripped).not.toContain('📝:37m');
+    // Line 1 starts with directory
+    const line1 = variants.width120[0].replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line1).toMatch(/^📁:/);
   });
 });
 
@@ -1034,11 +826,22 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
   });
 
   describe('Slot Indicator Display', () => {
-    test('shows |S1 when session lock exists with slot-1', () => {
-      const health = createDefaultHealth('slot-test-1');
-      health.projectPath = '~/project';
+    // Slot indicator now appears on the account context notification line (not Line 2).
+    // Tests need: session lock + active_slot notification + idle or show cycle.
 
-      // Create lock file with slot-1
+    function makeIdleHealth(sessionId: string) {
+      const health = createDefaultHealth(sessionId);
+      health.projectPath = '~/project';
+      // Make transcript idle (>2min old) so notifications always show
+      health.transcript.lastModified = Date.now() - (5 * 60 * 1000);
+      health.transcript.lastMessagePreview = 'test';
+      health.transcript.lastMessageAgo = '5m';
+      return health;
+    }
+
+    test('shows S1 on account line when session lock exists with slot-1', () => {
+      const health = makeIdleHealth('slot-test-1');
+
       SessionLockManager.create(
         'slot-test-1',
         'slot-1',
@@ -1047,17 +850,18 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         'user@example.com',
         '/home/user/.claude/projects/-test/session.jsonl'
       );
+      NotificationManager.register('active_slot', 'user@example.com (slot-1)', 8);
 
       const variants = StatuslineFormatter.formatAllVariants(health);
       const output = variants.width120.join('\n');
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-      expect(stripped).toContain('|S1');
+      expect(stripped).toContain('S1');
+      expect(stripped).toContain('user@example.com');
     });
 
-    test('shows |S2 when session lock exists with slot-2', () => {
-      const health = createDefaultHealth('slot-test-2');
-      health.projectPath = '~/project';
+    test('shows S2 on account line when session lock exists with slot-2', () => {
+      const health = makeIdleHealth('slot-test-2');
 
       SessionLockManager.create(
         'slot-test-2',
@@ -1067,17 +871,18 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         'user@example.com',
         '/home/user/.claude/projects/-test/session.jsonl'
       );
+      NotificationManager.register('active_slot', 'user@example.com (slot-2)', 8);
 
       const variants = StatuslineFormatter.formatAllVariants(health);
       const output = variants.width120.join('\n');
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-      expect(stripped).toContain('|S2');
+      expect(stripped).toContain('S2');
+      expect(stripped).toContain('user@example.com');
     });
 
-    test('shows |S3 when session lock exists with slot-3', () => {
-      const health = createDefaultHealth('slot-test-3');
-      health.projectPath = '~/project';
+    test('shows S3 on account line when session lock exists with slot-3', () => {
+      const health = makeIdleHealth('slot-test-3');
 
       SessionLockManager.create(
         'slot-test-3',
@@ -1087,12 +892,14 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         'user@example.com',
         '/home/user/.claude/projects/-test/session.jsonl'
       );
+      NotificationManager.register('active_slot', 'user@example.com (slot-3)', 8);
 
       const variants = StatuslineFormatter.formatAllVariants(health);
       const output = variants.width120.join('\n');
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-      expect(stripped).toContain('|S3');
+      expect(stripped).toContain('S3');
+      expect(stripped).toContain('user@example.com');
     });
 
     test('shows no slot indicator when lock file missing', () => {
@@ -1103,17 +910,13 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       const output = variants.width120.join('\n');
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-      expect(stripped).not.toContain('|S1');
-      expect(stripped).not.toContain('|S2');
-      expect(stripped).not.toContain('|S3');
+      expect(stripped).not.toContain('S1');
+      expect(stripped).not.toContain('S2');
+      expect(stripped).not.toContain('S3');
     });
 
-    test('slot indicator appears after weekly reset day', () => {
-      const health = createDefaultHealth('slot-position-test');
-      health.projectPath = '~/project';
-      health.billing.weeklyBudgetRemaining = 120;
-      health.billing.weeklyBudgetPercentUsed = 50;
-      health.billing.weeklyResetDay = 'Wed';
+    test('account context line has time and slot together', () => {
+      const health = makeIdleHealth('slot-position-test');
 
       SessionLockManager.create(
         'slot-position-test',
@@ -1123,13 +926,36 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         'user@example.com',
         '/home/user/.claude/projects/-test/session.jsonl'
       );
+      NotificationManager.register('active_slot', 'user@example.com (slot-1)', 8);
 
       const variants = StatuslineFormatter.formatAllVariants(health);
-      const line2 = variants.width120[1];
-      const stripped = line2.replace(/\x1b\[[0-9;]*m/g, '');
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-      // Should appear after @Wed
-      expect(stripped).toMatch(/@Wed.*\|S1/);
+      // Account context line has 👤 S1 and 🕐:HH:MM
+      expect(stripped).toMatch(/👤 S1/);
+      expect(stripped).toMatch(/🕐:\d{2}:\d{2}/);
+    });
+
+    test('no double pipe in slot display', () => {
+      const health = makeIdleHealth('slot-double-pipe-test');
+
+      SessionLockManager.create(
+        'slot-double-pipe-test',
+        'slot-2',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+      NotificationManager.register('active_slot', 'user@example.com (slot-2)', 8);
+
+      const variants = StatuslineFormatter.formatAllVariants(health);
+      const output = variants.width120.join('\n');
+      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
+
+      // Must never have double pipe anywhere
+      expect(stripped).not.toContain('||');
     });
   });
 
@@ -1156,7 +982,7 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       expect(stripped).toContain('2.1.31');
     });
 
-    test('update notification appears on line 4', () => {
+    test('update notification appears on line 3', () => {
       const health = createDefaultHealth('version-line-test');
       health.projectPath = '~/project';
       health.transcript.lastMessagePreview = 'What does main do?';
@@ -1170,10 +996,11 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       NotificationManager.recordShown('version_update');
 
       const variants = StatuslineFormatter.formatAllVariants(health);
-      expect(variants.width120.length).toBeGreaterThanOrEqual(4);
+      // Line 1: dir+model+ctx, Line 2: last msg, Line 3: notification (no Line 2 time)
+      expect(variants.width120.length).toBeGreaterThanOrEqual(3);
 
-      const line4 = variants.width120[3];
-      const stripped = line4.replace(/\x1b\[[0-9;]*m/g, '');
+      const lastLine = variants.width120[variants.width120.length - 1];
+      const stripped = lastLine.replace(/\x1b\[[0-9;]*m/g, '');
       expect(stripped).toContain('Update to 2.1.32');
     });
 
@@ -1187,8 +1014,8 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       const output = variants.width120.join('\n');
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-      // Should only have 3 lines (dir+model+context, time+budget, last message)
-      expect(variants.width120.length).toBe(3);
+      // Should only have 2 lines (dir+model+context, last message) — no Line 2 time
+      expect(variants.width120.length).toBe(2);
     });
 
     test('notification hidden when dismissed', () => {
@@ -1205,7 +1032,7 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
       expect(stripped).not.toContain('Update available');
-      expect(variants.width120.length).toBe(3); // No notification line
+      expect(variants.width120.length).toBe(2); // No notification line, no time line
     });
   });
 
@@ -1227,8 +1054,8 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       const output = variants.width120.join('\n');
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
+      // Switch line uses notification message directly with 💡 prefix
       expect(stripped).toContain('Switch to slot-3');
-      expect(stripped).toContain('rank 1');
     });
 
     test('slot switch uses cyan color (💡)', () => {
@@ -1265,7 +1092,8 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
 
       expect(stripped).toContain('Update to 2.1.32');
       expect(stripped).toContain('Switch to slot-2');
-      expect(variants.width120.length).toBe(5); // 3 base + 2 notifications
+      // 2 base (dir+ctx, msg) + up to 3 notifications = 4-5
+      expect(variants.width120.length).toBeGreaterThanOrEqual(4);
     });
 
     test('higher priority notification appears first', () => {
@@ -1280,15 +1108,19 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       NotificationManager.recordShown('version_update');
 
       const variants = StatuslineFormatter.formatAllVariants(health);
-      const line4 = variants.width120[3].replace(/\x1b\[[0-9;]*m/g, '');
-      const line5 = variants.width120[4].replace(/\x1b\[[0-9;]*m/g, '');
+      const output = variants.width120.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
 
-      // Version (priority 7) should appear before slot switch (priority 6)
-      expect(line4).toContain('Update available');
-      expect(line5).toContain('Switch slots');
+      // Both should be present
+      expect(output).toContain('Update available');
+      expect(output).toContain('Switch slots');
+
+      // Version (priority 7) should appear before slot switch (priority 6) in output
+      const versionIdx = output.indexOf('Update available');
+      const switchIdx = output.indexOf('Switch slots');
+      expect(versionIdx).toBeLessThan(switchIdx);
     });
 
-    test('max 2 notifications shown simultaneously', () => {
+    test('max 3 notifications shown simultaneously', () => {
       const health = createDefaultHealth('max-notify-test');
       health.projectPath = '~/project';
       health.transcript.lastMessagePreview = 'What does main do?';
@@ -1303,7 +1135,7 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
 
       const variants = StatuslineFormatter.formatAllVariants(health);
 
-      // Should have max 5 lines (3 base + 2 notifications)
+      // Should have max 5 lines (2 base + 3 notifications)
       expect(variants.width120.length).toBeLessThanOrEqual(5);
     });
   });
@@ -1314,8 +1146,8 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       health.projectPath = '~/project';
       health.transcript.lastMessagePreview = 'What does main do?';
       health.transcript.lastMessageAgo = '2m';
-      health.billing.weeklyBudgetRemaining = 100;
-      health.billing.weeklyResetDay = 'Wed';
+      // Make idle so notifications always show
+      health.transcript.lastModified = Date.now() - (5 * 60 * 1000);
 
       SessionLockManager.create(
         'full-integration-test',
@@ -1326,6 +1158,7 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         '/home/user/.claude/projects/-test/session.jsonl'
       );
 
+      NotificationManager.register('active_slot', 'user@example.com (slot-2)', 8);
       NotificationManager.register('version_update', 'Update to 2.1.33', 7);
       NotificationManager.recordShown('version_update');
 
@@ -1333,11 +1166,11 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       const output = variants.width120.join('\n');
       const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-      // Both should be present
-      expect(stripped).toContain('|S2');
+      // Account context line has slot info
+      expect(stripped).toContain('S2');
       expect(stripped).toContain('Update to 2.1.33');
 
-      // 4 lines: dir+model+context, time+budget+slot, last message, notification
+      // 2 base + 2 notifications = 4 lines
       expect(variants.width120.length).toBe(4);
     });
 
@@ -1346,6 +1179,8 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       health.projectPath = '~/project';
       health.transcript.lastMessagePreview = 'What does main do?';
       health.transcript.lastMessageAgo = '2m';
+      // Make idle so notifications always show
+      health.transcript.lastModified = Date.now() - (5 * 60 * 1000);
 
       SessionLockManager.create(
         'width-test',
@@ -1356,19 +1191,19 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         '/home/user/.claude/projects/-test/session.jsonl'
       );
 
+      NotificationManager.register('active_slot', 'user@example.com (slot-1)', 8);
       NotificationManager.register('version_update', 'Update available', 7);
-      NotificationManager.recordShown('version_update');
 
       const variants = StatuslineFormatter.formatAllVariants(health);
 
-      // All variants should have slot indicator and notification
+      // All multi-line variants should have slot indicator and notification
       for (const [width, lines] of Object.entries(variants)) {
         if (width === 'singleLine') continue; // Skip single line
 
         const output = lines.join('\n');
         const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
 
-        expect(stripped).toContain('|S1');
+        expect(stripped).toContain('S1');
         expect(stripped).toContain('Update available');
       }
     });

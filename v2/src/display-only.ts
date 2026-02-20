@@ -22,6 +22,17 @@
  * - Written by: separate data-daemon (async, background)
  */
 
+// Process-level safety nets — register BEFORE imports to catch import failures
+process.on('uncaughtException', () => {
+  try { process.stdout.write('⚠:ERR'); } catch { /* last resort */ }
+  process.exit(0); // Exit cleanly — never propagate to parent
+});
+process.on('unhandledRejection', () => {
+  try { process.stdout.write('⚠:ERR'); } catch { /* last resort */ }
+  process.exit(0);
+});
+process.stdout.on('error', () => { process.exit(0); });
+
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { StatuslineFormatter } from './lib/statusline-formatter';
@@ -489,6 +500,24 @@ function fmtHealthStatus(h: SessionHealth): string {
   return '';
 }
 
+/**
+ * Format model ID to display name: "claude-opus-4-6" → "Opus4.6", "Opus" → "Opus"
+ * Already-formatted names pass through: "Opus4.5" → "Opus4.5"
+ * Inline (no imports) — display-only architectural guarantee.
+ */
+function formatModelId(modelId: string): string {
+  const lower = modelId.toLowerCase();
+  // Extract version: "claude-opus-4-6" → "4.6", "claude-sonnet-4-5-20250929" → "4.5"
+  const dashVersion = lower.match(/(\d+)-(\d+)(?:-\d|$)/);
+  // Also detect already-formatted: "Opus4.5" → keep as-is via dot version
+  const dotVersion = lower.match(/(\d+\.\d+)/);
+  const version = dashVersion ? `${dashVersion[1]}.${dashVersion[2]}` : (dotVersion ? dotVersion[1] : '');
+  if (lower.includes('opus')) return `Opus${version}`;
+  if (lower.includes('sonnet')) return `Sonnet${version}`;
+  if (lower.includes('haiku')) return `Haiku${version}`;
+  return modelId;
+}
+
 // ============================================================================
 // Main Display Logic
 // ============================================================================
@@ -508,7 +537,12 @@ function display(): void {
       // Extract directory from Claude Code input (most reliable source)
       stdinDirectory = parsed?.start_directory || parsed?.workspace?.current_dir || parsed?.cwd || null;
       // Extract model from stdin (takes priority over cached)
-      stdinModel = parsed?.model?.display_name || parsed?.model?.id || parsed?.model?.model_id || parsed?.model?.name || null;
+      // Prefer model.id (has version: "claude-opus-4-6") over display_name (just "Opus")
+      // formatModelName will prettify: "claude-opus-4-6" → "Opus4.6"
+      stdinModel = parsed?.model?.id || parsed?.model?.model_id || parsed?.model?.display_name || parsed?.model?.name || null;
+      if (stdinModel) {
+        stdinModel = formatModelId(stdinModel);
+      }
 
       // Calculate cache hit ratio from context_window data (V1 parity)
       const currentInput = parsed?.context_window?.current_usage?.input_tokens || 0;
@@ -559,45 +593,12 @@ function display(): void {
       const model = (stdinModel || 'Claude').replace(/\s+/g, '');
       parts.push(`🤖:${c('model')}${model}${rst()}`);
 
-      parts.push(fmtTime());
+      // Context window from stdin (available even before health file)
+      if (stdinContext && stdinContext.tokensLeft > 0) {
+        parts.push(fmtContext({ context: stdinContext } as any));
+      }
 
-      // Try to get billing/quota from global data cache first, then shared billing cache
-      try {
-        const dataCachePath = `${HEALTH_DIR}/data-cache.json`;
-        let gotBilling = false;
-        if (existsSync(dataCachePath)) {
-          const dataCache = JSON.parse(readFileSync(dataCachePath, 'utf-8'));
-          if (dataCache?.version === 2 && dataCache?.sources) {
-            // Billing from data cache
-            const billingEntry = dataCache.sources.billing;
-            if (billingEntry?.data?.billing?.costToday > 0) {
-              const cost = formatMoney(billingEntry.data.billing.costToday);
-              parts.push(`💰:${c('cost')}${cost}${rst()}`);
-              gotBilling = true;
-            }
-            // Quota from data cache
-            const quotaEntry = dataCache.sources.quota;
-            if (quotaEntry?.data?.weeklyBudgetRemaining) {
-              const hours = Math.floor(quotaEntry.data.weeklyBudgetRemaining);
-              const pct = quotaEntry.data.weeklyBudgetPercentUsed || 0;
-              parts.push(`📅:${c('budget')}${hours}h(${pct}%)${rst()}`);
-            }
-          }
-        }
-        // Fallback: shared billing cache (legacy)
-        if (!gotBilling) {
-          const sharedBillingPath = `${HEALTH_DIR}/billing-shared.json`;
-          if (existsSync(sharedBillingPath)) {
-            const billing = JSON.parse(readFileSync(sharedBillingPath, 'utf-8'));
-            if (billing?.costToday > 0) {
-              const cost = formatMoney(billing.costToday);
-              parts.push(`💰:${c('cost')}${cost}${rst()}`);
-            }
-          }
-        }
-      } catch { /* ignore */ }
-
-      // Small indicator that health is loading (not scary error message)
+      // Loading indicator — health file being created by daemon
       parts.push(`${c('stale')}⏳${rst()}`);
 
       process.stdout.write(parts.join(' '));
@@ -620,18 +621,14 @@ function display(): void {
 
     let variant: string[];
 
-    // Check if stdin has overrides (directory, model, or context) that differ from cached health
-    // If stdin has fresh context data, ALWAYS regenerate to show accurate token counts
-    const hasStdinOverrides = (stdinDirectory && stdinDirectory !== health.projectPath) ||
-                               (stdinModel && stdinModel !== health.model?.value) ||
-                               (stdinContext && stdinContext.tokensUsed > 0);
-
     // Helper to select variant based on width
     const selectVariant = (variants: any): string[] => {
       if (noTmux) {
         // No tmux: use single-line mode (max 240 chars)
         return variants.singleLine || variants.width120;
       }
+      // Ultra-narrow: force single-line to avoid catastrophic wrapping
+      if (paneWidth <= 30) return variants.singleLine || variants.width40;
       if (paneWidth <= 50) return variants.width40;
       if (paneWidth <= 70) return variants.width60;
       if (paneWidth <= 90) return variants.width80;
@@ -641,30 +638,36 @@ function display(): void {
       return variants.width200;
     };
 
-    if (health.formattedOutput && !hasStdinOverrides) {
-      // Use pre-formatted variant (fast path)
-      variant = selectVariant(health.formattedOutput);
-    } else {
-      // Fallback: Generate on-the-fly (backwards compatibility until daemon runs)
-      // Merge stdin data (start_directory, model, context) into health before formatting
-      const healthWithStdin = { ...health } as any;
-      if (stdinDirectory) {
-        healthWithStdin.projectPath = stdinDirectory;
-      }
-      if (stdinModel) {
-        healthWithStdin.model = healthWithStdin.model || {};
-        healthWithStdin.model.value = stdinModel;
-      }
-      // CRITICAL: Use fresh context data from stdin (most accurate)
-      if (stdinContext) {
-        healthWithStdin.context = healthWithStdin.context || {};
-        healthWithStdin.context.tokensUsed = stdinContext.tokensUsed;
-        healthWithStdin.context.tokensLeft = stdinContext.tokensLeft;
-        healthWithStdin.context.percentUsed = stdinContext.percentUsed;
-      }
+    // Always regenerate formatting on-the-fly (<5ms, pure computation).
+    // Pre-formatted output from daemon is stale for: notifications (idle state
+    // changes after daemon runs), time (clock drift), stdin overrides (context).
+    // Merge stdin data (start_directory, model, context) into health before formatting
+    const healthWithStdin = { ...health } as any;
+    if (stdinDirectory) {
+      healthWithStdin.projectPath = stdinDirectory;
+    }
+    if (stdinModel) {
+      healthWithStdin.model = healthWithStdin.model || {};
+      healthWithStdin.model.value = stdinModel;
+    }
+    // CRITICAL: Use fresh context data from stdin (most accurate)
+    if (stdinContext) {
+      healthWithStdin.context = healthWithStdin.context || {};
+      healthWithStdin.context.tokensUsed = stdinContext.tokensUsed;
+      healthWithStdin.context.tokensLeft = stdinContext.tokensLeft;
+      healthWithStdin.context.percentUsed = stdinContext.percentUsed;
+    }
 
-      const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin);
-      variant = selectVariant(allVariants);
+    const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin);
+    variant = selectVariant(allVariants);
+
+    // Max output guard: trim lines from bottom to cap total visible length.
+    // Prevents catastrophic wrapping when Claude Code notifications share
+    // the rendering area and squeeze our output into tiny space.
+    const MAX_STATUSLINE_CHARS = 400;
+    const visLen = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '').length;
+    while (variant.length > 1 && variant.reduce((sum, l) => sum + visLen(l), 0) > MAX_STATUSLINE_CHARS) {
+      variant.pop();
     }
 
     // Output with newlines between lines (NO trailing newline)

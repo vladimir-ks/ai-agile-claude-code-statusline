@@ -117,8 +117,15 @@ export class QuotaBrokerClient {
 
       // Layer 3: If merged cache OR any slot is stale, trigger background refresh
       if ((!parsed.is_fresh || anySlotStale) && !this.isLockAlive()) {
-        console.log(
-          `[QuotaBrokerClient] Triggering background refresh (merged_cache_stale=${!parsed.is_fresh}, slot_data_stale=${anySlotStale})`
+        const staleSlots = Object.entries(parsed.slots || {})
+          .filter(([, s]) => {
+            const age = Math.floor(now / 1000) - Math.floor((s.last_fetched || 0) / 1000);
+            return age > STALE_THRESHOLD_S;
+          })
+          .map(([id, s]) => `${id}(${Math.floor((Math.floor(now / 1000) - Math.floor((s.last_fetched || 0) / 1000)) / 60)}min)`);
+        console.error(
+          `[QuotaBrokerClient] Triggering background refresh ` +
+          `(merged_cache_stale=${!parsed.is_fresh}, stale_slots=[${staleSlots.join(',')}])`
         );
         this.spawnBroker();
       }
@@ -182,7 +189,7 @@ export class QuotaBrokerClient {
           slot = s;
           matchedSlotId = id;
           matchStrategy = 'keychain_service';
-          console.log(
+          console.error(
             `[QuotaBrokerClient] ✓ Matched slot ${id} by keychainService="${keychainService}" ` +
             `(email: ${s.email}, util: ${s.seven_day_util}%)`
           );
@@ -199,7 +206,7 @@ export class QuotaBrokerClient {
           slot = s;
           matchedSlotId = id;
           matchStrategy = 'email';
-          console.log(
+          console.error(
             `[QuotaBrokerClient] ✓ Matched slot ${id} by authEmail="${authEmail}" ` +
             `(util: ${s.seven_day_util}%)`
           );
@@ -215,7 +222,7 @@ export class QuotaBrokerClient {
           slot = s;
           matchedSlotId = id;
           matchStrategy = 'config_dir';
-          console.log(
+          console.error(
             `[QuotaBrokerClient] ✓ Matched slot ${id} by configDir="${configDir}" ` +
             `(email: ${s.email}, util: ${s.seven_day_util}%)`
           );
@@ -233,6 +240,7 @@ export class QuotaBrokerClient {
     if (!slot && slotEntries.length === 1) {
       slot = slotEntries[0][1];
       matchedSlotId = slotEntries[0][0];
+      matchStrategy = 'single_slot';
     }
 
     // Strategy 4: Lowest rank (best available, skip inactive)
@@ -243,6 +251,7 @@ export class QuotaBrokerClient {
           bestRank = s.rank;
           slot = s;
           matchedSlotId = id;
+          matchStrategy = 'lowest_rank';
         }
       }
     }
@@ -257,6 +266,15 @@ export class QuotaBrokerClient {
         `This indicates a configuration mismatch - broker data doesn't match current session.`
       );
       return null;
+    }
+
+    // Log final match result (all strategies)
+    if (matchStrategy !== 'keychain_service' && matchStrategy !== 'email' && matchStrategy !== 'config_dir') {
+      // Strategies 0/0.5/1 already log individually above
+      console.error(
+        `[QuotaBrokerClient] ✓ Matched slot ${matchedSlotId} by ${matchStrategy} ` +
+        `(email: ${slot.email}, util: ${slot.seven_day_util}%)`
+      );
     }
 
     // CRITICAL: Don't trust is_fresh field alone - validate actual data age
@@ -327,7 +345,19 @@ export class QuotaBrokerClient {
     const subType = recommended.subscription_type || '';
     const weeklyUtil = recommended.seven_day_util;
 
-    return `Switch to ${data.recommended_slot} (${email}, ${subType}, ${weeklyUtil}% used, ${budgetHours}h budget)`;
+    // Rich format: S3|email|⌛:Xh(Y%)|📅:Zh(W%)@Day
+    const slotMatch = data.recommended_slot.match(/slot-(\d+)/);
+    const slotNum = slotMatch ? slotMatch[1] : '?';
+    const pct5h = Math.round(recommended.five_hour_util || 0);
+    const h5 = Math.floor(((100 - pct5h) / 100) * 5);
+    const m5 = Math.round((((100 - pct5h) / 100) * 5 - h5) * 60);
+    const dailyBudget = m5 > 0 ? `${h5}h${m5}m(${pct5h}%)` : `${h5}h(${pct5h}%)`;
+    const resetDay = recommended.weekly_reset_day || '';
+    const weeklyQuota = resetDay
+      ? `${budgetHours}h(${weeklyUtil}%)@${resetDay}`
+      : `${budgetHours}h(${weeklyUtil}%)`;
+
+    return `Switch to S${slotNum}|${email}|⌛:${dailyBudget}|📅:${weeklyQuota}`;
   }
 
   /**
@@ -378,16 +408,26 @@ export class QuotaBrokerClient {
         return;
       }
 
-      const child = spawn('bash', [brokerScript], {
+      // Layer 5: Wrap with 45s timeout to prevent infinite hangs on API calls
+      // timeout -k sends SIGKILL after 5s grace period if SIGTERM is ignored
+      const child = spawn('timeout', ['-k', '5', '45', 'bash', brokerScript], {
         detached: true,
         stdio: ['ignore', 'ignore', 'pipe']  // Capture stderr for error detection
       });
 
       // Capture stderr to detect silent failures (OAuth expiry, script errors)
+      // Cap at 10KB to prevent unbounded memory growth if broker fails verbosely
       if (child.stderr) {
         let stderrData = '';
+        const MAX_STDERR = 10 * 1024;
         child.stderr.on('data', (data) => {
-          stderrData += data.toString();
+          if (stderrData.length < MAX_STDERR) {
+            stderrData += data.toString();
+            if (stderrData.length > MAX_STDERR) {
+              stderrData = stderrData.substring(0, MAX_STDERR);
+              child.stderr?.removeAllListeners('data');
+            }
+          }
         });
 
         child.on('exit', (code) => {

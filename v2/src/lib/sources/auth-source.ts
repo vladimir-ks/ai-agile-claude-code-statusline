@@ -1,12 +1,25 @@
 /**
  * Auth Source — Tier 2 (per-session)
  *
- * Detects authentication profile for the current session:
- *   1. AuthProfileDetector.detectProfile() — generic detection
- *   2. KeychainResolver.resolveFromTranscript() — session-specific configDir
- *   3. HotSwapQuotaReader.getSlotByConfigDir() — precise slot matching
+ * Detects which account is active for the current session.
  *
- * Provides configDir, keychainService, authProfile, and detectionMethod.
+ * Detection priority:
+ *   1. SESSION-LOCKED: Already detected via trusted method → reuse
+ *   2. KEYCHAIN IDENTITY: Read oauthAccount.emailAddress from keychain blob
+ *   3. CONFIG DIR PATH: Match configDir to hot-swap slot
+ *   4. .claude.json oauthAccount: Fallback (can be stale)
+ *   5. API FINGERPRINT: Last resort for destroyed keychains
+ *   6. DEFAULT: AuthProfileDetector generic
+ *
+ * Session lock persists until:
+ *   - Session ends and a new one starts (fresh detection)
+ *   - User runs /login inside the session (auth-change detector clears identity)
+ *
+ * Keychain blob structure (written by Claude Code on /login):
+ *   { claudeAiOauth: { accessToken, ... }, oauthAccount: { emailAddress, accountUuid, ... } }
+ *
+ * The oauthAccount section survives token refreshes (when refresh code is correct)
+ * and is the GROUND TRUTH for which account owns the keychain entry.
  */
 
 import type { DataSourceDescriptor, GatherContext } from './types';
@@ -15,6 +28,9 @@ import { AuthProfileDetector } from '../../modules/auth-profile-detector';
 import { KeychainResolver } from '../../modules/keychain-resolver';
 import { HotSwapQuotaReader } from '../hot-swap-quota-reader';
 import { NotificationManager } from '../notification-manager';
+import { existsSync, readFileSync } from 'fs';
+import { resolve } from 'path';
+import { homedir } from 'os';
 
 export interface AuthSourceData {
   authProfile: string;
@@ -24,11 +40,96 @@ export interface AuthSourceData {
   slotId: string | null;
 }
 
+/**
+ * Find slot by email in hot-swap cache.
+ */
+function findSlotByEmail(email: string, cache: Record<string, any>): string | null {
+  for (const [slotId, slotData] of Object.entries(cache)) {
+    if (slotData?.email && slotData.email.toLowerCase() === email.toLowerCase()) {
+      return slotId;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read .claude.json oauthAccount.emailAddress as fallback.
+ * WARNING: Can be stale — use only when keychain identity is unavailable.
+ */
+function readOAuthEmailFromClaudeJson(configDir: string | null): string | null {
+  try {
+    const dir = configDir || resolve(homedir(), '.claude');
+    const statePath = resolve(dir, '.claude.json');
+    if (!existsSync(statePath)) return null;
+
+    const raw = readFileSync(statePath, 'utf-8');
+    const state = JSON.parse(raw);
+    const email = state?.oauthAccount?.emailAddress;
+    return typeof email === 'string' && email.includes('@') ? email : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * API utilization fingerprint — last resort when keychain has no identity.
+ * Calls Anthropic API with session's token, matches utilization against known slots.
+ */
+async function detectViaApiFingerprint(
+  keychainService: string,
+  cache: Record<string, any>
+): Promise<{ email: string; slotId: string } | null> {
+  try {
+    const entry = KeychainResolver.readKeychainEntry(keychainService);
+    if (!entry?.accessToken || entry.isExpired) return null;
+
+    const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${entry.accessToken}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json() as Record<string, any>;
+    const fiveHour = data?.five_hour?.utilization ?? -1;
+    const sevenDay = data?.seven_day?.utilization ?? -1;
+    if (sevenDay < 0) return null;
+
+    // Match against slots by utilization proximity
+    let bestMatch: { slotId: string; email: string; distance: number } | null = null;
+    for (const [slotId, slotData] of Object.entries(cache)) {
+      if (!slotData?.email) continue;
+      const sevenDayDist = Math.abs(sevenDay - (slotData.seven_day_util ?? -999));
+      const fiveHourDist = Math.abs(fiveHour - (slotData.five_hour_util ?? -999));
+      const distance = sevenDayDist * 2 + fiveHourDist;
+      if (sevenDayDist <= 5 && fiveHourDist <= 10) {
+        if (!bestMatch || distance < bestMatch.distance) {
+          bestMatch = { slotId, email: slotData.email, distance };
+        }
+      }
+    }
+
+    if (bestMatch) {
+      console.error(
+        `[AuthSource] API fingerprint: 5h=${fiveHour}%/7d=${sevenDay}% → ${bestMatch.email} (${bestMatch.slotId})`
+      );
+    }
+    return bestMatch ? { email: bestMatch.email, slotId: bestMatch.slotId } : null;
+  } catch {
+    return null;
+  }
+}
+
 export const authSource: DataSourceDescriptor<AuthSourceData> = {
   id: 'auth_profile',
   tier: 2,
   freshnessCategory: 'auth_profile',
-  timeoutMs: 1000, // File reads only
+  timeoutMs: 2000, // Keychain read is fast; API fingerprint only as fallback
 
   async fetch(ctx: GatherContext): Promise<AuthSourceData> {
     // Step 1: Resolve configDir and keychainService from transcript path
@@ -36,38 +137,87 @@ export const authSource: DataSourceDescriptor<AuthSourceData> = {
       ctx.transcriptPath
     );
 
-    // Step 2: Match to hot-swap slot if configDir available
     let authProfile = '';
     let detectionMethod = 'default';
     let slotId: string | null = null;
 
-    if (configDir) {
+    // Step 2: SESSION-LOCKED — if already detected via trusted method, reuse
+    const existing = ctx.existingHealth?.launch;
+    const trustedMethods = ['keychain_identity', 'path', 'api_fingerprint'];
+    if (existing?.authProfile &&
+        existing.authProfile !== 'default' &&
+        trustedMethods.includes(existing.detectionMethod || '')) {
+      const cache = HotSwapQuotaReader.read();
+      const resolvedSlotId = cache ? findSlotByEmail(existing.authProfile, cache) : null;
+      return {
+        authProfile: existing.authProfile,
+        detectionMethod: existing.detectionMethod,
+        configDir,
+        keychainService,
+        slotId: resolvedSlotId,
+      };
+    }
+
+    // Step 3: KEYCHAIN IDENTITY — read oauthAccount from keychain blob (BEST)
+    if (keychainService) {
+      const entry = KeychainResolver.readKeychainEntry(keychainService);
+      if (entry?.emailAddress) {
+        authProfile = entry.emailAddress;
+        detectionMethod = 'keychain_identity';
+        const cache = HotSwapQuotaReader.read();
+        slotId = cache ? findSlotByEmail(authProfile, cache) : null;
+        console.error(`[AuthSource] Detected ${authProfile} via keychain identity (${slotId || 'no slot match'})`);
+      }
+    }
+
+    // Step 4: CONFIG DIR PATH — for non-default configDirs (hot-swap slot dirs)
+    if (!authProfile && configDir && configDir !== resolve(homedir(), '.claude')) {
       const matchedSlot = HotSwapQuotaReader.getSlotByConfigDir(configDir);
       if (matchedSlot) {
         authProfile = matchedSlot.email;
         detectionMethod = 'path';
         slotId = matchedSlot.slotId;
+        console.error(`[AuthSource] Detected ${authProfile} via configDir path (${slotId})`);
       }
     }
 
-    // Step 3: Fall back to generic detection if no slot match
+    // Step 5: .claude.json oauthAccount — fallback (can be stale)
+    if (!authProfile) {
+      const oauthEmail = readOAuthEmailFromClaudeJson(configDir);
+      if (oauthEmail) {
+        authProfile = oauthEmail;
+        detectionMethod = 'claude_json_fallback';
+        const cache = HotSwapQuotaReader.read();
+        slotId = cache ? findSlotByEmail(oauthEmail, cache) : null;
+        console.error(`[AuthSource] Fallback .claude.json: ${authProfile} (may be stale)`);
+      }
+    }
+
+    // Step 6: API FINGERPRINT — last resort for destroyed keychains
+    if (!authProfile && keychainService) {
+      const cache = HotSwapQuotaReader.read();
+      if (cache && Object.keys(cache).length > 0) {
+        const match = await detectViaApiFingerprint(keychainService, cache);
+        if (match) {
+          authProfile = match.email;
+          detectionMethod = 'api_fingerprint';
+          slotId = match.slotId;
+        }
+      }
+    }
+
+    // Step 7: Last resort — generic detection
     if (!authProfile) {
       const detected = AuthProfileDetector.detectProfile(
         ctx.projectPath || '',
         ctx.existingHealth?.billing || null,
-        [] // authProfiles from runtime state — no profiles available at this point
+        []
       );
       authProfile = detected.authProfile || '';
       detectionMethod = detected.detectionMethod || 'default';
     }
 
-    return {
-      authProfile,
-      detectionMethod,
-      configDir,
-      keychainService,
-      slotId,
-    };
+    return { authProfile, detectionMethod, configDir, keychainService, slotId };
   },
 
   merge(target: SessionHealth, data: AuthSourceData): void {
@@ -80,14 +230,12 @@ export const authSource: DataSourceDescriptor<AuthSourceData> = {
       target.launch.keychainService = data.keychainService;
     }
 
-    // Register active slot notification (intermittent display)
-    if (data.authProfile && data.slotId) {
-      const message = `Active: ${data.authProfile} (${data.slotId})`;
-      // Priority 3 (low) - informational only, below warnings
-      NotificationManager.register('active_slot', message, 3);
-    } else if (data.authProfile) {
-      const message = `Active: ${data.authProfile}`;
-      NotificationManager.register('active_slot', message, 3);
+    // Register active slot notification (high priority for launch visibility)
+    // Note: emoji prefix added by buildNotifications, not here
+    if (data.authProfile && data.authProfile !== 'default' && data.slotId) {
+      NotificationManager.register('active_slot', `${data.authProfile} (${data.slotId})`, 8);
+    } else if (data.authProfile && data.authProfile !== 'default') {
+      NotificationManager.register('active_slot', `${data.authProfile}`, 8);
     }
   },
 };

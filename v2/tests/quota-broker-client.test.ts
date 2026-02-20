@@ -367,9 +367,10 @@ describe('QuotaBrokerClient', () => {
 
       const msg = QuotaBrokerClient.getSwitchMessage('slot-1');
       expect(msg).not.toBeNull();
-      expect(msg).toContain('slot-2');
+      // Rich format: Switch to S2|email|⌛:Xh(Y%)|📅:Zh(W%)@Day
+      expect(msg).toContain('S2');
       expect(msg).toContain('other@example.com');
-      expect(msg).toContain('40h budget');
+      expect(msg).toContain('📅:40h(80%)');
     });
 
     test('returns null when recommended slot not in slots', () => {

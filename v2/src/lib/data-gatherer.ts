@@ -157,9 +157,23 @@ class DataGatherer {
 
     // 11e. Create or update session lock file (non-critical — Phase 1)
     try {
-      // Only create lock if we have slot resolution
-      const matchedSlot = configDir ? HotSwapQuotaReader.getSlotByConfigDir(configDir) : null;
-      if (matchedSlot && keychainService && health.transcriptPath) {
+      // Match slot by configDir path OR by auth profile email
+      let matchedSlot = configDir ? HotSwapQuotaReader.getSlotByConfigDir(configDir) : null;
+
+      // Fallback: match by auth email (for default ~/.claude sessions)
+      if (!matchedSlot && health.launch?.authProfile && health.launch.authProfile !== 'default') {
+        const cache = HotSwapQuotaReader.read();
+        if (cache) {
+          for (const [slotId, slotData] of Object.entries(cache)) {
+            if (slotData?.email && slotData.email.toLowerCase() === health.launch.authProfile.toLowerCase()) {
+              matchedSlot = { slotId, email: slotData.email, configDir: slotData.config_dir || configDir || '' };
+              break;
+            }
+          }
+        }
+      }
+
+      if (matchedSlot && health.transcriptPath) {
         const tmuxContext = health.tmux ? {
           session: health.tmux.session,
           window: health.tmux.window,
@@ -169,8 +183,8 @@ class DataGatherer {
         SessionLockManager.getOrCreate(
           sessionId,
           matchedSlot.slotId,
-          configDir,
-          keychainService,
+          configDir || matchedSlot.configDir || '',
+          keychainService || '',
           matchedSlot.email,
           health.transcriptPath,
           tmuxContext
