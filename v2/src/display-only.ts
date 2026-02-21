@@ -528,6 +528,7 @@ function display(): void {
     let sessionId: string | null = null;
     let stdinDirectory: string | null = null;
     let stdinModel: string | null = null;
+    let stdinVersion: string | null = null;
     let stdinContext: { tokensUsed: number; tokensLeft: number; percentUsed: number } | null = null;
     let cacheRatio: number | null = null;  // Cache hit ratio from JSON input
     try {
@@ -543,6 +544,8 @@ function display(): void {
       if (stdinModel) {
         stdinModel = formatModelId(stdinModel);
       }
+      // Extract CLI version from stdin (e.g., "1.0.29")
+      stdinVersion = parsed?.version || null;
 
       // Calculate cache hit ratio from context_window data (V1 parity)
       const currentInput = parsed?.context_window?.current_usage?.input_tokens || 0;
@@ -657,15 +660,62 @@ function display(): void {
       healthWithStdin.context.tokensLeft = stdinContext.tokensLeft;
       healthWithStdin.context.percentUsed = stdinContext.percentUsed;
     }
+    // CLI version: use session lock's launch-time version (immutable per session)
+    // This ensures version stays fixed until session restart — critical for
+    // identifying sessions that need restart after CLI updates
+    if (sessionId) {
+      try {
+        const lockPath = `${HEALTH_DIR}/${sessionId}.lock`;
+        const lockData = safeReadJson<{ claudeVersion?: string }>(lockPath);
+        if (lockData?.claudeVersion) {
+          healthWithStdin.cliVersion = lockData.claudeVersion;
+        } else if (stdinVersion) {
+          healthWithStdin.cliVersion = stdinVersion; // Fallback before lock exists
+        }
+      } catch {
+        if (stdinVersion) healthWithStdin.cliVersion = stdinVersion;
+      }
+    } else if (stdinVersion) {
+      healthWithStdin.cliVersion = stdinVersion;
+    }
 
     const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin);
     variant = selectVariant(allVariants);
 
-    // Max output guard: trim lines from bottom to cap total visible length.
-    // Prevents catastrophic wrapping when Claude Code notifications share
-    // the rendering area and squeeze our output into tiny space.
+    // === ANTI-WRAPPING GUARDS ===
+    // Guard 1: Max 6 lines total (prevents vertical overflow)
+    const MAX_LINES = 6;
+    if (variant.length > MAX_LINES) {
+      variant = variant.slice(0, MAX_LINES);
+    }
+
+    // Guard 2: Hard-truncate each line to pane width (prevents horizontal wrapping)
+    // When Claude Code shows its own notifications, the available rendering column
+    // can be much narrower than the pane width reported by tmux. Hard-truncate
+    // to pane width as defense — any squeeze beyond that is Claude Code's layout.
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    if (paneWidth > 0) {
+      variant = variant.map(line => {
+        const visible = stripAnsi(line);
+        if (visible.length <= paneWidth) return line;
+        // Truncate: walk through original string, count visible chars
+        let visCount = 0;
+        let cutIdx = line.length;
+        let inEsc = false;
+        for (let i = 0; i < line.length; i++) {
+          if (line[i] === '\x1b') { inEsc = true; continue; }
+          if (inEsc) { if (line[i] === 'm') inEsc = false; continue; }
+          visCount++;
+          if (visCount >= paneWidth - 1) { cutIdx = i + 1; break; }
+        }
+        // Re-append any open ANSI sequences' reset
+        return line.slice(0, cutIdx) + '\x1b[0m';
+      });
+    }
+
+    // Guard 3: Total chars cap (defense in depth)
     const MAX_STATUSLINE_CHARS = 400;
-    const visLen = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visLen = (s: string) => stripAnsi(s).length;
     while (variant.length > 1 && variant.reduce((sum, l) => sum + visLen(l), 0) > MAX_STATUSLINE_CHARS) {
       variant.pop();
     }

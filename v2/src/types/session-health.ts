@@ -228,6 +228,7 @@ export interface SessionHealth {
   alerts: SessionAlerts;
 
   // Additional Metadata
+  cliVersion?: string;             // Claude Code CLI version (e.g., "1.0.29")
   project?: ProjectMetadata;
   performance?: PerformanceMetrics;
   failoverNotification?: string;   // "🔄 Swapped → slot-2 (3m ago)" if recent swap

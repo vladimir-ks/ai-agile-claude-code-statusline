@@ -34,6 +34,7 @@ const COLORS = {
   lastMessage: '\x1b[38;5;249m',
   secrets: '\x1b[38;5;196m',
   critical: '\x1b[38;5;203m',
+  version: '\x1b[38;5;242m',       // dim gray (subtle, lowest priority)
   reset: '\x1b[0m'
 };
 
@@ -144,9 +145,11 @@ export class StatuslineFormatter {
       return dir ? [dir] : ['🤖'];
     }
 
-    // Use only 75% of terminal width to prevent rendering issues
-    // 75% leaves enough margin for tmux clock, notifications, corner text
-    const effectiveWidth = Math.floor(width * 0.75);
+    // Reserve right margin for tmux clock/notifications/corner text
+    // Wider terminals need less margin (absolute, not proportional)
+    // Narrow (<80): 75% margin (safe). Wide (>150): fixed 25-char margin
+    const margin = width <= 80 ? Math.floor(width * 0.25) : Math.min(25, Math.floor(width * 0.15));
+    const effectiveWidth = width - margin;
     const lines: string[] = [];
 
     // Build Line 1 with overflow tracking
@@ -314,7 +317,7 @@ export class StatuslineFormatter {
    * they only appear here when L1 pushed them to overflow.
    */
   private static buildLine2WithOverflow(
-    _health: SessionHealth,
+    health: SessionHealth,
     _width: number,
     overflow: { model?: string; context?: string; turnsSize?: string }
   ): string {
@@ -326,6 +329,11 @@ export class StatuslineFormatter {
 
     // Turns + size (only when they didn't fit on L1)
     if (overflow.turnsSize) parts.push(overflow.turnsSize);
+
+    // CLI version — always appended to L2 when present (lowest priority, subtle)
+    if (health.cliVersion) {
+      parts.push(`${c('version')}v${health.cliVersion}${rst()}`);
+    }
 
     if (parts.length === 0) return '';
 

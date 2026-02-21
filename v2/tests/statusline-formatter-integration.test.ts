@@ -179,10 +179,10 @@ describe('StatuslineFormatter Integration', () => {
     expect(line1Stripped).toContain('📁:');
     expect(line1Stripped).toContain('🌿:');
 
-    // At width 100+, model should fit on Line 1 (no overflow needed)
-    const lines100 = variants.width100;
-    const line1_100 = lines100[0].replace(/\x1b\[[0-9;]*m/g, '');
-    expect(line1_100).toContain('🤖:'); // Model fits on L1 at wider width
+    // At width 150+, model should fit on Line 1 (path+branch are very long)
+    const lines150 = variants.width150;
+    const line1_150 = lines150[0].replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line1_150).toContain('🤖:'); // Model fits on L1 at wider width
   });
 
   test('Line 2 shows turns count and transcript size', () => {
