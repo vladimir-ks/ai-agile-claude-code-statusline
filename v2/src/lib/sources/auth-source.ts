@@ -81,6 +81,12 @@ async function detectViaApiFingerprint(
   cache: Record<string, any>
 ): Promise<{ email: string; slotId: string } | null> {
   try {
+    // Pipeline invariant: only shell fetch-quotas.sh calls /api/oauth/usage.
+    // This fingerprint path is an alternate OAuth-API caller; gate it behind
+    // the same env var as billing-source so operators can kill all TS-side API
+    // traffic without touching code. Default off.
+    if (process.env.STATUSLINE_OAUTH_API !== '1') return null;
+
     const entry = KeychainResolver.readKeychainEntry(keychainService);
     if (!entry?.accessToken || entry.isExpired) return null;
 

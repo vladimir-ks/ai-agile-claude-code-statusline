@@ -902,15 +902,18 @@ export class StatuslineFormatter {
     const effectiveAgeS = ageS ?? 0;
 
     // Dead sampler detection: ageS > 60 → one-time deduped notification
-    if (liveEstimate !== undefined && liveEstimate !== null && effectiveAgeS > 60) {
-      try {
+    // Fresh or absent data → clear notification so recovery is visible (sibling of lazy-mode inversion).
+    try {
+      if (liveEstimate !== undefined && liveEstimate !== null && effectiveAgeS > 60) {
         NotificationManager.register(
           'transcript_sampler_dead',
           `Transcript sampler appears dead (${effectiveAgeS}s since last sample). Statusline using API baseline only.`,
           6,
         );
-      } catch { /* non-critical */ }
-    }
+      } else {
+        NotificationManager.remove('transcript_sampler_dead');
+      }
+    } catch { /* non-critical */ }
 
     // Fresh live data: append token-rate suffix
     const isFresh = liveEstimate != null && effectiveAgeS <= 30 && liveEstimate.session_count > 0;
