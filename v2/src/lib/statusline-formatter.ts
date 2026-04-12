@@ -15,6 +15,7 @@ import { SessionLockManager } from './session-lock-manager';
 import { NotificationManager } from './notification-manager';
 import { QuotaBrokerClient } from './quota-broker-client';
 import { writeHeartbeat } from './heartbeat';
+import { readLiveBurnEstimate, type LiveBurnEstimate } from './sources/live-burn-source';
 
 // Color codes
 const COLORS = {
@@ -265,8 +266,19 @@ export class StatuslineFormatter {
       // 📅 weekly quota — color computed inside fmtSlotWeeklyQuota
       const { text: weeklyText, color: weeklyColor } = this.fmtSlotWeeklyQuotaColored(slot);
       segments.push(`📅:${weeklyColor}${weeklyText}${rst()}`);
-      const burn = this.fmtBurnRate(slot);
+
+      // Tier 2: read live burn estimate (5s sampler) for the active slot
+      const liveRead = this.readLiveBurn(lock.slotId);
+      const burn = this.fmtBurnRate(slot, liveRead?.estimate, liveRead?.ageS);
       if (burn) segments.push(burn);
+
+      // Heartbeat: log on staleness transitions and LKG fallbacks (not every render)
+      if (liveRead && (liveRead.fromLkg || (liveRead.estimate && liveRead.isStale))) {
+        writeHeartbeat('statusline-formatter', 'live_burn_read', {
+          status: liveRead.fromLkg ? 'warn' : 'info',
+          extra: { ageS: liveRead.ageS, fromLkg: liveRead.fromLkg, slot: lock.slotId },
+        });
+      }
     }
 
     // Stale data warning (appended to end)
@@ -723,6 +735,10 @@ export class StatuslineFormatter {
             line = `${c('critical')}🔴 ${notification.message}${rst()}`;
             break;
 
+          case 'transcript_sampler_dead':
+            line = `${c('burnRate')}⚠ ${notification.message}${rst()}`;
+            break;
+
           default:
             line = notification.message;
         }
@@ -805,7 +821,20 @@ export class StatuslineFormatter {
   }
 
   /**
-   * Format combined burn rate segment: 🔥:{5h_rate}%/h|{7d_rate}%/d
+   * Format token-per-hour shorthand for live burn suffix.
+   * 0-999   → "N"     (e.g. "800")
+   * 1k-99k  → "N.Nk"  (e.g. "3.2k", "52.0k")
+   * 100k+   → "Nk"    (e.g. "123k")
+   */
+  static fmtTokPerHour(tokensPerHour: number): string {
+    if (!isFinite(tokensPerHour) || tokensPerHour < 0) return '0';
+    if (tokensPerHour < 1000) return `${Math.round(tokensPerHour)}`;
+    if (tokensPerHour < 100_000) return `${(tokensPerHour / 1000).toFixed(1)}k`;
+    return `${Math.round(tokensPerHour / 1000)}k`;
+  }
+
+  /**
+   * Format combined burn rate segment: 🔥:{5h_rate}%/h|{7d_rate}%/d [Xk/h~live]
    *
    * Low-confidence marker (burn_sample_count_5h < 3):
    * - Rate prefixed with `~` (estimate)
@@ -813,8 +842,17 @@ export class StatuslineFormatter {
    *
    * High-confidence (≥3 samples): normal 6-band pacing color.
    * Shows min-max range for 5h when ≥3 distinct samples and min ≠ max.
+   *
+   * Live tier (Tier 2): when liveEstimate is fresh (ageS ≤ 30) and session_count > 0,
+   * appends a muted " Xk/h~live" suffix showing real-time token burn rate.
+   * Stale / missing live data → no suffix (silent fallback to API baseline).
+   * Dead sampler (ageS > 60) → register transcript_sampler_dead notification (once/30min).
    */
-  private static fmtBurnRate(slot: MergedQuotaSlot): string {
+  private static fmtBurnRate(
+    slot: MergedQuotaSlot,
+    liveEstimate?: LiveBurnEstimate | null,
+    ageS?: number,
+  ): string {
     // ── 5h rate ──
     const target5h = slot.target_burn_rate_5h;
     const avg5h    = slot.burn_rate_1h_avg_5h ?? slot.five_hour_burn_rate;
@@ -850,8 +888,45 @@ export class StatuslineFormatter {
     }
 
     if (!part5h && !part7d) return '';
+
     const inner = [part5h, part7d].filter(Boolean).join('|');
-    return `🔥:${inner}`;
+    let result = `🔥:${inner}`;
+
+    // ── Tier 2 live suffix ──
+    const effectiveAgeS = ageS ?? 0;
+
+    // Dead sampler detection: ageS > 60 → one-time deduped notification
+    if (liveEstimate !== undefined && liveEstimate !== null && effectiveAgeS > 60) {
+      try {
+        NotificationManager.register(
+          'transcript_sampler_dead',
+          `Transcript sampler appears dead (${effectiveAgeS}s since last sample). Statusline using API baseline only.`,
+          6,
+        );
+      } catch { /* non-critical */ }
+    }
+
+    // Fresh live data: append token-rate suffix
+    const isFresh = liveEstimate != null && effectiveAgeS <= 30 && liveEstimate.session_count > 0;
+    if (isFresh) {
+      const tokSuffix = StatuslineFormatter.fmtTokPerHour(liveEstimate!.tokens_per_hour);
+      result += ` ${c('neutralLight')}${tokSuffix}/h~live${rst()}`;
+    }
+
+    return result;
+  }
+
+  /**
+   * Read live burn estimate for a given slotId.
+   * Returns null on any error (fail-open).
+   * Extracted to a method so tests can mock it via the `Fmt` accessor.
+   */
+  private static readLiveBurn(slotId: string): ReturnType<typeof readLiveBurnEstimate> | null {
+    try {
+      return readLiveBurnEstimate(slotId);
+    } catch {
+      return null;
+    }
   }
 
   /**

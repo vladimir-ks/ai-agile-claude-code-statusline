@@ -139,7 +139,8 @@ export function validateLiveBurnEstimate(obj: unknown): ValidationResult {
   if (!epochInRange(obj.ts as number)) {
     errors.push(`range: ts ${obj.ts} outside +/-30d window`);
   }
-  if (!pctInRange(obj.live_util_estimate)) {
+  // live_util_estimate may be null (uncalibrated — calibration task #23 not yet done)
+  if (obj.live_util_estimate !== null && !pctInRange(obj.live_util_estimate)) {
     errors.push(`range: live_util_estimate out of [0,100]: ${obj.live_util_estimate}`);
   }
   if (typeof obj.tokens_per_hour !== 'number') {
