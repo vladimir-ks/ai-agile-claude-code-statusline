@@ -16,7 +16,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkS
 import { homedir } from 'os';
 import { dirname } from 'path';
 
-export type NotificationType = 'version_update' | 'slot_switch' | 'restart_ready' | 'secrets_detected' | 'active_slot' | 'quota_stale';
+export type NotificationType = 'version_update' | 'version_mismatch' | 'slot_switch' | 'restart_ready' | 'secrets_detected' | 'active_slot' | 'quota_stale';
 
 export interface Notification {
   type: NotificationType;

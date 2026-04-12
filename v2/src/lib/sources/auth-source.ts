@@ -28,6 +28,7 @@ import { AuthProfileDetector } from '../../modules/auth-profile-detector';
 import { KeychainResolver } from '../../modules/keychain-resolver';
 import { HotSwapQuotaReader } from '../hot-swap-quota-reader';
 import { NotificationManager } from '../notification-manager';
+import { AnthropicOAuthAPI } from '../../modules/anthropic-oauth-api';
 import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import { homedir } from 'os';
@@ -83,6 +84,16 @@ async function detectViaApiFingerprint(
     const entry = KeychainResolver.readKeychainEntry(keychainService);
     if (!entry?.accessToken || entry.isExpired) return null;
 
+    // Skip API fingerprint when ANY slot is in rate-limit backoff.
+    // The fingerprint is a last-resort identity probe; hitting 429 here
+    // extends the ban and starves unrelated callers.
+    for (const slotId of Object.keys(cache)) {
+      if (AnthropicOAuthAPI.isSlotInBackoff(slotId)) {
+        console.error('[AuthSource] Skipping API fingerprint — slot in rate-limit backoff');
+        return null;
+      }
+    }
+
     const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
       method: 'GET',
       headers: {
@@ -93,6 +104,16 @@ async function detectViaApiFingerprint(
       signal: AbortSignal.timeout(5000),
     });
 
+    if (response.status === 429) {
+      // Propagate 429 to shared backoff state so shell + TS honor it
+      const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10) || 0;
+      const matchSlot = Object.keys(cache)[0] || 'unknown';
+      if (matchSlot !== 'unknown') {
+        AnthropicOAuthAPI.recordRateLimitBackoff(matchSlot, retryAfter);
+      }
+      console.error(`[AuthSource] Fingerprint hit 429 (Retry-After=${retryAfter}s)`);
+      return null;
+    }
     if (!response.ok) return null;
 
     const data = await response.json() as Record<string, any>;

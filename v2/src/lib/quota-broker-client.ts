@@ -15,6 +15,7 @@ import { homedir } from 'os';
 import { spawn } from 'child_process';
 import type { MergedQuotaData, MergedQuotaSlot } from '../types/session-health';
 import type { SlotStatus } from './hot-swap-quota-reader';
+import { validateMergedCache, readWithLkg } from './quota-schema';
 
 // In-memory cache
 let cachedData: MergedQuotaData | null = null;
@@ -61,24 +62,29 @@ export class QuotaBrokerClient {
       return cachedData;
     }
 
-    // Layer 2: File read
+    // Layer 2: File read with schema validation + LKG fallback
+    const lkgPath = `${this.CACHE_PATH}.lkg`;
+    const readResult = readWithLkg<MergedQuotaData>(this.CACHE_PATH, validateMergedCache, lkgPath);
+
+    if (readResult.fromLkg) {
+      console.error(
+        `[QuotaBrokerClient] Using LKG fallback (bad read #N). isStale=true`
+      );
+    }
+
+    const parsed = readResult.data;
+    if (!parsed) {
+      return null;
+    }
+
+    // Annotate stale flag from LKG path (merged with freshness below)
+    const fromLkg = readResult.fromLkg;
+
     try {
-      if (!existsSync(this.CACHE_PATH)) {
-        return null;
-      }
-
-      const content = readFileSync(this.CACHE_PATH, 'utf-8');
-      const parsed = JSON.parse(content) as MergedQuotaData;
-
-      // Validate minimal schema
-      if (!parsed || typeof parsed.ts !== 'number' || !parsed.slots) {
-        return null;
-      }
-
       // Compute freshness of merged cache file
       const nowSeconds = Math.floor(now / 1000);
       parsed.age_seconds = Math.max(0, nowSeconds - parsed.ts);
-      parsed.is_fresh = parsed.age_seconds <= STALE_THRESHOLD_S;
+      parsed.is_fresh = !fromLkg && parsed.age_seconds <= STALE_THRESHOLD_S;
 
       // CRITICAL: Also check if ANY slot data is stale
       // The merged cache `ts` can be fresh (broker ran recently) while slot data is old
@@ -116,7 +122,8 @@ export class QuotaBrokerClient {
       cacheTimestamp = now;
 
       // Layer 3: If merged cache OR any slot is stale, trigger background refresh
-      if ((!parsed.is_fresh || anySlotStale) && !this.isLockAlive()) {
+      // Skip spawn if all slots are in rate-limit backoff (avoids wasteful subprocesses)
+      if ((!parsed.is_fresh || anySlotStale) && !this.isLockAlive() && !this.allSlotsInBackoff()) {
         const staleSlots = Object.entries(parsed.slots || {})
           .filter(([, s]) => {
             const age = Math.floor(now / 1000) - Math.floor((s.last_fetched || 0) / 1000);
@@ -164,6 +171,7 @@ export class QuotaBrokerClient {
     weeklyBudgetRemaining: number;
     weeklyResetDay: string;
     dailyResetTime: string;
+    dailyResetAt?: string;
     lastFetched: number;
     isStale: boolean;
     slotId?: string;
@@ -305,6 +313,7 @@ export class QuotaBrokerClient {
       weeklyBudgetRemaining: slot.weekly_budget_remaining_hours,
       weeklyResetDay: slot.weekly_reset_day,
       dailyResetTime: slot.daily_reset_time,
+      dailyResetAt: slot.five_hour_resets_at || undefined,
       lastFetched: slot.last_fetched,
       isStale,
       slotId: matchedSlotId,
@@ -374,6 +383,35 @@ export class QuotaBrokerClient {
     }
 
     return null;
+  }
+
+  /**
+   * Check if ALL active slots are in rate-limit backoff.
+   * When true, spawning the broker is wasteful — the API won't serve us.
+   * Reads per-slot backoff state files written by fetch-quotas.sh.
+   */
+  private static allSlotsInBackoff(): boolean {
+    try {
+      const { readdirSync } = require('fs') as typeof import('fs');
+      const stateDir = `${homedir()}/.claude/session-health`;
+      const files = readdirSync(stateDir).filter(f => f.startsWith('.fetch-rate-limit-state.'));
+      if (files.length === 0) return false; // No backoff files = not backed off
+
+      const nowEpoch = Math.floor(Date.now() / 1000);
+      for (const file of files) {
+        try {
+          const content = readFileSync(`${stateDir}/${file}`, 'utf-8');
+          const state = JSON.parse(content);
+          const backoffUntil = state.backoff_until_epoch || 0;
+          if (backoffUntil <= nowEpoch) return false; // At least one slot's backoff expired
+        } catch {
+          return false; // Corrupt state = assume not backed off
+        }
+      }
+      return true; // All slots still in backoff
+    } catch {
+      return false;
+    }
   }
 
   /**

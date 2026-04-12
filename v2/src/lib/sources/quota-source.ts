@@ -25,6 +25,7 @@ export interface QuotaSourceData {
   weeklyDataStale?: boolean;
   weeklyLastModified?: number;
   dailyPercentUsed?: number;
+  dailyResetAt?: string;  // ISO timestamp of 5h window reset — if in the past, dailyPercentUsed is stale
   sessionPercentUsed?: number;
   slotStatus?: string;  // 'active' | 'inactive' — inactive slots are expected stale
   source: 'broker' | 'hotswap' | 'oauth' | 'subscription' | 'none';
@@ -56,6 +57,7 @@ export const quotaSource: DataSourceDescriptor<QuotaSourceData> = {
           dailyPercentUsed: brokerQuota.dailyPercentUsed > 0
             ? brokerQuota.dailyPercentUsed
             : undefined,
+          dailyResetAt: brokerQuota.dailyResetAt,
           slotStatus: brokerQuota.slotStatus,
           source: 'broker',
           fetchedAt,
@@ -118,6 +120,23 @@ export const quotaSource: DataSourceDescriptor<QuotaSourceData> = {
       target.billing.weeklyLastModified = data.weeklyLastModified;
     }
     if (data.dailyPercentUsed !== undefined) {
+      // Detect past reset: if dailyResetAt is in the past, the 5h window already
+      // reset and the displayed percentage is from a previous window (meaningless).
+      // Mark as stale so user sees "data outdated" instead of a phantom number.
+      if (data.dailyResetAt) {
+        const resetEpoch = new Date(data.dailyResetAt).getTime();
+        if (!isNaN(resetEpoch) && resetEpoch < Date.now()) {
+          // 5h window already reset — don't show stale percentage
+          data.weeklyDataStale = true;
+          NotificationManager.register(
+            'quota_reset_passed',
+            `⚠ 5h quota window reset — data outdated, waiting for refresh`,
+            7
+          );
+        } else {
+          NotificationManager.remove('quota_reset_passed');
+        }
+      }
       target.billing.budgetPercentUsed = data.dailyPercentUsed;
     }
     if (data.sessionPercentUsed !== undefined) {

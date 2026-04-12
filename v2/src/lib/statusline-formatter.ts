@@ -9,10 +9,12 @@
 
 import { SessionHealth, MergedQuotaSlot } from '../types/session-health';
 import { homedir } from 'os';
+import { existsSync, readFileSync } from 'fs';
 import { FreshnessManager } from './freshness-manager';
 import { SessionLockManager } from './session-lock-manager';
 import { NotificationManager } from './notification-manager';
 import { QuotaBrokerClient } from './quota-broker-client';
+import { writeHeartbeat } from './heartbeat';
 
 // Color codes
 const COLORS = {
@@ -27,7 +29,7 @@ const COLORS = {
   weeklyBudget: '\x1b[38;5;183m',
   resetTime: '\x1b[38;5;249m',
   cost: '\x1b[38;5;228m',
-  burnRate: '\x1b[38;5;215m',
+  burnRate: '\x1b[38;5;245m',       // neutral mid-gray (was orange — too loud for passive cost info)
   usage: '\x1b[38;5;117m',
   cache: '\x1b[38;5;120m',
   turns: '\x1b[38;5;141m',
@@ -35,6 +37,20 @@ const COLORS = {
   secrets: '\x1b[38;5;196m',
   critical: '\x1b[38;5;203m',
   version: '\x1b[38;5;242m',       // dim gray (subtle, lowest priority)
+  cost: '\x1b[38;5;248m',          // neutral light-gray (was bright yellow — reserved for alerts now)
+  neutralId: '\x1b[38;5;250m',     // light gray for identity/slot labels
+  // 6-band pacing palette — attention hierarchy:
+  //   red/orange/yellow = act now (under-burning = losing quota)
+  //   green             = ideal
+  //   blue/violet       = over-pacing (not dangerous; often desirable to consume quota)
+  pacingRed:    '\x1b[38;5;196m',  // bright red    — way too slow (weekly loss risk)
+  pacingOrange: '\x1b[38;5;208m',  // orange        — not fast enough
+  pacingYellow: '\x1b[38;5;226m',  // yellow        — a bit too slow
+  pacingGreen:  '\x1b[38;5;46m',   // bright green  — good (±tolerance)
+  pacingBlue:   '\x1b[38;5;33m',   // bright blue   — much too fast
+  pacingViolet: '\x1b[38;5;201m',  // bright violet — way too fast
+  neutralLight: '\x1b[38;5;245m', // muted grey — low-confidence / stale
+  bold: '\x1b[1m',
   reset: '\x1b[0m'
 };
 
@@ -53,123 +69,93 @@ export class StatuslineFormatter {
   /**
    * Generate pre-formatted output for all terminal widths
    * Includes a special 'singleLine' variant for no-tmux environments
+   *
+   * @param health Session health data
+   * @param marginPercent Margin percentage (0-50 typical, null=auto)
+   *        - 0: no margin (full width)
+   *        - 5-25: typical tmux margin (reserved for corner text)
+   *        - null/undefined: auto (25% for ≤80w, min(25,15%) for >80w)
+   *        - <0 or >50: clamped to [0,50] to prevent invalid effectiveWidth
    */
-  static formatAllVariants(health: SessionHealth): SessionHealth['formattedOutput'] {
-    return {
-      width40: this.formatForWidth(health, 40),
-      width60: this.formatForWidth(health, 60),
-      width80: this.formatForWidth(health, 80),
-      width100: this.formatForWidth(health, 100),
-      width120: this.formatForWidth(health, 120),
-      width150: this.formatForWidth(health, 150),
-      width200: this.formatForWidth(health, 200),
-      singleLine: this.formatSingleLine(health)
+  static formatAllVariants(health: SessionHealth, marginPercent?: number | null): SessionHealth['formattedOutput'] {
+    const t0 = Date.now();
+    const result = {
+      width40: this.formatForWidth(health, 40, marginPercent),
+      width60: this.formatForWidth(health, 60, marginPercent),
+      width80: this.formatForWidth(health, 80, marginPercent),
+      width100: this.formatForWidth(health, 100, marginPercent),
+      width120: this.formatForWidth(health, 120, marginPercent),
+      width150: this.formatForWidth(health, 150, marginPercent),
+      width200: this.formatForWidth(health, 200, marginPercent),
+      singleLine: this.formatSingleLine(health, marginPercent)
     };
+    writeHeartbeat('statusline-formatter', 'render', { latencyMs: Date.now() - t0 });
+    return result;
   }
 
   /**
    * Format as single line for environments without tmux/unknown terminal width
-   *
-   * All components on one line, max 240 chars total.
-   * Last message preview fixed at 50 chars.
-   * Same shrink/drop rules apply when line gets too long.
+   * Uses same 3-line structure: merged L1, session+message L2, notifications
    */
-  private static formatSingleLine(health: SessionHealth): string[] {
-    const maxLen = this.SINGLE_LINE_MAX_LENGTH;
-    const msgLen = this.SINGLE_LINE_MSG_LENGTH;
+  private static formatSingleLine(health: SessionHealth, marginPercent?: number | null): string[] {
+    const maxMsgLen = this.SINGLE_LINE_MSG_LENGTH;
+    const lines: string[] = [];
 
-    // Build all components
-    const dir = this.fmtDirectory(health.projectPath);
-    const git = this.fmtGit(health, maxLen);
-    const modelFull = this.fmtModel(health, false);
-    const modelAbbrev = this.fmtModel(health, true);
-
-    // Context variants
-    const ctxFull = this.fmtContextFull(health);
-    const ctxMedium = this.fmtContextMedium(health);
-    const ctxShort = this.fmtContextShort(health);
-    const ctxMinimal = this.fmtContextMinimal(health);
-
-    // Turns count
-    const turns = health.transcript?.messageCount || 0;
-    const turnsFmt = turns > 0 ? `💬:${c('turns')}${turns}t${rst()}` : '';
-
-    // Last message (fixed length)
-    const lastMsg = this.buildLine3(health, msgLen);
-
-    // Try to fit components with shrink/drop logic
-    // Time and slot are on the account context notification line — not here
-    const tryFit = (components: string[]): string | null => {
-      const line = [...components, lastMsg].filter(Boolean).join(' ');
-      return this.visibleWidth(line) <= maxLen ? line : null;
-    };
-
-    // Shrink cascade: context first, then model, then turns
-    const combinations = [
-      [dir, git, modelFull, ctxFull, turnsFmt],
-      [dir, git, modelFull, ctxMedium, turnsFmt],
-      [dir, git, modelFull, ctxShort, turnsFmt],
-      [dir, git, modelFull, ctxMinimal, turnsFmt],
-      [dir, git, modelAbbrev, ctxShort, turnsFmt],
-      [dir, git, modelAbbrev, ctxMinimal, turnsFmt],
-      [dir, git, modelAbbrev, turnsFmt],
-      [dir, git, modelAbbrev],
-      [dir, git],
-    ];
-
-    for (const combo of combinations) {
-      const result = tryFit(combo);
-      if (result) return [result];
+    // Line 1: merged core + account — split at max length
+    const mergedLine = this.buildMergedLine1(health);
+    if (mergedLine) {
+      const splitLines = this.splitAtWidth(mergedLine, this.SINGLE_LINE_MAX_LENGTH);
+      lines.push(...splitLines);
     }
 
-    // Fallback: just the basics
-    return [[dir, git, lastMsg].filter(Boolean).join(' ')];
+    // Session ID + last message
+    const sessionLine = this.buildSessionLine(health, maxMsgLen);
+    if (sessionLine) lines.push(sessionLine);
+
+    return lines;
   }
 
   /**
-   * Format statusline for specific terminal width (multi-line mode)
+   * Format statusline for specific terminal width (3-line mode)
    *
-   * Uses 75% of terminal width to avoid rendering issues with tmux corner text.
-   * Tmux often reserves right margin for clock, notifications, or other overlays.
-   *
-   * Adaptive overflow rules:
-   * - Line 1: Directory + Git (ALWAYS), Model + Context + Turns + Size (if they fit)
-   * - Line 2: Overflow from L1 (Model, Context, Turns+Size) — ONLY if overflow exists
-   * - Line 3: Last message preview
-   * - Notifications: Account context, switch recommendation, secrets (idle=always, active=intermittent)
+   * LINE 1: Core + Account (no width constraint — wraps naturally in terminal)
+   * LINE 2: Session ID + Last message (message portion truncated to width)
+   * LINE 3+: Notifications (conditional, truncated to width)
    */
-  private static formatForWidth(health: SessionHealth, width: number): string[] {
-    // Ultra-narrow: bare minimum to avoid catastrophic wrapping
+  private static formatForWidth(health: SessionHealth, width: number, marginPercent?: number | null): string[] {
+    // Ultra-narrow: bare minimum
     if (width < 30) {
       const dir = this.fmtDirectory(health.projectPath);
       return dir ? [dir] : ['🤖'];
     }
 
-    // Reserve right margin for tmux clock/notifications/corner text
-    // Wider terminals need less margin (absolute, not proportional)
-    // Narrow (<80): 75% margin (safe). Wide (>150): fixed 25-char margin
-    const margin = width <= 80 ? Math.floor(width * 0.25) : Math.min(25, Math.floor(width * 0.15));
+    // Margin for notifications and message truncation (line 1 is unconstrained)
+    let margin: number;
+    if (marginPercent != null) {
+      const clamped = Math.max(0, Math.min(50, marginPercent));
+      margin = Math.floor(width * (clamped / 100));
+    } else {
+      margin = width <= 80 ? Math.floor(width * 0.25) : Math.min(25, Math.floor(width * 0.15));
+    }
     const effectiveWidth = width - margin;
     const lines: string[] = [];
 
-    // Build Line 1 with overflow tracking
-    const { line1, overflow } = this.buildLine1WithOverflow(health, effectiveWidth);
-    if (line1) lines.push(line1);
+    // Line 1: merged core + account — split into multiple lines at effectiveWidth
+    // Claude Code's statusline doesn't support natural wrapping, so we split explicitly
+    const mergedLine = this.buildMergedLine1(health);
+    if (mergedLine) {
+      const splitLines = this.splitAtWidth(mergedLine, effectiveWidth);
+      lines.push(...splitLines);
+    }
 
-    // Build Line 2, prepending any overflow from Line 1
-    const line2 = this.buildLine2WithOverflow(health, effectiveWidth, overflow);
-    if (line2) lines.push(line2);
+    // Session ID + last message (message truncated to effectiveWidth)
+    const sessionLine = this.buildSessionLine(health, effectiveWidth);
+    if (sessionLine) lines.push(sessionLine);
 
-    // Line 3: Last message (hard truncate at effectiveWidth)
-    const line3 = this.buildLine3(health, effectiveWidth);
-    if (line3) lines.push(line3);
-
-    // Idle detection: transcript not growing for >2 minutes = idle
-    // More reliable than !line3 (preview can be empty during tool_result sequences)
+    // Idle detection for notification visibility
     const isIdle = this.detectIdle(health);
 
-    // Notifications: intermittent when active, always-on when idle
-    // When idle, notifications fill the empty space with account context
+    // Notifications: account context removed (merged into L1), rest unchanged
     const notifications = this.buildNotifications(health, effectiveWidth, isIdle);
     lines.push(...notifications);
 
@@ -177,201 +163,156 @@ export class StatuslineFormatter {
   }
 
   /**
-   * Build Line 1 with overflow tracking
+   * Build Line 1: Core + Account merged (no width constraint — wraps naturally)
    *
-   * Returns the line AND any components that couldn't fit (overflow to L2)
-   *
-   * SHRINK CASCADE (ordered by priority):
-   * 1. Full model + full context (🤖:Opus4.5 🧠:154k-free[---------|--])
-   * 2. Full model + medium context (🤖:Opus4.5 🧠:154k[---------|--])
-   * 3. Full model + short context (🤖:Opus4.5 🧠:154k[---|--])
-   * 4. Full model + minimal context (🤖:Opus4.5 🧠:154k)
-   * 5. Abbreviated model + short context (🤖:o-4.5 🧠:154k[---|--])
-   * 6. Abbreviated model + minimal context (🤖:o-4.5 🧠:154k)
-   * 7. Abbreviated model only → context to L2
-   * 8. Neither fit → both to L2
+   * Format: 📁:dir 🌿:branch 🤖:Model 📟:vX.Y.Z 🧠:NK(X%) 👤SN|email|🕐:HH:MM|⌛:Xh(Y%)|📅:Zh(W%)@Day 💰:$X|$Y/h
    */
-  private static buildLine1WithOverflow(health: SessionHealth, width: number): {
-    line1: string;
-    overflow: { model?: string; context?: string; turnsSize?: string };
-  } {
-    const overflow: { model?: string; context?: string; turnsSize?: string } = {};
-
-    // Core components (ALWAYS on Line 1)
-    const coreParts: string[] = [];
-
-    // Directory FIRST — truncated with middle-ellipsis if path is too long
-    // Reserve at least 30 chars for git+model (minimum useful display)
-    const maxDirChars = Math.max(20, width - 30);
-    const dir = this.fmtDirectory(health.projectPath, maxDirChars);
-    if (dir) coreParts.push(dir);
-
-    // Git (truncate branch if needed, but always show)
-    const git = this.fmtGit(health, width);
-    if (git) coreParts.push(git);
-
-    // Calculate remaining space after core components
-    const coreWidth = this.visibleWidth(coreParts.join(' '));
-    const remainingSpace = width - coreWidth - 2; // 2 = spacing
-
-    // Model variants
-    const modelFull = this.fmtModel(health, false);      // Opus4.5 (~10 chars)
-    const modelAbbrev = this.fmtModel(health, true);     // o-4.5 (~8 chars)
-    const modelFullWidth = this.visibleWidth(modelFull);
-    const modelAbbrevWidth = this.visibleWidth(modelAbbrev);
-
-    // Context variants (ordered by size, largest first)
-    const contextFull = this.fmtContextFull(health);     // 154k-free[---------|--] (~26 chars)
-    const contextMedium = this.fmtContextMedium(health); // 154k[---------|--] (~20 chars)
-    const contextShort = this.fmtContextShort(health);   // 154k[---|--] (~16 chars)
-    const contextMinimal = this.fmtContextMinimal(health); // 154k (~8 chars)
-
-    const contextFullWidth = this.visibleWidth(contextFull);
-    const contextMediumWidth = this.visibleWidth(contextMedium);
-    const contextShortWidth = this.visibleWidth(contextShort);
-    const contextMinimalWidth = this.visibleWidth(contextMinimal);
-
-    // Turns + size component (try to fit on L1 after model+context)
-    const turnsSizeParts: string[] = [];
-    const turns = health.transcript?.messageCount || 0;
-    if (turns > 0) {
-      turnsSizeParts.push(`💬:${c('turns')}${turns}t${rst()}`);
-    }
-    const sizeBytes = health.transcript?.sizeBytes || 0;
-    if (sizeBytes > 0) {
-      const sizeMB = sizeBytes / (1024 * 1024);
-      const sizeStr = sizeMB >= 1
-        ? `${sizeMB.toFixed(1)}MB`
-        : `${(sizeBytes / 1024).toFixed(0)}KB`;
-      turnsSizeParts.push(`📦:${c('cache')}${sizeStr}${rst()}`);
-    }
-    const turnsSizeFmt = turnsSizeParts.length > 0 ? turnsSizeParts.join(' ') : '';
-    const turnsSizeWidth = turnsSizeFmt ? this.visibleWidth(turnsSizeFmt) + 1 : 0; // +1 for space
-
-    // Helper: try appending turns+size to line, else put in overflow
-    const finalizeLine = (parts: string[]): { line1: string; overflow: { model?: string; context?: string; turnsSize?: string } } => {
-      const baseLine = parts.filter(Boolean).join(' ');
-      const baseWidth = this.visibleWidth(baseLine);
-      if (turnsSizeFmt && baseWidth + turnsSizeWidth <= width) {
-        return { line1: [...parts, turnsSizeFmt].filter(Boolean).join(' '), overflow: {} };
-      }
-      return {
-        line1: baseLine,
-        overflow: turnsSizeFmt ? { turnsSize: turnsSizeFmt } : {}
-      };
-    };
-
-    // Adaptive fitting logic - try each combination in order of preference
-
-    // Case 1: Full model + full context
-    if (remainingSpace >= modelFullWidth + 1 + contextFullWidth) {
-      return finalizeLine([...coreParts, modelFull, contextFull]);
-    }
-
-    // Case 2: Full model + medium context (no "-free")
-    if (remainingSpace >= modelFullWidth + 1 + contextMediumWidth) {
-      return finalizeLine([...coreParts, modelFull, contextMedium]);
-    }
-
-    // Case 3: Full model + short context
-    if (remainingSpace >= modelFullWidth + 1 + contextShortWidth) {
-      return finalizeLine([...coreParts, modelFull, contextShort]);
-    }
-
-    // Case 4: Full model + minimal context
-    if (remainingSpace >= modelFullWidth + 1 + contextMinimalWidth) {
-      return finalizeLine([...coreParts, modelFull, contextMinimal]);
-    }
-
-    // Case 5: Abbreviated model + short context
-    if (remainingSpace >= modelAbbrevWidth + 1 + contextShortWidth) {
-      return finalizeLine([...coreParts, modelAbbrev, contextShort]);
-    }
-
-    // Case 6: Abbreviated model + minimal context
-    if (remainingSpace >= modelAbbrevWidth + 1 + contextMinimalWidth) {
-      return finalizeLine([...coreParts, modelAbbrev, contextMinimal]);
-    }
-
-    // Case 7: Abbreviated model only - context moves to L2 at full size
-    if (remainingSpace >= modelAbbrevWidth) {
-      const result = finalizeLine([...coreParts, modelAbbrev]);
-      result.overflow.context = contextFull; // Full version on L2 (plenty of room)
-      return result;
-    }
-
-    // Case 8: Neither fit - both move to L2 at full size
-    overflow.model = modelFull; // Full model on L2
-    overflow.context = contextFull;
-    if (turnsSizeFmt) overflow.turnsSize = turnsSizeFmt;
-    return {
-      line1: coreParts.filter(Boolean).join(' '),
-      overflow
-    };
-  }
-
-  /**
-   * Build Line 2: overflow from L1 (model, context, turns+size)
-   *
-   * Only emitted when there IS overflow. Turns+size live on L1 when they fit;
-   * they only appear here when L1 pushed them to overflow.
-   */
-  private static buildLine2WithOverflow(
-    health: SessionHealth,
-    _width: number,
-    overflow: { model?: string; context?: string; turnsSize?: string }
-  ): string {
+  private static buildMergedLine1(health: SessionHealth): string {
     const parts: string[] = [];
 
-    // Overflow components (full-size model + context)
-    if (overflow.model) parts.push(overflow.model);
-    if (overflow.context) parts.push(overflow.context);
+    // 1. Directory — always
+    const dir = this.fmtDirectory(health.projectPath);
+    if (dir) parts.push(dir);
 
-    // Turns + size (only when they didn't fit on L1)
-    if (overflow.turnsSize) parts.push(overflow.turnsSize);
+    // 2. Git — if available (no width constraint, use generous branch length)
+    const git = this.fmtGit(health, 200);
+    if (git) parts.push(git);
 
-    // CLI version — always appended to L2 when present (lowest priority, subtle)
+    // 3. Model — always (full name, includes [1m] suffix from formatModelId)
+    const model = this.fmtModel(health, false);
+    if (model) parts.push(model);
+
+    // 4. CLI version — if available
     if (health.cliVersion) {
-      parts.push(`${c('version')}v${health.cliVersion}${rst()}`);
+      parts.push(`📟:${c('version')}v${health.cliVersion}${rst()}`);
     }
 
-    if (parts.length === 0) return '';
+    // 5. Context — short format: 🧠:791K(21%)
+    const ctx = this.fmtContextShort(health);
+    if (ctx) parts.push(ctx);
+
+    // 6. Account context — inline (slot|email|time|daily|weekly)
+    const accountPart = this.fmtAccountInline(health);
+    if (accountPart) parts.push(accountPart);
+
+    // 7. Cost — if >= $0.01
+    const costPart = this.fmtCostInline(health);
+    if (costPart) parts.push(costPart);
 
     return parts.filter(Boolean).join(' ');
   }
 
   /**
-   * Build Line 3: Last message (hard truncate)
+   * Build Line 2: Session ID + Last message
    *
-   * Filters out system messages (XML tags, task notifications) to show only
-   * meaningful user content.
+   * Format: 🆔:full-uuid 💬:(5m) message preview...
+   * Session ID is always present. Message appended when available, truncated to width.
    */
-  private static buildLine3(health: SessionHealth, width: number): string {
-    if (!health.transcript?.lastMessagePreview) return '';
+  private static buildSessionLine(health: SessionHealth, width: number): string {
+    // 🆔 prefix — always present, no color (easily parseable)
+    const sidPrefix = `🆔:${health.sessionId}`;
+
+    // 💬 message — appended if available
+    if (!health.transcript?.lastMessagePreview) return sidPrefix;
 
     const elapsed = health.transcript.lastModifiedAgo || '';
     let preview = health.transcript.lastMessagePreview;
 
-    // Filter out system/XML content - these aren't useful to display
-    // Examples: <task-notification>, <task-id>, <system-reminder>, etc.
+    // Filter out system/XML content
     if (preview.startsWith('<') && preview.includes('>')) {
       preview = '(system message)';
     }
 
-    const prefix = `💬:${c('lastMessage')}(${elapsed}) `;
-    const prefixWidth = this.visibleWidth(prefix);
-    const availableForPreview = width - prefixWidth - 2; // 2 = safety margin
-
-    if (availableForPreview < 10) return ''; // Too narrow
+    const msgPrefix = ` 💬:${c('lastMessage')}(${elapsed}) `;
+    const sidWidth = this.visibleWidth(sidPrefix);
+    const msgPrefixWidth = this.visibleWidth(msgPrefix);
+    const availableForPreview = Math.max(10, width - sidWidth - msgPrefixWidth - 2);
 
     const truncatedPreview = this.truncateString(preview, availableForPreview);
 
-    return `${prefix}${truncatedPreview}${rst()}`;
+    return `${sidPrefix}${msgPrefix}${truncatedPreview}${rst()}`;
+  }
+
+  /**
+   * Format account context inline for Line 1
+   * Format: [⛔]👤SN|email|🕐:HH:MM|⌛:Xh(Y%)|📅:Zh(W%)@Day [⚠ stale Nm]
+   */
+  private static fmtAccountInline(health: SessionHealth): string {
+    const lock = SessionLockManager.read(health.sessionId);
+    if (!lock?.slotId) return '';
+
+    const slotNum = this.parseSlotNumber(lock.slotId);
+    const email = lock.email || health.launch?.authProfile || '';
+
+    // Time
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+
+    // Quota data
+    const quotaData = QuotaBrokerClient.read();
+    const slot = quotaData?.slots?.[lock.slotId];
+
+    // Ban indicator: derive from rate-limit state file
+    const isBanned = this.isSlotBanned(lock.slotId);
+
+    const segments: string[] = [];
+    segments.push(this.fmtSlotBadge(slotNum, email, isBanned));
+    segments.push(`🕐:${c('time')}${hh}:${mm}${rst()}`);
+
+    if (slot) {
+      segments.push(`⌛:${c('budget')}${this.fmtSlotDailyBudget(slot)}${rst()}`);
+      // 📅 weekly quota — color computed inside fmtSlotWeeklyQuota
+      const { text: weeklyText, color: weeklyColor } = this.fmtSlotWeeklyQuotaColored(slot);
+      segments.push(`📅:${weeklyColor}${weeklyText}${rst()}`);
+      const burn = this.fmtBurnRate(slot);
+      if (burn) segments.push(burn);
+    }
+
+    // Stale data warning (appended to end)
+    const mergedAt = quotaData?.ts ? quotaData.ts * 1000 : 0;
+    const stale = mergedAt > 0 ? this.fmtStaleWarning(mergedAt) : '';
+
+    if (segments.length === 0) return '';
+    return segments[0] + segments.slice(1).join('') + stale;
+  }
+
+  /**
+   * Format cost inline for Line 1
+   * Format: 💰:$X.XX|$Y.YY/h
+   */
+  private static fmtCostInline(health: SessionHealth): string {
+    if (!health.billing) return '';
+    const sessionCost = health.billing.sessionCost || 0;
+    const burnRate = health.billing.sessionBurnRate || health.billing.burnRatePerHour || 0;
+    if (sessionCost < 0.01) return '';
+
+    const costPart = `${c('cost')}${this.formatMoney(sessionCost)}${rst()}`;
+    const burnPart = burnRate >= 0.01 ? `|${c('burnRate')}${this.formatMoney(burnRate)}/h${rst()}` : '';
+    return `💰:${costPart}${burnPart}`;
   }
 
   // ============================================================================
   // Component Formatters
   // ============================================================================
+
+  /**
+   * Extract slot number from slotId (e.g. "slot-1" → "1")
+   * Handles common formats: "slot-N", "slot N", "SN" (fallback to "?")
+   * Returns '?' if format unrecognized (for graceful degradation)
+   */
+  private static parseSlotNumber(slotId: string | undefined): string {
+    if (!slotId) return '?';
+    // Primary: "slot-N" format
+    let match = slotId.match(/slot-(\d+)/);
+    if (match) return match[1];
+    // Fallback: "SN" format
+    match = slotId.match(/S(\d+)/);
+    if (match) return match[1];
+    // Fallback: any leading digits
+    match = slotId.match(/(\d+)/);
+    return match ? match[1] : '?';
+  }
 
   private static fmtDirectory(path: string, maxDirChars?: number): string {
     if (!path) return '';
@@ -414,15 +355,22 @@ export class StatuslineFormatter {
     let model = health.model?.value || 'Claude';
     model = model.replace(/\s+/g, ''); // Remove spaces
 
+    // Preserve [Nm] context window suffix (e.g. [1m]) — already set by formatModelId
+    // If not present in value, check model ID for it
+    const hasCtxSuffix = /\[\d+[mk]\]/i.test(model);
+    if (!hasCtxSuffix && health.model?.id) {
+      const ctxMatch = health.model.id.match(/\[(\d+[mk])\]/i);
+      if (ctxMatch) model += `[${ctxMatch[1].toLowerCase()}]`;
+    }
+
     if (abbreviated) {
       // Abbreviate known models:
-      // Opus4.5 → o-4.5, Sonnet4.5 → s-4.5, Haiku4.5 → h-4.5, Claude → c
+      // Opus4.6[1m] → o-4.6[1m], Sonnet4.6 → s-4.6, Haiku4.5 → h-4.5, Claude → c
       model = model
         .replace(/^Opus/i, 'o-')
         .replace(/^Sonnet/i, 's-')
         .replace(/^Haiku/i, 'h-')
         .replace(/^Claude$/i, 'c');
-      // Unknown models keep full name (e.g., GPT-4, Gemini, etc.)
     }
 
     let result = `🤖:${c('model')}${model}${rst()}`;
@@ -438,41 +386,28 @@ export class StatuslineFormatter {
     return result;
   }
 
+  /** Compact slot indicator: 👤S1 (colored by slot number) */
+  private static fmtSlotIndicator(sessionId: string): string {
+    const lock = SessionLockManager.read(sessionId);
+    if (!lock?.slotId) return '';
+    const num = this.parseSlotNumber(lock.slotId);
+    const colors: Record<string, string> = {
+      '1': c('critical'), '2': c('usage'), '3': c('weeklyBudget'), '4': c('cost')
+    };
+    return `${colors[num] || ''}👤S${num}${rst()}`;
+  }
+
   /**
-   * Context formatting variants for adaptive overflow
-   *
-   * SHRINK CASCADE (per user spec):
-   * 1. Full:      "🧠:54k-free[=======--|--]" - full bar WITH -free
-   * 2. ShortBar:  "🧠:54k-free[===-|-]" - short bar WITH -free
-   * 3. NoFree:    "🧠:54k[===-|-]" - short bar, NO -free
-   * 4. Minimal:   "🧠:54k" - no bar, no -free
+   * Context formatting: short format only (🧠:54k(97%))
+   * Full/medium bar variants removed in compact redesign.
    */
 
-  // Full context: "🧠:54k-free[=======--|--]"
-  private static fmtContextFull(health: SessionHealth): string {
-    const left = this.formatTokens(health.context?.tokensLeft || 0);
-    const pct = health.context?.percentUsed || 0;
-    const bar = this.generateProgressBar(pct, 12);
-    const colorName = this.getContextColor(pct);
-    return `🧠:${c(colorName)}${left}-free${bar}${rst()}`;
-  }
-
-  // Short bar WITH -free: "🧠:54k-free[===-|-]"
-  private static fmtContextMedium(health: SessionHealth): string {
-    const left = this.formatTokens(health.context?.tokensLeft || 0);
-    const pct = health.context?.percentUsed || 0;
-    const bar = this.generateProgressBar(pct, 6);
-    const colorName = this.getContextColor(pct);
-    return `🧠:${c(colorName)}${left}-free${bar}${rst()}`;
-  }
-
-  // Short bar NO -free: "🧠:54k[===-|-]"
+  // Short context: "🧠:54k(97%)"
   private static fmtContextShort(health: SessionHealth): string {
     const left = this.formatTokens(health.context?.tokensLeft || 0);
     const pct = health.context?.percentUsed || 0;
-    const bar = this.generateProgressBar(pct, 6);
     const colorName = this.getContextColor(pct);
-    return `🧠:${c(colorName)}${left}${bar}${rst()}`;
+    return `🧠:${c(colorName)}${left}(${pct}%)${rst()}`;
   }
 
   // Minimal: "🧠:54k"
@@ -489,7 +424,9 @@ export class StatuslineFormatter {
     return 'contextGood';
   }
 
-  // Note: Time and slot moved to account context notification line (buildAccountContextLine)
+  // Note: Slot indicator and account context are both on Line 1 (inline, compact)
+  // fmtSlotIndicator: 👤S1 (used in Line 1 core)
+  // fmtAccountInline: 👤S1|email|🕐|⌛|📅 (used in Line 1 merged)
 
   /**
    * Detect idle state using transcript file growth.
@@ -582,7 +519,7 @@ export class StatuslineFormatter {
   }
 
   private static generateProgressBar(percentUsed: number, width: number = 12): string {
-    const thresholdPercent = 78;
+    const thresholdPercent = 83;
     const thresholdPos = Math.floor(width * thresholdPercent / 100);
     const pct = Math.max(0, Math.min(100, percentUsed || 0));
     const usedPos = Math.floor(width * pct / 100);
@@ -613,24 +550,60 @@ export class StatuslineFormatter {
     return clean.length + emojiCount;
   }
 
+  /**
+   * Split a long line into multiple output lines at component boundaries.
+   * Splits at space characters (component separators) to avoid mid-word breaks.
+   * Handles ANSI escape codes: carries open color sequences to continuation lines.
+   */
+  private static splitAtWidth(line: string, maxWidth: number): string[] {
+    if (this.visibleWidth(line) <= maxWidth || maxWidth <= 0) return [line];
+
+    const results: string[] = [];
+    // Split by spaces (component boundaries) preserving ANSI codes
+    const segments = line.split(/(?<=\s)/); // split AFTER spaces, keeping space with segment
+    let currentLine = '';
+    let currentWidth = 0;
+
+    for (const seg of segments) {
+      const segWidth = this.visibleWidth(seg);
+
+      // Fallback: if a single segment exceeds maxWidth, hard-truncate it
+      if (segWidth > maxWidth && currentLine.length === 0) {
+        results.push(this.truncateString(seg.replace(/\x1b\[[0-9;]*m/g, ''), maxWidth));
+        continue;
+      }
+
+      if (currentWidth + segWidth > maxWidth && currentLine.length > 0) {
+        // Current segment pushes over — start a new line
+        results.push(currentLine);
+        currentLine = seg.trimStart(); // trim leading space on continuation
+        currentWidth = this.visibleWidth(currentLine);
+      } else {
+        currentLine += seg;
+        currentWidth += segWidth;
+      }
+    }
+    if (currentLine) results.push(currentLine);
+
+    // Ensure ANSI reset at end of each line (prevent color bleed)
+    return results.map(l => l + rst());
+  }
+
   private static truncateString(text: string, maxLen: number): string {
     if (text.length <= maxLen) return text;
     return text.substring(0, maxLen - 2) + '..';
   }
 
   /**
-   * Build notification lines (Phase 3 — structured account context)
+   * Build notification lines (warnings, switch recommendations, version mismatch)
    *
-   * Line format when idle or on show cycle:
-   * - Account: 👤 S2|rimidalvk@gmail.com|🕐:13:18|⌛:3h53m(74%)|📅:143h(50%)@Wed 💰:$740|$3.98/h
-   * - Switch:  💡 Switch to S3|v@ainsys.com|⌛:3h53m(1%)|📅:143h(2%)@Wed
-   * - Secrets: ⚠️ 2 secrets detected (lowest priority, shown last)
+   * NOTE: Account context (active_slot) is now always on Line 1 — skipped here.
    *
    * Display pattern:
    * - Active session (transcript growing): Show 30s → Hide 5min → Repeat
-   * - Idle session (transcript stale >2min): Always show account context
+   * - Idle session (transcript stale >2min): Always show
    *
-   * Priority order: failover > active_slot > slot_switch > version_update > secrets
+   * Priority order: failover > slot_switch > version_update > version_mismatch > quota_stale > secrets
    */
   private static buildNotifications(health: SessionHealth, maxWidth: number, isIdle: boolean = false): string[] {
     const lines: string[] = [];
@@ -641,33 +614,72 @@ export class StatuslineFormatter {
         lines.push(`${c('critical')}${health.failoverNotification}${rst()}`);
       }
 
-      // Secret detection DISABLED — too many false positives (API Key, etc.)
-      // TODO: Re-enable after DetectionEngine confidence scoring is improved
-      // For now, unconditionally clear any stale secret notifications
+      // Secret detection DISABLED — too many false positives
       NotificationManager.remove('secrets_detected');
 
-      // Notification visibility strategy:
-      // - Idle (>2min no transcript growth): show ALL notifications (always visible)
-      // - Active (outputting): standard 30s show / 5min hide cycle for ALL notifications
-      //   Account context only appears during idle gaps — keeps display clean while working
+      // active_slot is now rendered inline on Line 1 — remove from notification cycle
+      NotificationManager.remove('active_slot');
+
+      // Weekly quota waste risk — the one thing user MUST see if pace will lose quota.
+      // Compute from current slot's projections (populated by shell fetch-quotas.sh).
+      try {
+        const lock = SessionLockManager.read(health.sessionId);
+        const quotaData = QuotaBrokerClient.read();
+        const slot = lock?.slotId ? quotaData?.slots?.[lock.slotId] : null;
+        if (slot) {
+          const bestCase = slot.weekly_best_case_projected_util;
+          const projected = slot.weekly_projected_util;
+          const resetDay = slot.weekly_reset_day || 'reset';
+          const GUARANTEED_THRESHOLD = 95;   // best-case < this → waste guaranteed
+          const LIKELY_THRESHOLD = 85;       // current-pace < this → waste likely
+
+          // Clean up previous registrations first (avoid stale alerts)
+          NotificationManager.remove('weekly_quota_waste_certain');
+          NotificationManager.remove('weekly_quota_waste_likely');
+
+          if (bestCase != null && bestCase < GUARANTEED_THRESHOLD) {
+            const waste = Math.max(0, 100 - bestCase);
+            NotificationManager.register(
+              'weekly_quota_waste_certain',
+              `🚨 Weekly quota: ~${waste}% WILL be unused by ${resetDay} (physical max would still waste)`,
+              9
+            );
+          } else if (projected != null && projected < LIKELY_THRESHOLD) {
+            const waste = Math.max(0, 100 - projected);
+            NotificationManager.register(
+              'weekly_quota_waste_likely',
+              `⚠ Weekly quota: at current pace, ~${waste}% may be unused by ${resetDay} — burn faster`,
+              8
+            );
+          }
+        }
+      } catch { /* ignore — notification is non-critical */ }
+
+      // Version mismatch: register notification if installed != running
+      if (health.versionMismatch) {
+        NotificationManager.register(
+          'version_mismatch',
+          `CLI v${health.versionMismatch.installed} installed — restart session to upgrade (running v${health.versionMismatch.running})`,
+          8
+        );
+      } else {
+        NotificationManager.remove('version_mismatch');
+      }
+
       const active = isIdle
         ? NotificationManager.getAllRegistered()
         : NotificationManager.getActive();
 
-      // Read merged quota data once for all notification rendering
-      const quotaData = QuotaBrokerClient.read();
-
-      // Show max 3 notifications (account + switch + 1 more)
+      // Show max 3 notifications
       for (const [type, notification] of active.slice(0, 3)) {
+        // Skip active_slot — it's on Line 1 now
+        if (type === 'active_slot') continue;
+
         NotificationManager.recordShown(type);
 
         let line = '';
 
         switch (type) {
-          case 'active_slot':
-            line = this.buildAccountContextLine(health, quotaData, maxWidth);
-            break;
-
           case 'slot_switch': {
             // Guard: don't show "Switch to SX" if already on slot X
             const lock = SessionLockManager.read(health.sessionId);
@@ -689,8 +701,22 @@ export class StatuslineFormatter {
             line = `${c('cost')}⚠️ ${notification.message}${rst()}`;
             break;
 
+          case 'version_mismatch':
+            line = `${c('critical')}⚠ ${notification.message}${rst()}`;
+            break;
+
           case 'quota_stale':
             line = `${c('critical')}⚠ ${notification.message}${rst()}`;
+            break;
+
+          case 'weekly_quota_waste_certain':
+            // Bright red: loss is mathematically guaranteed — needs user's full attention
+            line = `${c('pacingRed')}${notification.message}${rst()}`;
+            break;
+
+          case 'weekly_quota_waste_likely':
+            // Orange: action needed but not yet guaranteed to waste
+            line = `${c('pacingOrange')}${notification.message}${rst()}`;
             break;
 
           case 'restart_ready':
@@ -722,69 +748,6 @@ export class StatuslineFormatter {
   }
 
   /**
-   * Build rich account context line from live quota data.
-   * Format: 👤 S2|email|🕐:HH:MM|⌛:Xh(Y%)|📅:Zh(W%)@Day 💰:$X|$Y/h
-   */
-  private static buildAccountContextLine(
-    health: SessionHealth,
-    quotaData: ReturnType<typeof QuotaBrokerClient.read>,
-    maxWidth: number
-  ): string {
-    const lock = SessionLockManager.read(health.sessionId);
-    if (!lock?.slotId) {
-      // Fallback: simple notification
-      const notif = NotificationManager.get('active_slot');
-      return notif ? `${c('usage')}👤 ${notif.message}${rst()}` : '';
-    }
-
-    const slotMatch = lock.slotId.match(/slot-(\d+)/);
-    const slotNum = slotMatch ? slotMatch[1] : '?';
-    const email = lock.email || health.launch?.authProfile || '';
-
-    // Slot color (same as fmtSlotIndicator)
-    const slotColors: Record<string, string> = {
-      '1': c('critical'), '2': c('usage'), '3': c('weeklyBudget'), '4': c('cost')
-    };
-    const slotColor = slotColors[slotNum] || '';
-
-    // Time (same color as line 2 clock)
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-
-    // Quota data for this slot
-    const slot = quotaData?.slots?.[lock.slotId];
-    const parts: string[] = [];
-
-    // 👤 S2|email — slot-colored prefix
-    parts.push(`${slotColor}👤 S${slotNum}${rst()}|${email}`);
-
-    // 🕐 — time-colored
-    parts.push(`🕐:${c('time')}${hh}:${mm}${rst()}`);
-
-    if (slot) {
-      // ⌛ daily budget — budget-colored
-      parts.push(`⌛:${c('budget')}${this.fmtSlotDailyBudget(slot)}${rst()}`);
-
-      // 📅 weekly quota — weeklyBudget-colored
-      parts.push(`📅:${c('weeklyBudget')}${this.fmtSlotWeeklyQuota(slot)}${rst()}`);
-    }
-
-    let line = parts.join('|');
-
-    // Append cost if available — cost/burnRate-colored (space-separated from rest)
-    const sessionCost = health.billing?.sessionCost || 0;
-    const burnRate = health.billing?.sessionBurnRate || health.billing?.burnRatePerHour || 0;
-    if (sessionCost >= 0.01) {
-      const costPart = `${c('cost')}${this.formatMoney(sessionCost)}${rst()}`;
-      const burnPart = burnRate >= 0.01 ? `|${c('burnRate')}${this.formatMoney(burnRate)}/h${rst()}` : '';
-      line += ` 💰:${costPart}${burnPart}`;
-    }
-
-    return line;
-  }
-
-  /**
    * Build switch recommendation line.
    * The message is pre-composed by QuotaBrokerClient.getSwitchMessage()
    * in rich format: Switch to S3|email|⌛:Xh(Y%)|📅:Zh(W%)@Day
@@ -797,22 +760,222 @@ export class StatuslineFormatter {
     return `${c('usage')}💡 ${message}${rst()}`;
   }
 
-  /** Format slot daily budget: Xh(Y%) from five_hour_util */
+  /** Format slot daily budget: Xh(Y%) — time UNTIL reset from five_hour_resets_at */
   private static fmtSlotDailyBudget(slot: MergedQuotaSlot): string {
     const pct = Math.round(slot.five_hour_util || 0);
-    // five_hour_util is % used out of 5h window
-    const hoursUsed = (pct / 100) * 5;
-    const hoursLeft = Math.max(0, 5 - hoursUsed);
-    const h = Math.floor(hoursLeft);
-    const m = Math.round((hoursLeft - h) * 60);
-    return m > 0 ? `${h}h${m}m(${pct}%)` : `${h}h(${pct}%)`;
+
+    if (slot.five_hour_resets_at) {
+      const resetMs = new Date(slot.five_hour_resets_at).getTime();
+      if (!isNaN(resetMs)) {
+        const diffSec = Math.max(0, Math.floor((resetMs - Date.now()) / 1000));
+        if (diffSec <= 0) return `reset(${pct}%)`;
+        const h = Math.floor(diffSec / 3600);
+        const m = Math.floor((diffSec % 3600) / 60);
+        const tl = h > 0 ? (m > 0 ? `${h}h${m}m` : `${h}h`) : `${m}m`;
+        return `${tl}(${pct}%)`;
+      }
+    }
+    return `(${pct}%)`;
   }
 
-  /** Format slot weekly quota: Zh(W%)@Day from seven_day_util */
-  private static fmtSlotWeeklyQuota(slot: MergedQuotaSlot): string {
+  /**
+   * Resolve pacing status → ANSI color (6-band scheme from user spec)
+   * way_too_slow/under → bright red; not_fast_enough/slow → blue;
+   * a_bit_too_slow → yellow; good/on_track → green;
+   * much_too_fast/fast → orange; way_too_fast/over → violet.
+   * Legacy pacing values mapped for backward compat.
+   */
+  private static pacingColor(status: string | undefined): string {
+    switch (status) {
+      case 'way_too_slow': case 'under': case 'exhausted':
+        return c('pacingRed');        // alarm: need to act now
+      case 'not_fast_enough': case 'slow':
+        return c('pacingOrange');     // attention: under pace
+      case 'a_bit_too_slow':
+        return c('pacingYellow');     // caution: slightly under
+      case 'good': case 'on_track':
+        return c('pacingGreen');      // ideal
+      case 'much_too_fast': case 'fast':
+        return c('pacingBlue');       // cool: over pace (not dangerous)
+      case 'way_too_fast': case 'over':
+        return c('pacingViolet');     // outlier: way over (still not dangerous)
+      default:
+        return c('version');          // dim gray — unknown/reset/target-only
+    }
+  }
+
+  /**
+   * Format combined burn rate segment: 🔥:{5h_rate}%/h|{7d_rate}%/d
+   *
+   * Low-confidence marker (burn_sample_count_5h < 3):
+   * - Rate prefixed with `~` (estimate)
+   * - Color overridden to neutralLight (245) — muted grey, regardless of pacing status
+   *
+   * High-confidence (≥3 samples): normal 6-band pacing color.
+   * Shows min-max range for 5h when ≥3 distinct samples and min ≠ max.
+   */
+  private static fmtBurnRate(slot: MergedQuotaSlot): string {
+    // ── 5h rate ──
+    const target5h = slot.target_burn_rate_5h;
+    const avg5h    = slot.burn_rate_1h_avg_5h ?? slot.five_hour_burn_rate;
+    const min5h    = slot.burn_rate_1h_min_5h;
+    const max5h    = slot.burn_rate_1h_max_5h;
+    const sampleCt = slot.burn_sample_count_5h ?? 0;
+    const lowConfidence = sampleCt < 3;
+    const hasActual5h = avg5h != null && avg5h > 0;
+
+    let part5h = '';
+    if (hasActual5h) {
+      const tilde = lowConfidence ? '~' : '';
+      const color = lowConfidence ? c('neutralLight') : this.pacingColor(slot.pacing_status_5h);
+      if (!lowConfidence && min5h != null && max5h != null && min5h !== max5h && sampleCt >= 3) {
+        part5h = `${color}${tilde}${min5h}-${max5h}%/h${rst()}`;
+      } else {
+        part5h = `${color}${tilde}${avg5h}%/h${rst()}`;
+      }
+    } else if (target5h != null && target5h > 0) {
+      part5h = `${c('version')}${target5h}%/h${rst()}`;
+    }
+
+    // ── 7d rate (%/day) ──
+    const target7d = slot.target_burn_rate_7d_per_day;
+    const actual7d = slot.seven_day_burn_rate_per_day;
+
+    let part7d = '';
+    if (actual7d != null && actual7d > 0) {
+      const color = this.pacingColor(slot.pacing_status_7d);
+      part7d = `${color}${actual7d}%/d${rst()}`;
+    } else if (target7d != null && target7d > 0) {
+      part7d = `${c('version')}${target7d}%/d${rst()}`;
+    }
+
+    if (!part5h && !part7d) return '';
+    const inner = [part5h, part7d].filter(Boolean).join('|');
+    return `🔥:${inner}`;
+  }
+
+  /**
+   * Compute week_progress_pct from seven_day_resets_at.
+   * Represents how far into the current week we are (0–100).
+   */
+  private static weekProgressPct(slot: MergedQuotaSlot): number | null {
+    if (!slot.seven_day_resets_at) return null;
+    const resetMs = new Date(slot.seven_day_resets_at).getTime();
+    if (isNaN(resetMs)) return null;
+    const hoursUntilReset = Math.max(0, (resetMs - Date.now()) / 3_600_000);
+    return Math.round(100 - (hoursUntilReset / 168) * 100);
+  }
+
+  /**
+   * Format slot weekly quota with color derived from loss-risk rules.
+   * Returns both text and color so the caller can wrap them with reset.
+   *
+   * Priority (first match wins):
+   * 1. weekly_projected_util < 100 AND sample_count ≥ 3 AND week_progress ≥ 20 → CERTAIN LOSS (red bold)
+   * 2. best_case_projected_util < 95                                             → LIKELY LOSS (red bold)
+   * 3. weekly_projected_util < 90                                                → TRENDING (orange bold)
+   * 4. weekly_projected_util < 95                                                → MARGIN AT RISK (yellow)
+   * 5. weekly_projected_util 95–105                                              → ON TRACK (green)
+   * 6. weekly_projected_util > 105                                               → WASTING (blue)
+   * 7. missing data                                                               → neutral (250)
+   *
+   * Text format: Zh(W%→P%) when projection available, else Zh(W%).
+   */
+  private static fmtSlotWeeklyQuotaColored(slot: MergedQuotaSlot): { text: string; color: string } {
     const pct = Math.round(slot.seven_day_util || 0);
     const hours = Math.max(0, Math.floor(slot.weekly_budget_remaining_hours || 0));
-    const day = slot.weekly_reset_day || '';
-    return day ? `${hours}h(${pct}%)@${day}` : `${hours}h(${pct}%)`;
+    const sampleCt = slot.burn_sample_count_5h ?? 0;
+    const bestCase = slot.weekly_best_case_projected_util;
+    const projected = slot.weekly_projected_util;
+    const weekProg = this.weekProgressPct(slot);
+
+    // Build inline projection suffix: →P%
+    let projSuffix = '';
+    if (sampleCt >= 3 && projected != null) {
+      projSuffix = `→${Math.round(projected)}%`;
+    } else if (bestCase != null) {
+      projSuffix = `→${Math.round(bestCase)}%`;
+    }
+    const text = projSuffix
+      ? `${hours}h(${pct}%${projSuffix})`
+      : `${hours}h(${pct}%)`;
+
+    // Color rules
+    const noColor = (process.env.NO_COLOR === '1' || process.env.NO_COLOR === 'true');
+
+    if (projected != null && projected < 100 && sampleCt >= 3 && (weekProg ?? 0) >= 20) {
+      return { text, color: noColor ? '' : `${COLORS.bold}${COLORS.pacingRed}` };
+    }
+    if (bestCase != null && bestCase < 95) {
+      return { text, color: noColor ? '' : `${COLORS.bold}${COLORS.pacingRed}` };
+    }
+    if (projected != null && projected < 90) {
+      return { text, color: noColor ? '' : `${COLORS.bold}${COLORS.pacingOrange}` };
+    }
+    if (projected != null && projected < 95) {
+      return { text, color: noColor ? '' : COLORS.pacingYellow };
+    }
+    if (projected != null && projected >= 95 && projected <= 105) {
+      return { text, color: noColor ? '' : COLORS.pacingGreen };
+    }
+    if (projected != null && projected > 105) {
+      return { text, color: noColor ? '' : COLORS.pacingBlue };
+    }
+    // Missing or insufficient data
+    return { text, color: noColor ? '' : COLORS.neutralId };
+  }
+
+  /** Format slot weekly quota: Zh(W%) — legacy plain text (kept for external use) */
+  private static fmtSlotWeeklyQuota(slot: MergedQuotaSlot): string {
+    return this.fmtSlotWeeklyQuotaColored(slot).text;
+  }
+
+  /**
+   * Format slot badge: 👤SN|email  (with optional ban prefix ⛔)
+   * When banned: entire badge dimmed to neutralLight (245).
+   */
+  private static fmtSlotBadge(slotNum: string, email: string, isBanned: boolean): string {
+    if (isBanned) {
+      return `${c('neutralLight')}⛔S${slotNum}|${email}${rst()}`;
+    }
+    return `${c('neutralId')}👤S${slotNum}${rst()}|${email}`;
+  }
+
+  /**
+   * Check if a slot is currently in rate-limit backoff.
+   * Reads ~/.claude/session-health/.fetch-rate-limit-state.{slotId}
+   */
+  private static isSlotBanned(slotId: string): boolean {
+    try {
+      const stateDir = `${homedir()}/.claude/session-health`;
+      const statePath = `${stateDir}/.fetch-rate-limit-state.${slotId}`;
+      if (!existsSync(statePath)) return false;
+      const content = readFileSync(statePath, 'utf-8');
+      const state = JSON.parse(content) as { backoff_until_epoch?: number };
+      const backoffUntil = state.backoff_until_epoch || 0;
+      return Math.floor(Date.now() / 1000) < backoffUntil;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Format stale data warning based on mergedAtMs (Unix timestamp ms of cache write).
+   * - < 15min  → empty string
+   * - 15–30min → " ⚠ stale Nm" in neutralLight (245)
+   * - > 30min  → " ⚠⚠ STALE Nm" in pacingOrange (208) + bold
+   */
+  static fmtStaleWarning(mergedAtMs: number): string {
+    const ageMin = Math.floor((Date.now() - mergedAtMs) / 60_000);
+    const noColor = (process.env.NO_COLOR === '1' || process.env.NO_COLOR === 'true');
+    if (ageMin < 15) return '';
+    if (ageMin <= 30) {
+      const col = noColor ? '' : COLORS.neutralLight;
+      const r = noColor ? '' : COLORS.reset;
+      return ` ${col}⚠ stale ${ageMin}m${r}`;
+    }
+    const col = noColor ? '' : `${COLORS.bold}${COLORS.pacingOrange}`;
+    const r = noColor ? '' : COLORS.reset;
+    return ` ${col}⚠⚠ STALE ${ageMin}m${r}`;
   }
 }

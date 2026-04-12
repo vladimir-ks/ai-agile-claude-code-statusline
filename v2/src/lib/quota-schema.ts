@@ -1,0 +1,245 @@
+/**
+ * quota-schema.ts - Schema validation for quota data pipeline
+ *
+ * All readers/writers of quota JSON/YAML must validate through these functions.
+ * Shell mirror: ~/_claude-configs/shell-config/lib/quota-schema.sh
+ *
+ * Return shape: {ok: boolean, errors: string[]}
+ * 3 consecutive bad reads -> quarantine file (rename to .corrupt-{ts})
+ */
+
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
+import { homedir } from 'os';
+
+export const QUOTA_SCHEMA_VERSION = 1;
+
+const EPOCH_WINDOW_S = 30 * 24 * 3600; // +/-30 days
+const BAD_READ_COUNTS = new Map<string, number>();
+
+export interface ValidationResult {
+  ok: boolean;
+  errors: string[];
+}
+
+export interface ReadResult<T> {
+  data: T | null;
+  isStale: boolean;
+  fromLkg: boolean;
+}
+
+// ---- Internal helpers --------------------------------------------------------
+
+function epochInRange(val: unknown): boolean {
+  if (typeof val !== 'number') return false;
+  const now = Math.floor(Date.now() / 1000);
+  return val >= now - EPOCH_WINDOW_S && val <= now + EPOCH_WINDOW_S;
+}
+
+function pctInRange(val: unknown): boolean {
+  if (typeof val !== 'number') return false;
+  return val >= 0 && val <= 100;
+}
+
+function isNumberOrNull(val: unknown): boolean {
+  return val === null || typeof val === 'number';
+}
+
+const VALID_PACING = new Set([
+  'under', 'slow', 'on_track', 'fast', 'over', 'wasted',
+  'way_too_slow', 'not_fast_enough', 'a_bit_too_slow', 'good',
+  'much_too_fast', 'way_too_fast', 'exhausted', 'reset', 'unknown',
+]);
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function pass(): ValidationResult { return { ok: true, errors: [] }; }
+function fail(errors: string[]): ValidationResult { return { ok: false, errors }; }
+
+// ---- validateHotSwapQuota ---------------------------------------------------
+// Validates top-level slot-keyed object. Each slot: five_hour_util, seven_day_util.
+export function validateHotSwapQuota(obj: unknown): ValidationResult {
+  if (!isObj(obj)) return fail(['parse: not an object']);
+
+  const slotEntries = Object.entries(obj).filter(([, v]) => isObj(v));
+  if (slotEntries.length === 0) return fail(['required: no slot entries found']);
+
+  const errors: string[] = [];
+  for (const [slotId, slot] of slotEntries) {
+    if (!isObj(slot)) continue;
+    if (!('five_hour_util' in slot) || !('seven_day_util' in slot)) {
+      errors.push(`required: slot ${slotId} missing five_hour_util or seven_day_util`);
+      continue;
+    }
+    if (!pctInRange(slot.five_hour_util)) {
+      errors.push(`range: slot ${slotId} five_hour_util out of [0,100]: ${slot.five_hour_util}`);
+    }
+    if (!pctInRange(slot.seven_day_util)) {
+      errors.push(`range: slot ${slotId} seven_day_util out of [0,100]: ${slot.seven_day_util}`);
+    }
+  }
+
+  return errors.length === 0 ? pass() : fail(errors);
+}
+
+// ---- validateMergedCache ----------------------------------------------------
+// Required: ts (epoch), active_slot (string), slots (object).
+// Per-slot: five_hour_util [0-100], pacing_status_5h (enum), target_burn_rate_5h (number|null).
+export function validateMergedCache(obj: unknown): ValidationResult {
+  if (!isObj(obj)) return fail(['parse: not an object']);
+
+  const errors: string[] = [];
+
+  if (typeof obj.ts !== 'number') errors.push('required: ts missing or not a number');
+  if (typeof obj.active_slot !== 'string') errors.push('required: active_slot missing or not a string');
+  if (!isObj(obj.slots)) errors.push('required: slots missing or not an object');
+
+  if (errors.length > 0) return fail(errors);
+
+  if (!epochInRange(obj.ts as number)) {
+    errors.push(`range: ts ${obj.ts} outside +/-30d window`);
+  }
+
+  const slots = obj.slots as Record<string, unknown>;
+  for (const [slotId, slot] of Object.entries(slots)) {
+    if (!isObj(slot)) {
+      errors.push(`required: slot ${slotId} not an object`);
+      continue;
+    }
+    if ('five_hour_util' in slot && !pctInRange(slot.five_hour_util)) {
+      errors.push(`range: slot ${slotId} five_hour_util out of [0,100]: ${slot.five_hour_util}`);
+    }
+    if ('pacing_status_5h' in slot && slot.pacing_status_5h !== null && slot.pacing_status_5h !== undefined) {
+      if (!VALID_PACING.has(slot.pacing_status_5h as string)) {
+        errors.push(`range: slot ${slotId} pacing_status_5h invalid: ${slot.pacing_status_5h}`);
+      }
+    }
+    if ('target_burn_rate_5h' in slot && !isNumberOrNull(slot.target_burn_rate_5h)) {
+      errors.push(`range: slot ${slotId} target_burn_rate_5h must be number or null`);
+    }
+  }
+
+  return errors.length === 0 ? pass() : fail(errors);
+}
+
+// ---- validateLiveBurnEstimate -----------------------------------------------
+// Required: ts, slot, tokens_5h, tokens_per_hour, live_util_estimate [0-100], calibration_age_s.
+export function validateLiveBurnEstimate(obj: unknown): ValidationResult {
+  if (!isObj(obj)) return fail(['parse: not an object']);
+
+  const errors: string[] = [];
+
+  for (const key of ['ts', 'slot', 'tokens_5h', 'tokens_per_hour', 'live_util_estimate', 'calibration_age_s']) {
+    if (!(key in obj)) errors.push(`required: ${key} missing`);
+  }
+  if (errors.length > 0) return fail(errors);
+
+  if (!epochInRange(obj.ts as number)) {
+    errors.push(`range: ts ${obj.ts} outside +/-30d window`);
+  }
+  if (!pctInRange(obj.live_util_estimate)) {
+    errors.push(`range: live_util_estimate out of [0,100]: ${obj.live_util_estimate}`);
+  }
+  if (typeof obj.tokens_per_hour !== 'number') {
+    errors.push('range: tokens_per_hour must be a number');
+  }
+  const cAge = obj.calibration_age_s;
+  if (typeof cAge !== 'number' || cAge < 0) {
+    errors.push('range: calibration_age_s must be non-negative number');
+  }
+
+  return errors.length === 0 ? pass() : fail(errors);
+}
+
+// ---- validateRateLimitState -------------------------------------------------
+// Required: consecutive_rate_limits (int), backoff_until_epoch (epoch), last_hit (string).
+export function validateRateLimitState(obj: unknown): ValidationResult {
+  if (!isObj(obj)) return fail(['parse: not an object']);
+
+  const errors: string[] = [];
+
+  for (const key of ['consecutive_rate_limits', 'backoff_until_epoch', 'last_hit']) {
+    if (!(key in obj)) errors.push(`required: ${key} missing`);
+  }
+  if (errors.length > 0) return fail(errors);
+
+  const crl = obj.consecutive_rate_limits;
+  if (typeof crl !== 'number' || !Number.isInteger(crl) || crl < 0) {
+    errors.push('range: consecutive_rate_limits must be non-negative integer');
+  }
+  const bue = obj.backoff_until_epoch;
+  if (typeof bue !== 'number') {
+    errors.push('range: backoff_until_epoch must be a number');
+  } else if (bue !== 0 && !epochInRange(bue)) {
+    errors.push(`range: backoff_until_epoch ${bue} outside +/-30d window`);
+  }
+  if (typeof obj.last_hit !== 'string' || obj.last_hit === '') {
+    errors.push('required: last_hit must be non-empty string');
+  }
+
+  return errors.length === 0 ? pass() : fail(errors);
+}
+
+// ---- readWithLkg ------------------------------------------------------------
+// Reads path, validates. On bad read falls back to lkg_path (with isStale=true).
+// 3 consecutive bad reads -> quarantine path to .corrupt-{epoch}.
+export function readWithLkg<T>(
+  path: string,
+  validate: (obj: unknown) => ValidationResult,
+  lkgPath: string,
+): ReadResult<T> {
+  const badCount = BAD_READ_COUNTS.get(path) ?? 0;
+
+  let parsed: T | null = null;
+  let valid = false;
+
+  if (existsSync(path)) {
+    try {
+      const raw = readFileSync(path, 'utf-8');
+      const obj = JSON.parse(raw) as unknown;
+      const result = validate(obj);
+      if (result.ok) {
+        parsed = obj as T;
+        valid = true;
+      }
+    } catch {
+      // parse failure - fall through to lkg
+    }
+  }
+
+  if (valid && parsed !== null) {
+    BAD_READ_COUNTS.set(path, 0);
+    try {
+      mkdirSync(dirname(lkgPath), { recursive: true });
+      writeFileSync(lkgPath + '.tmp', JSON.stringify(parsed));
+      renameSync(lkgPath + '.tmp', lkgPath);
+    } catch { /* best-effort lkg update */ }
+    return { data: parsed, isStale: false, fromLkg: false };
+  }
+
+  // Bad read
+  const newCount = badCount + 1;
+  BAD_READ_COUNTS.set(path, newCount);
+
+  if (newCount >= 3 && existsSync(path)) {
+    const quarantine = `${path}.corrupt-${Math.floor(Date.now() / 1000)}`;
+    try { renameSync(path, quarantine); } catch { /* best-effort */ }
+    BAD_READ_COUNTS.set(path, 0);
+  }
+
+  // Fallback to lkg
+  if (existsSync(lkgPath)) {
+    try {
+      const raw = readFileSync(lkgPath, 'utf-8');
+      const obj = JSON.parse(raw) as T;
+      const stale = { ...(obj as object), isStale: true } as T;
+      return { data: stale, isStale: true, fromLkg: true };
+    } catch { /* lkg also corrupt */ }
+  }
+
+  return { data: null, isStale: true, fromLkg: false };
+}
+
+export const _quotaSchemaHealthPath = `${homedir()}/.claude/session-health/pipeline-heartbeat.jsonl`;

@@ -54,8 +54,12 @@ export const billingSource: DataSourceDescriptor<BillingSourceData> = {
         )
       : 'unknown';
 
-    // Attempt 1: OAuth API
-    if (slotStatus !== 'inactive') {
+    // Attempt 1: OAuth API — DISABLED by default.
+    // Shell fetch-quotas.sh owns the Anthropic /api/oauth/usage endpoint.
+    // Quota data reaches the statusline via merged-quota-cache.json (QuotaBrokerClient).
+    // The TS daemon used to duplicate this call per-pane → 429 ban spirals.
+    // Set STATUSLINE_OAUTH_API=1 to re-enable (emergency only).
+    if (process.env.STATUSLINE_OAUTH_API === '1' && slotStatus !== 'inactive') {
       const oauthStart = Date.now();
       try {
         const oauthBilling = await AnthropicOAuthAPI.fetchUsage(
