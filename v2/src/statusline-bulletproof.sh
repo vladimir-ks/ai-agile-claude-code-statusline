@@ -78,31 +78,32 @@ mark_daemon_spawn() {
 # LAZY MODE DETECTION
 # ============================================================================
 
-# Returns 0 (true) if hook should use fallback render instead of daemon output.
-# Three triggers:
-#   1. STATUSLINE_LAZY_MODE=1 env var (explicit)
-#   2. .statusline-lazy-mode-forced file present (watchdog-set after N respawns)
-#   3. Session health file is stale (daemon dead/stuck)
+# Returns 0 (true) when daemon is EXPLICITLY disabled. Explicit-only because
+# a stale/missing session file is a RECOVERY path, not a reason to skip
+# daemon spawn — otherwise we deadlock (file missing → lazy → no spawn →
+# file stays missing forever).
 _lazy_mode_active() {
   # Explicit env override
   [[ "${STATUSLINE_LAZY_MODE:-0}" == "1" ]] && return 0
-  # Watchdog forced file
+  # Watchdog forced file (set after N consecutive daemon respawn failures)
   [[ -f "$LAZY_MODE_FORCED_FILE" ]] && return 0
-  # Session file stale check — requires session_id from JSON_INPUT
+  return 1
+}
+
+# True when session file is missing or past its staleness TTL. Used only as
+# a safety-net signal to pick _fallback_render when display-only produced
+# nothing — does NOT gate daemon spawn.
+_session_file_stale() {
   local sid
   sid=$(printf '%s' "${JSON_INPUT:-}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null || true)
-  if [[ -n "$sid" ]]; then
-    local sf="${HEALTH_DIR}/${sid}.json"
-    if [[ ! -f "$sf" ]]; then
-      return 0  # File missing → fallback
-    fi
-    local now sf_mtime sf_age
-    now=$(date +%s)
-    sf_mtime=$(stat -f %m "$sf" 2>/dev/null || echo 0)
-    sf_age=$((now - sf_mtime))
-    [[ "$sf_age" -gt "$SESSION_FILE_STALE_TTL" ]] && return 0
-  fi
-  return 1
+  [[ -z "$sid" ]] && return 0
+  local sf="${HEALTH_DIR}/${sid}.json"
+  [[ ! -f "$sf" ]] && return 0
+  local now sf_mtime sf_age
+  now=$(date +%s)
+  sf_mtime=$(stat -f %m "$sf" 2>/dev/null || echo 0)
+  sf_age=$((now - sf_mtime))
+  [[ "$sf_age" -gt "$SESSION_FILE_STALE_TTL" ]]
 }
 
 # ============================================================================
@@ -302,10 +303,12 @@ fi
 export STATUSLINE_WIDTH
 
 # ============================================================================
-# LAZY MODE FAST PATH
+# LAZY MODE FAST PATH (explicit disable only)
 # ============================================================================
-# When daemon is dead/stale or STATUSLINE_LAZY_MODE=1, render inline and skip
-# the bun display script entirely. Zero bun startup overhead on this path.
+# Fast-exit ONLY when daemon is EXPLICITLY disabled (env or watchdog forced).
+# Stale/missing session file is NOT a reason to skip daemon spawn — that's
+# a recovery path. _session_file_stale() below triggers fallback_render as
+# safety net but allows daemon to spawn so next tick is back to normal.
 
 if _lazy_mode_active; then
   _fallback_render
