@@ -398,17 +398,25 @@ export class QuotaBrokerClient {
       if (files.length === 0) return false; // No backoff files = not backed off
 
       const nowEpoch = Math.floor(Date.now() / 1000);
+      let sawCleanFile = false;
       for (const file of files) {
         try {
           const content = readFileSync(`${stateDir}/${file}`, 'utf-8');
           const state = JSON.parse(content);
           const backoffUntil = state.backoff_until_epoch || 0;
+          sawCleanFile = true;
           if (backoffUntil <= nowEpoch) return false; // At least one slot's backoff expired
         } catch {
-          return false; // Corrupt state = assume not backed off
+          // Corrupt state — fail CLOSED (don't assume clear). Skip this file; if
+          // any OTHER slot has a readable cleared backoff we still return false.
+          // If every file is corrupt or backed off we err on the side of NOT
+          // spawning the broker to avoid extending a ban on guesswork.
+          continue;
         }
       }
-      return true; // All slots still in backoff
+      // No readable file cleared backoff. If we never saw a parsable file,
+      // treat as "state unknown → fail closed" so we don't blindly spawn.
+      return sawCleanFile; // true = at least one slot readable + still in backoff
     } catch {
       return false;
     }

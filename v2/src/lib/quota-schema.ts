@@ -272,8 +272,11 @@ export function readWithLkg<T>(
     BAD_READ_COUNTS.set(path, 0);
     try {
       mkdirSync(dirname(lkgPath), { recursive: true });
-      writeFileSync(lkgPath + '.tmp', JSON.stringify(parsed));
-      renameSync(lkgPath + '.tmp', lkgPath);
+      // PID-qualified tmp path: concurrent bun processes must not race on the
+      // same `.tmp` file, which truncates in-flight writes from another process.
+      const tmpPath = `${lkgPath}.tmp.${process.pid}`;
+      writeFileSync(tmpPath, JSON.stringify(parsed));
+      renameSync(tmpPath, lkgPath);
     } catch { /* best-effort lkg update */ }
     return { data: parsed, isStale: false, fromLkg: false };
   }

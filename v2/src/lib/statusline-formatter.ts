@@ -670,7 +670,16 @@ export class StatuslineFormatter {
             NotificationManager.remove('weekly_quota_waste_likely');
           }
         }
-      } catch { /* ignore — notification is non-critical */ }
+      } catch (e) {
+        // Weekly loss-risk is USER-CRITICAL — silent failure violates spec. Log
+        // so dashboards can surface "notification skipped due to source failure".
+        try {
+          writeHeartbeat('statusline-formatter', 'weekly_waste_notification_skipped', {
+            status: 'warn',
+            extra: { error: e instanceof Error ? e.message : String(e) },
+          });
+        } catch { /* heartbeat is best-effort */ }
+      }
 
       // Version mismatch: register notification if installed != running
       if (health.versionMismatch) {
