@@ -32,8 +32,29 @@
 import DataGatherer from './lib/data-gatherer';
 import ProcessLock from './lib/process-lock';
 import { ClaudeCodeInput } from './types/session-health';
+import { VersionChecker } from './lib/version-checker';
 import { appendFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir } from 'os';
+
+// ============================================================================
+// LAZY MODE GATE (Phase 5 — daemon-optional fallback)
+// ============================================================================
+// STATUSLINE_LAZY_MODE=1 → hook renders inline; daemon must not run (no-op exit).
+// Purpose: let user disable daemon without uninstalling (e.g. when bun is absent,
+// or for performance-sensitive environments).
+if (process.env.STATUSLINE_LAZY_MODE === '1') {
+  // Ensure log dir exists before writing
+  try {
+    const dir = `${homedir()}/.claude/session-health`;
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    appendFileSync(
+      `${dir}/daemon.log`,
+      `[${new Date().toISOString()}] [PID:${process.pid}] [WARN] STATUSLINE_LAZY_MODE=1 — daemon disabled, exiting (hook renders inline)\n`,
+      { mode: 0o600 }
+    );
+  } catch { /* best-effort logging — never block exit */ }
+  process.exit(0);
+}
 
 const LOG_PATH = `${homedir()}/.claude/session-health/daemon.log`;
 const MAX_LOG_SIZE = 100 * 1024; // 100KB max log size
@@ -134,6 +155,10 @@ async function main(): Promise<void> {
       jsonInput?.transcript_path || null,
       jsonInput
     );
+
+    // Cache installed CLI version for display-layer mismatch detection
+    // Rate-gated internally (skips if cache <5min old), non-critical
+    try { VersionChecker.cacheInstalledVersion(); } catch { /* non-critical */ }
 
     const duration = Date.now() - startTime;
     log('INFO', `Session ${sessionId} updated in ${duration}ms`);

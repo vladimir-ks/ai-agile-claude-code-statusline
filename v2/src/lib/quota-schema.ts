@@ -183,6 +183,64 @@ export function validateRateLimitState(obj: unknown): ValidationResult {
   return errors.length === 0 ? pass() : fail(errors);
 }
 
+// ---- validateCalibrationState -----------------------------------------------
+// Required: schema_version (1), slot (string), last_updated_epoch (epoch),
+//           tokens_per_percent_samples (number[]), tokens_per_percent_avg (number),
+//           tokens_per_percent_stddev (number), confidence ("none"|"low"|"high"),
+//           last_drift_event (epoch|null), last_drift_magnitude_pct (number|null)
+export function validateCalibrationState(obj: unknown): ValidationResult {
+  if (!isObj(obj)) return fail(['parse: not an object']);
+
+  const errors: string[] = [];
+
+  for (const key of [
+    'schema_version', 'slot', 'last_updated_epoch', 'tokens_per_percent_samples',
+    'tokens_per_percent_avg', 'tokens_per_percent_stddev', 'confidence',
+  ]) {
+    if (!(key in obj)) errors.push(`required: ${key} missing`);
+  }
+  if (errors.length > 0) return fail(errors);
+
+  if (obj.schema_version !== 1) {
+    errors.push(`range: schema_version must be 1, got ${obj.schema_version}`);
+  }
+  if (typeof obj.slot !== 'string' || obj.slot === '') {
+    errors.push('required: slot must be non-empty string');
+  }
+  if (!epochInRange(obj.last_updated_epoch as number)) {
+    errors.push(`range: last_updated_epoch ${obj.last_updated_epoch} outside +/-30d window`);
+  }
+  if (!Array.isArray(obj.tokens_per_percent_samples)) {
+    errors.push('required: tokens_per_percent_samples must be array');
+  } else if (obj.tokens_per_percent_samples.length > 10) {
+    errors.push(`range: tokens_per_percent_samples length ${obj.tokens_per_percent_samples.length} > 10`);
+  }
+  if (typeof obj.tokens_per_percent_avg !== 'number' || (obj.tokens_per_percent_avg as number) < 0) {
+    errors.push('range: tokens_per_percent_avg must be non-negative number');
+  }
+  if (typeof obj.tokens_per_percent_stddev !== 'number' || (obj.tokens_per_percent_stddev as number) < 0) {
+    errors.push('range: tokens_per_percent_stddev must be non-negative number');
+  }
+  const validConf = new Set(['none', 'low', 'high']);
+  if (!validConf.has(obj.confidence as string)) {
+    errors.push(`range: confidence must be none|low|high, got ${obj.confidence}`);
+  }
+  // last_drift_event: null or epoch
+  if ('last_drift_event' in obj && obj.last_drift_event !== null) {
+    if (!epochInRange(obj.last_drift_event as number)) {
+      errors.push(`range: last_drift_event ${obj.last_drift_event} outside +/-30d window`);
+    }
+  }
+  // last_drift_magnitude_pct: null or non-negative number
+  if ('last_drift_magnitude_pct' in obj && obj.last_drift_magnitude_pct !== null) {
+    if (typeof obj.last_drift_magnitude_pct !== 'number' || (obj.last_drift_magnitude_pct as number) < 0) {
+      errors.push('range: last_drift_magnitude_pct must be non-negative number or null');
+    }
+  }
+
+  return errors.length === 0 ? pass() : fail(errors);
+}
+
 // ---- readWithLkg ------------------------------------------------------------
 // Reads path, validates. On bad read falls back to lkg_path (with isStale=true).
 // 3 consecutive bad reads -> quarantine path to .corrupt-{epoch}.
