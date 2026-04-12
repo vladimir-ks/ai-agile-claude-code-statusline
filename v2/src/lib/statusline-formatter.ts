@@ -645,24 +645,29 @@ export class StatuslineFormatter {
           const GUARANTEED_THRESHOLD = 95;   // best-case < this → waste guaranteed
           const LIKELY_THRESHOLD = 85;       // current-pace < this → waste likely
 
-          // Clean up previous registrations first (avoid stale alerts)
-          NotificationManager.remove('weekly_quota_waste_certain');
-          NotificationManager.remove('weekly_quota_waste_likely');
-
+          // Weekly waste notifications — register when condition met, remove when cleared.
+          // IMPORTANT: do NOT remove before register — that destroys the 5min hide cycle (dedup).
           if (bestCase != null && bestCase < GUARANTEED_THRESHOLD) {
-            const waste = Math.max(0, 100 - bestCase);
+            const waste = Math.max(0, 100 - Math.round(bestCase));
+            const current = Math.round(bestCase);
             NotificationManager.register(
               'weekly_quota_waste_certain',
-              `🚨 Weekly quota: ~${waste}% WILL be unused by ${resetDay} (physical max would still waste)`,
+              `⚠ Weekly Quota Loss Risk: best-case finish ~${current}% by ${resetDay}. Increase usage to avoid unused ${waste}% allotment.`,
               9
             );
+            NotificationManager.remove('weekly_quota_waste_likely');
           } else if (projected != null && projected < LIKELY_THRESHOLD) {
-            const waste = Math.max(0, 100 - projected);
+            const current = Math.round(projected);
             NotificationManager.register(
               'weekly_quota_waste_likely',
-              `⚠ Weekly quota: at current pace, ~${waste}% may be unused by ${resetDay} — burn faster`,
+              `Weekly Pacing Alert: trending toward ~${current}% used by ${resetDay}. Consider more sessions to avoid waste.`,
               8
             );
+            NotificationManager.remove('weekly_quota_waste_certain');
+          } else {
+            // Conditions cleared — remove both
+            NotificationManager.remove('weekly_quota_waste_certain');
+            NotificationManager.remove('weekly_quota_waste_likely');
           }
         }
       } catch { /* ignore — notification is non-critical */ }
@@ -718,6 +723,7 @@ export class StatuslineFormatter {
             break;
 
           case 'quota_stale':
+          case 'quota_reset_passed':
             line = `${c('critical')}⚠ ${notification.message}${rst()}`;
             break;
 

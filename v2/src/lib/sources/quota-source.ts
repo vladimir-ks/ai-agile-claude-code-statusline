@@ -150,7 +150,7 @@ export const quotaSource: DataSourceDescriptor<QuotaSourceData> = {
       if (ageMin > 30) {
         NotificationManager.register(
           'quota_stale',
-          `⚠ Quota data ${ageMin}min stale — check launchd agent`,
+          `⚠ Quota Data Stale: data ${ageMin}min old. Check launchd: launchctl list | grep claude. Log: ~/.claude/session-health/quota-refresh-error.log`,
           9
         );
       } else {
