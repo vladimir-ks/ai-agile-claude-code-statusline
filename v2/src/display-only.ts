@@ -74,6 +74,18 @@ interface ComponentsConfig {
   secrets: boolean;
 }
 
+interface DisplayConfig {
+  mode: 'auto' | 'multiline' | 'singleline';
+  marginPercent: number | null;  // null=auto, 0=no margin, 5-25=custom
+  maxLines: number;
+}
+
+const DEFAULT_DISPLAY: DisplayConfig = {
+  mode: 'auto',
+  marginPercent: null,
+  maxLines: 6
+};
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -171,14 +183,14 @@ function formatMoney(amount: number): string {
 }
 
 function generateProgressBar(percentUsed: number, width: number = 12): string {
-  const thresholdPercent = 78;
+  const thresholdPercent = 83;
   const thresholdPos = Math.floor(width * thresholdPercent / 100);
   const pct = Math.max(0, Math.min(100, percentUsed || 0));
   const usedPos = Math.floor(width * pct / 100);
 
   let bar = '';
   for (let i = 0; i < width; i++) {
-    // Threshold marker ALWAYS appears at threshold position (78%)
+    // Threshold marker ALWAYS appears at threshold position (83%)
     if (i === thresholdPos) {
       bar += '|';
     } else if (i < usedPos) {
@@ -267,6 +279,46 @@ function stripAnsi(str: string): string {
 }
 
 /**
+ * Validate DisplayConfig values
+ * - mode: must be one of 'auto', 'multiline', 'singleline'
+ * - marginPercent: null (auto), 0 (no margin), or 5-25 (custom)
+ * - maxLines: must be >= 1
+ */
+function validateDisplayConfig(cfg: Partial<DisplayConfig>): DisplayConfig {
+  const result: DisplayConfig = { ...DEFAULT_DISPLAY };
+
+  if (cfg.mode !== undefined) {
+    if (['auto', 'multiline', 'singleline'].includes(cfg.mode)) {
+      result.mode = cfg.mode as 'auto' | 'multiline' | 'singleline';
+    }
+    // Invalid mode silently ignored, keeps default
+  }
+
+  if (cfg.marginPercent !== undefined) {
+    if (cfg.marginPercent === null) {
+      result.marginPercent = null;
+    } else if (typeof cfg.marginPercent === 'number') {
+      // Accept 0 (no margin) or 5-25 (custom)
+      if (cfg.marginPercent === 0 || (cfg.marginPercent >= 5 && cfg.marginPercent <= 25)) {
+        result.marginPercent = cfg.marginPercent;
+      }
+      // Out-of-range values silently ignored, keeps default
+    }
+  }
+
+  if (cfg.maxLines !== undefined && typeof cfg.maxLines === 'number') {
+    // Minimum 1 line (preserve "always outputs something" guarantee)
+    // Maximum 10 lines (reasonable bound to prevent runaway output)
+    if (cfg.maxLines >= 1 && cfg.maxLines <= 10) {
+      result.maxLines = cfg.maxLines;
+    }
+    // Out-of-range values silently ignored, keeps default
+  }
+
+  return result;
+}
+
+/**
  * Calculate visible width (excluding ANSI codes)
  */
 function visibleWidth(str: string): number {
@@ -315,8 +367,8 @@ function fmtContext(h: SessionHealth, availableWidth?: number): string {
   if (pct >= 95) colorName = 'contextCrit';
   else if (pct >= 80) colorName = 'contextWarn';
 
-  // Show "-free" suffix, or just "K" if space is tight
-  const suffix = availableWidth && availableWidth < 20 ? '' : '-free';
+  // No suffix — just the token count. Bar conveys meaning.
+  const suffix = '';
 
   return `🧠:${c(colorName)}${left}${suffix}${bar}${rst()}`;
 }
@@ -507,14 +559,19 @@ function fmtHealthStatus(h: SessionHealth): string {
  */
 function formatModelId(modelId: string): string {
   const lower = modelId.toLowerCase();
-  // Extract version: "claude-opus-4-6" → "4.6", "claude-sonnet-4-5-20250929" → "4.5"
-  const dashVersion = lower.match(/(\d+)-(\d+)(?:-\d|$)/);
+  // Extract context window suffix: [1m], [200k], etc.
+  const ctxMatch = modelId.match(/\[(\d+[mk])\]/i);
+  const ctxSuffix = ctxMatch ? `[${ctxMatch[1].toLowerCase()}]` : '';
+  // Extract version: "claude-opus-4-6" → "4.6", "claude-opus-4-6[1m]" → "4.6"
+  // Strip context suffix before version extraction to avoid regex confusion
+  const stripped = lower.replace(/\[\d+[mk]\]/i, '');
+  const dashVersion = stripped.match(/(\d+)-(\d+)(?:-\d|$)/);
   // Also detect already-formatted: "Opus4.5" → keep as-is via dot version
-  const dotVersion = lower.match(/(\d+\.\d+)/);
+  const dotVersion = stripped.match(/(\d+\.\d+)/);
   const version = dashVersion ? `${dashVersion[1]}.${dashVersion[2]}` : (dotVersion ? dotVersion[1] : '');
-  if (lower.includes('opus')) return `Opus${version}`;
-  if (lower.includes('sonnet')) return `Sonnet${version}`;
-  if (lower.includes('haiku')) return `Haiku${version}`;
+  if (lower.includes('opus')) return `Opus${version}${ctxSuffix}`;
+  if (lower.includes('sonnet')) return `Sonnet${version}${ctxSuffix}`;
+  if (lower.includes('haiku')) return `Haiku${version}${ctxSuffix}`;
   return modelId;
 }
 
@@ -528,6 +585,7 @@ function display(): void {
     let sessionId: string | null = null;
     let stdinDirectory: string | null = null;
     let stdinModel: string | null = null;
+    let rawModelId: string | null = null;  // Raw model ID for [1m] detection
     let stdinVersion: string | null = null;
     let stdinContext: { tokensUsed: number; tokensLeft: number; percentUsed: number } | null = null;
     let cacheRatio: number | null = null;  // Cache hit ratio from JSON input
@@ -538,9 +596,10 @@ function display(): void {
       // Extract directory from Claude Code input (most reliable source)
       stdinDirectory = parsed?.start_directory || parsed?.workspace?.current_dir || parsed?.cwd || null;
       // Extract model from stdin (takes priority over cached)
-      // Prefer model.id (has version: "claude-opus-4-6") over display_name (just "Opus")
-      // formatModelName will prettify: "claude-opus-4-6" → "Opus4.6"
-      stdinModel = parsed?.model?.id || parsed?.model?.model_id || parsed?.model?.display_name || parsed?.model?.name || null;
+      // Prefer model.id (has version: "claude-opus-4-6[1m]") over display_name (just "Opus")
+      // formatModelId will prettify: "claude-opus-4-6[1m]" → "Opus4.6[1m]"
+      rawModelId = parsed?.model?.id || parsed?.model?.model_id || null;
+      stdinModel = rawModelId || parsed?.model?.display_name || parsed?.model?.name || null;
       if (stdinModel) {
         stdinModel = formatModelId(stdinModel);
       }
@@ -559,10 +618,13 @@ function display(): void {
       }
 
       // Extract context window data for accurate display (CRITICAL for fresh data)
+      // context_window_size comes from Claude Code's stdin JSON — dynamic per model/session
+      // 83% = Claude's auto-compaction trigger (tokens used / window size)
+      // Default 200000 if Claude Code doesn't send the field (conservative estimate)
       const windowSize = parsed?.context_window?.context_window_size || 200000;
       const tokensUsed = currentInput + outputTokens + cacheRead;
       if (tokensUsed > 0) {
-        const compactionThreshold = Math.floor(windowSize * 0.78);
+        const compactionThreshold = Math.floor(windowSize * 0.83);
         stdinContext = {
           tokensUsed,
           tokensLeft: Math.max(0, compactionThreshold - tokensUsed),
@@ -583,62 +645,53 @@ function display(): void {
     const healthPath = `${HEALTH_DIR}/${sessionId}.json`;
     const health = safeReadJson<SessionHealth>(healthPath);
 
-    // 4. If no health data, show what we have from stdin (new session)
+    // 4. If no health data, show minimal loading indicator
+    // Applies to: fresh session start, resumed session (stale health), any !health state
+    // Daemon will write health file shortly → next render shows full display
     if (!health) {
-      const parts: string[] = [];
-
-      // Use data from stdin that we DO have
-      if (stdinDirectory) {
-        parts.push(fmtDirectory(stdinDirectory));
-      }
-
-      // Model from stdin or default
-      const model = (stdinModel || 'Claude').replace(/\s+/g, '');
-      parts.push(`🤖:${c('model')}${model}${rst()}`);
-
-      // Context window from stdin (available even before health file)
-      if (stdinContext && stdinContext.tokensLeft > 0) {
-        parts.push(fmtContext({ context: stdinContext } as any));
-      }
-
-      // Loading indicator — health file being created by daemon
-      parts.push(`${c('stale')}⏳${rst()}`);
-
-      process.stdout.write(parts.join(' '));
+      process.stdout.write(`${c('stale')}⏳${rst()}`);
       return;
     }
 
     // 5. Read config (safe, use defaults on error)
     const configPath = `${HEALTH_DIR}/config.json`;
-    const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig> }>(configPath);
+    const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig>; display?: Partial<DisplayConfig> }>(configPath);
     const cfg: ComponentsConfig = { ...DEFAULT_COMPONENTS, ...configRaw?.components };
+    // Validate display config to catch invalid values (mode, marginPercent, maxLines)
+    const displayCfg: DisplayConfig = validateDisplayConfig(configRaw?.display || {});
 
     // 6. Simple variant lookup - NO formatting logic (Phase 0: Performance Architecture)
     // All formatting logic moved to StatuslineFormatter in data-daemon (background)
     // Display-only just looks up pre-formatted variant for current terminal width
 
-    // Get terminal width from environment (0 or undefined = no tmux/unknown)
-    const paneWidthRaw = process.env.STATUSLINE_WIDTH;
-    const paneWidth = paneWidthRaw ? parseInt(paneWidthRaw, 10) : 0;
-    const noTmux = !paneWidth || paneWidth <= 0;
+    // Get terminal width from environment
+    // Priority: STATUSLINE_WIDTH (shell wrapper) > COLUMNS (terminal) > 120 (fallback)
+    // paneWidth represents the available width from tmux/terminal for rendering
+    // Used by Guard 2 to hard-truncate lines and prevent horizontal wrapping
+    const paneWidthRaw = process.env.STATUSLINE_WIDTH || process.env.COLUMNS;
+    const paneWidth = paneWidthRaw ? parseInt(paneWidthRaw, 10) : 120;
+    const hasWidth = paneWidth > 0;
+
+    // Display mode: "auto" (default), "multiline" (forced), "singleline" (forced)
+    const useSingleLine = displayCfg.mode === 'singleline'
+      || (displayCfg.mode === 'auto' && !hasWidth);
 
     let variant: string[];
 
     // Helper to select variant based on width
     const selectVariant = (variants: any): string[] => {
-      if (noTmux) {
-        // No tmux: use single-line mode (max 240 chars)
-        return variants.singleLine || variants.width120;
+      if (useSingleLine) {
+        return variants.singleLine || variants.width120 || [];
       }
       // Ultra-narrow: force single-line to avoid catastrophic wrapping
-      if (paneWidth <= 30) return variants.singleLine || variants.width40;
-      if (paneWidth <= 50) return variants.width40;
-      if (paneWidth <= 70) return variants.width60;
-      if (paneWidth <= 90) return variants.width80;
-      if (paneWidth <= 110) return variants.width100;
-      if (paneWidth <= 135) return variants.width120;
-      if (paneWidth <= 175) return variants.width150;
-      return variants.width200;
+      if (paneWidth <= 30) return variants.singleLine || variants.width40 || [];
+      if (paneWidth <= 50) return variants.width40 || variants.width60 || [];
+      if (paneWidth <= 70) return variants.width60 || variants.width80 || [];
+      if (paneWidth <= 90) return variants.width80 || variants.width100 || [];
+      if (paneWidth <= 110) return variants.width100 || variants.width120 || [];
+      if (paneWidth <= 135) return variants.width120 || variants.width150 || [];
+      if (paneWidth <= 175) return variants.width150 || variants.width200 || [];
+      return variants.width200 || variants.width150 || [];
     };
 
     // Always regenerate formatting on-the-fly (<5ms, pure computation).
@@ -652,6 +705,8 @@ function display(): void {
     if (stdinModel) {
       healthWithStdin.model = healthWithStdin.model || {};
       healthWithStdin.model.value = stdinModel;
+      // Store raw model ID for [1m] context window detection in formatter
+      if (rawModelId) healthWithStdin.model.id = rawModelId;
     }
     // CRITICAL: Use fresh context data from stdin (most accurate)
     if (stdinContext) {
@@ -679,23 +734,45 @@ function display(): void {
       healthWithStdin.cliVersion = stdinVersion;
     }
 
-    const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin);
+    // Version mismatch detection: compare running vs installed (read-only, zero cost)
+    // Display layer reads cached file written by data-daemon — no subprocess
+    if (healthWithStdin.cliVersion) {
+      try {
+        const installedData = safeReadJson<{ version: string; checkedAt: number }>(
+          `${HEALTH_DIR}/installed-version.json`
+        );
+        if (installedData?.version && installedData.version !== healthWithStdin.cliVersion) {
+          // Semver comparison: only warn if installed is NEWER
+          const running = healthWithStdin.cliVersion.split('.').map(Number);
+          const installed = installedData.version.split('.').map(Number);
+          const isNewer = installed[0] > running[0] ||
+            (installed[0] === running[0] && installed[1] > running[1]) ||
+            (installed[0] === running[0] && installed[1] === running[1] && installed[2] > running[2]);
+          if (isNewer) {
+            healthWithStdin.versionMismatch = {
+              running: healthWithStdin.cliVersion,
+              installed: installedData.version
+            };
+          }
+        }
+      } catch { /* non-critical */ }
+    }
+
+    // Margin calculation for line 2+ truncation (line 1 is unconstrained):
+    const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin, displayCfg.marginPercent);
     variant = selectVariant(allVariants);
 
     // === ANTI-WRAPPING GUARDS ===
-    // Guard 1: Max 6 lines total (prevents vertical overflow)
-    const MAX_LINES = 6;
+    // Guard 1: Max lines (configurable, default 6)
+    const MAX_LINES = displayCfg.maxLines;
     if (variant.length > MAX_LINES) {
       variant = variant.slice(0, MAX_LINES);
     }
 
-    // Guard 2: Hard-truncate each line to pane width (prevents horizontal wrapping)
-    // When Claude Code shows its own notifications, the available rendering column
-    // can be much narrower than the pane width reported by tmux. Hard-truncate
-    // to pane width as defense — any squeeze beyond that is Claude Code's layout.
-    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    // Guard 2: Hard-truncate each line to pane width (prevents horizontal overflow)
+    // Line 1 content is pre-split by formatter's splitAtWidth() into multiple output lines.
     if (paneWidth > 0) {
-      variant = variant.map(line => {
+      variant = variant.map((line) => {
         const visible = stripAnsi(line);
         if (visible.length <= paneWidth) return line;
         // Truncate: walk through original string, count visible chars
@@ -714,7 +791,7 @@ function display(): void {
     }
 
     // Guard 3: Total chars cap (defense in depth)
-    const MAX_STATUSLINE_CHARS = 400;
+    const MAX_STATUSLINE_CHARS = 500;
     const visLen = (s: string) => stripAnsi(s).length;
     while (variant.length > 1 && variant.reduce((sum, l) => sum + visLen(l), 0) > MAX_STATUSLINE_CHARS) {
       variant.pop();
