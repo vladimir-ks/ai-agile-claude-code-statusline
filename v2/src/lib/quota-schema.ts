@@ -15,7 +15,85 @@ import { homedir } from 'os';
 export const QUOTA_SCHEMA_VERSION = 1;
 
 const EPOCH_WINDOW_S = 30 * 24 * 3600; // +/-30 days
+
+// ---- P1-h: File-backed bad-read counter ----------------------------------------
+// Per-spawn bun invalidates module-level state — counters must be file-backed so the
+// 3-strike quarantine contract survives across invocations. The module-level Map is
+// kept ONLY as a within-process cache; the file is the source of truth.
+// Race note (P1-h): concurrent bun spawns can race on RMW of the counts file
+// (last-write-wins). This is accepted — quarantine is a 3-strike approximation.
+
+interface BadReadEntry { count: number; first_bad_at: number; last_bad_at: number; }
+type BadReadCounts = Record<string, BadReadEntry>;
+
+// Within-process cache — reduces file I/O for repeated bad reads in same spawn.
 const BAD_READ_COUNTS = new Map<string, number>();
+
+function _badCountsPath(): string {
+  return `${homedir()}/.claude/session-health/.lkg-bad-read-counts.json`;
+}
+
+function _loadBadCounts(): BadReadCounts {
+  const p = _badCountsPath();
+  if (!existsSync(p)) return {};
+  try {
+    const raw = readFileSync(p, 'utf-8');
+    return JSON.parse(raw) as BadReadCounts;
+  } catch {
+    // Parse error → log via heartbeat (best-effort import to avoid circular dep)
+    try {
+      const { writeHeartbeat } = require('./heartbeat') as typeof import('./heartbeat');
+      writeHeartbeat('quota-schema', 'bad_read_counts_parse_error', {
+        status: 'warn',
+        extra: { path: p },
+      });
+    } catch { /* heartbeat unavailable — absorb */ }
+    return {};
+  }
+}
+
+function _saveBadCounts(counts: BadReadCounts): void {
+  const p = _badCountsPath();
+  const tmp = `${p}.tmp.${process.pid}`;
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(counts));
+    renameSync(tmp, p);
+  } catch { /* best-effort — do not throw to caller */ }
+}
+
+function _getBadCount(key: string): number {
+  // Prefer in-process cache; fall back to file for first access from this spawn
+  if (BAD_READ_COUNTS.has(key)) return BAD_READ_COUNTS.get(key)!;
+  const counts = _loadBadCounts();
+  const val = counts[key]?.count ?? 0;
+  BAD_READ_COUNTS.set(key, val);
+  return val;
+}
+
+function _incrementBadCount(key: string): number {
+  const counts = _loadBadCounts();
+  const prev = counts[key];
+  const now = Date.now();
+  const entry: BadReadEntry = {
+    count: (prev?.count ?? 0) + 1,
+    first_bad_at: prev?.first_bad_at ?? now,
+    last_bad_at: now,
+  };
+  counts[key] = entry;
+  _saveBadCounts(counts);
+  BAD_READ_COUNTS.set(key, entry.count);
+  return entry.count;
+}
+
+function _clearBadCount(key: string): void {
+  const counts = _loadBadCounts();
+  if (key in counts) {
+    delete counts[key];
+    _saveBadCounts(counts);
+  }
+  BAD_READ_COUNTS.delete(key);
+}
 
 export interface ValidationResult {
   ok: boolean;
@@ -249,8 +327,6 @@ export function readWithLkg<T>(
   validate: (obj: unknown) => ValidationResult,
   lkgPath: string,
 ): ReadResult<T> {
-  const badCount = BAD_READ_COUNTS.get(path) ?? 0;
-
   let parsed: T | null = null;
   let valid = false;
 
@@ -269,7 +345,7 @@ export function readWithLkg<T>(
   }
 
   if (valid && parsed !== null) {
-    BAD_READ_COUNTS.set(path, 0);
+    _clearBadCount(path);
     try {
       mkdirSync(dirname(lkgPath), { recursive: true });
       // PID-qualified tmp path: concurrent bun processes must not race on the
@@ -281,14 +357,13 @@ export function readWithLkg<T>(
     return { data: parsed, isStale: false, fromLkg: false };
   }
 
-  // Bad read
-  const newCount = badCount + 1;
-  BAD_READ_COUNTS.set(path, newCount);
+  // Bad read — file-backed counter (P1-h)
+  const newCount = _incrementBadCount(path);
 
   if (newCount >= 3 && existsSync(path)) {
     const quarantine = `${path}.corrupt-${Math.floor(Date.now() / 1000)}`;
     try { renameSync(path, quarantine); } catch { /* best-effort */ }
-    BAD_READ_COUNTS.set(path, 0);
+    _clearBadCount(path);
   }
 
   // Fallback to lkg
