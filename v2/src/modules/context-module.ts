@@ -64,8 +64,8 @@ class ContextModule implements DataModule<ContextData> {
       // Calculate total current tokens
       const totalCurrentTokens = currentInputTokens + cacheReadTokens;
 
-      // Calculate tokens until compact (78% threshold)
-      const compactThreshold = 78;
+      // Calculate tokens until compact (83% threshold)
+      const compactThreshold = 83;
       const usableTokens = Math.floor(contextWindowSize * compactThreshold / 100);
       const tokensUntilCompact = Math.max(0, usableTokens - totalCurrentTokens);
 
@@ -175,7 +175,7 @@ class ContextModule implements DataModule<ContextData> {
         tokensUntilCompact: Math.max(0, data.tokensUntilCompact || 0),
         percentageUsedWindow: Math.max(0, Math.min(100, data.percentageUsedWindow || 0)),
         percentageUsedCompact: Math.max(0, Math.min(100, data.percentageUsedCompact || 0)),
-        compactThreshold: data.compactThreshold || 78
+        compactThreshold: data.compactThreshold || 83
       };
     } catch (error) {
       return this.getDefaultValue('unknown');
@@ -183,7 +183,7 @@ class ContextModule implements DataModule<ContextData> {
   }
 
   /**
-   * Format for display: 🧠:156kleft[---------|--]
+   * Format for display: 🧠:156k[---------|--]
    */
   format(data: ContextData): string {
     try {
@@ -192,7 +192,7 @@ class ContextModule implements DataModule<ContextData> {
       const progressBar = this.generateProgressBar(data.percentageUsedCompact);
 
       if (data.tokensUntilCompact > 0) {
-        return `🧠:${tokensDisplay}left[${progressBar}]`;
+        return `🧠:${tokensDisplay}[${progressBar}]`;
       } else {
         return `🧠:COMPACT![${progressBar}]`;
       }
@@ -217,14 +217,14 @@ class ContextModule implements DataModule<ContextData> {
   private generateProgressBar(percentUsed: number): string {
     try {
       const totalWidth = 12;
-      const thresholdPct = 78;
+      const thresholdPct = 83;
       const usedPos = Math.floor(totalWidth * Math.max(0, Math.min(100, percentUsed)) / 100);
       const markerPos = Math.floor(totalWidth * thresholdPct / 100);  // Position 9 of 12
 
       let bar = '';
       for (let i = 0; i < totalWidth; i++) {
         if (i === markerPos) {
-          bar += '|';  // Threshold marker at 78%
+          bar += '|';  // Threshold marker at 83%
         } else if (i < usedPos) {
           bar += '=';  // Filled
         } else {
@@ -246,10 +246,10 @@ class ContextModule implements DataModule<ContextData> {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
       totalCurrentTokens: 0,
-      tokensUntilCompact: 156000,
+      tokensUntilCompact: 166000,
       percentageUsedWindow: 0,
       percentageUsedCompact: 0,
-      compactThreshold: 78
+      compactThreshold: 83
     };
   }
 }

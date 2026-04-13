@@ -259,6 +259,47 @@ export class VersionChecker {
   }
 
   /**
+   * Cache installed CLI version to disk for display layer (zero-cost read).
+   * Called by data-daemon. Rate-gated: only re-checks if cache is >5min old.
+   * File: ~/.claude/session-health/installed-version.json
+   */
+  private static readonly INSTALLED_VERSION_PATH = `${homedir()}/.claude/session-health/installed-version.json`;
+  private static readonly INSTALLED_CHECK_INTERVAL = 5 * 60 * 1000; // 5 min
+
+  static cacheInstalledVersion(): void {
+    try {
+      // Skip if cache is fresh
+      if (existsSync(this.INSTALLED_VERSION_PATH)) {
+        const stats = statSync(this.INSTALLED_VERSION_PATH);
+        if (Date.now() - stats.mtimeMs < this.INSTALLED_CHECK_INTERVAL) return;
+      }
+      const version = this.getCurrentVersion();
+      if (version === 'unknown') return;
+      const data = JSON.stringify({ version, checkedAt: Date.now() });
+      const tmpPath = this.INSTALLED_VERSION_PATH + '.tmp';
+      writeFileSync(tmpPath, data, 'utf-8');
+      renameSync(tmpPath, this.INSTALLED_VERSION_PATH);
+    } catch {
+      // Non-critical — skip silently
+    }
+  }
+
+  /**
+   * Read cached installed version (display-layer safe — file read only, no subprocess).
+   * Returns null if cache doesn't exist or is unparseable.
+   */
+  static readInstalledVersion(): string | null {
+    try {
+      if (!existsSync(this.INSTALLED_VERSION_PATH)) return null;
+      const content = readFileSync(this.INSTALLED_VERSION_PATH, 'utf-8');
+      const parsed = JSON.parse(content);
+      return parsed?.version || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Format update message for display
    * Returns null if no update available
    */

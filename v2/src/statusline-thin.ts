@@ -60,7 +60,7 @@ class ThinStatusline {
           const tokensUsed = (ctx.current_input_tokens || 0) +
                             (ctx.cache_read_input_tokens || 0) +
                             (ctx.current_output_tokens || 0);
-          const compactionThreshold = Math.floor(windowSize * 0.78);
+          const compactionThreshold = Math.floor(windowSize * 0.83);
 
           health.context.tokensUsed = tokensUsed;
           health.context.tokensLeft = Math.max(0, compactionThreshold - tokensUsed);
@@ -198,7 +198,7 @@ class ThinStatusline {
   private formatContext(health: SessionHealth): string {
     const tokensLeft = this.formatTokens(health.context.tokensLeft);
     const bar = this.generateProgressBar(health.context.percentUsed);
-    return `🧠:${tokensLeft}left${bar}`;
+    return `🧠:${tokensLeft}${bar}`;
   }
 
   /**
@@ -218,7 +218,7 @@ class ThinStatusline {
    */
   private generateProgressBar(percentUsed: number): string {
     const width = 12;
-    const thresholdPos = Math.floor(width * 0.78); // 78% = position 9
+    const thresholdPos = Math.floor(width * 0.83); // 83% = position 9
     const usedPos = Math.floor(width * Math.max(0, Math.min(100, percentUsed)) / 100);
 
     let bar = '';

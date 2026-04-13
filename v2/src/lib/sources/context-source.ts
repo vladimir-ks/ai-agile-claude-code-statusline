@@ -4,7 +4,7 @@
  * Extracts context window usage from JSON input.
  * Pure computation, no I/O, no caching needed.
  *
- * Compaction threshold: 78% of window size.
+ * Compaction threshold: 83% of window size.
  * tokensLeft = tokens until compaction triggers (not until window full).
  * percentUsed = percentage of compaction threshold (not total window).
  */
@@ -73,8 +73,8 @@ function calculateContext(jsonInput: any): ContextInfo {
     result.tokensUsed = result.windowSize;
   }
 
-  // Calculate tokens until 78% compaction threshold
-  const compactionThreshold = Math.floor(result.windowSize * 0.78);
+  // Calculate tokens until 83% compaction threshold
+  const compactionThreshold = Math.floor(result.windowSize * 0.83);
   result.tokensLeft = Math.max(0, compactionThreshold - result.tokensUsed);
 
   // Percentage used (of compaction threshold, not total window)
