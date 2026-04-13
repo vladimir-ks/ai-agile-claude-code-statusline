@@ -80,30 +80,96 @@ export class StatuslineFormatter {
    */
   static formatAllVariants(health: SessionHealth, marginPercent?: number | null): SessionHealth['formattedOutput'] {
     const t0 = Date.now();
+    // Daemon-path call: write notifications. This is the SINGLETON-OWNED caller
+    // per P1-g fix (daemon.ts → unified-data-broker → formatAllVariants), so
+    // notification writes here are serialized and race-free.
     const result = {
-      width40: this.formatForWidth(health, 40, marginPercent),
-      width60: this.formatForWidth(health, 60, marginPercent),
-      width80: this.formatForWidth(health, 80, marginPercent),
-      width100: this.formatForWidth(health, 100, marginPercent),
-      width120: this.formatForWidth(health, 120, marginPercent),
-      width150: this.formatForWidth(health, 150, marginPercent),
-      width200: this.formatForWidth(health, 200, marginPercent),
-      singleLine: this.formatSingleLine(health, marginPercent)
+      width40: this.formatForWidth(health, 40, marginPercent, /*readOnlyNotifications*/ false),
+      width60: this.formatForWidth(health, 60, marginPercent, false),
+      width80: this.formatForWidth(health, 80, marginPercent, false),
+      width100: this.formatForWidth(health, 100, marginPercent, false),
+      width120: this.formatForWidth(health, 120, marginPercent, false),
+      width150: this.formatForWidth(health, 150, marginPercent, false),
+      width200: this.formatForWidth(health, 200, marginPercent, false),
+      singleLine: this.formatSingleLine(health, marginPercent, false)
     };
     writeHeartbeat('statusline-formatter', 'render', { latencyMs: Date.now() - t0 });
     return result;
   }
 
   /**
+   * P1-d fix — hot-path single-variant render.
+   * Picks ONE width bucket (mirrors display-only's selectVariant logic) and
+   * formats only that one. Defaults to readOnlyNotifications=true so concurrent
+   * display spawns never write notifications.json.
+   *
+   * @param paneWidth Terminal width (from STATUSLINE_WIDTH env / tmux / COLUMNS).
+   * @param forceSingleLine Force singleLine bucket (mode === 'singleline' or no width).
+   * @param marginPercent Same semantics as formatAllVariants.
+   * @param readOnlyNotifications When true (default), buildNotifications does NOT
+   *        call NotificationManager.register/remove/recordShown — read-only render.
+   */
+  static formatPicked(
+    health: SessionHealth,
+    paneWidth: number,
+    forceSingleLine: boolean,
+    marginPercent?: number | null,
+    readOnlyNotifications: boolean = true,
+  ): string[] {
+    const t0 = Date.now();
+    let lines: string[];
+    if (forceSingleLine) {
+      lines = this.formatSingleLine(health, marginPercent, readOnlyNotifications);
+    } else {
+      // Bucket mapping mirrors display-only.selectVariant()
+      let w: number;
+      if (paneWidth <= 30) {
+        // Ultra-narrow forces single-line to avoid catastrophic wrapping
+        lines = this.formatSingleLine(health, marginPercent, readOnlyNotifications);
+        writeHeartbeat('statusline-formatter', 'render_picked', {
+          latencyMs: Date.now() - t0,
+          extra: { paneWidth, bucket: 'singleLine', readOnly: readOnlyNotifications },
+        });
+        return lines;
+      }
+      if (paneWidth <= 50)       w = 40;
+      else if (paneWidth <= 70)  w = 60;
+      else if (paneWidth <= 90)  w = 80;
+      else if (paneWidth <= 110) w = 100;
+      else if (paneWidth <= 135) w = 120;
+      else if (paneWidth <= 175) w = 150;
+      else                       w = 200;
+      lines = this.formatForWidth(health, w, marginPercent, readOnlyNotifications);
+      writeHeartbeat('statusline-formatter', 'render_picked', {
+        latencyMs: Date.now() - t0,
+        extra: { paneWidth, bucket: `width${w}`, readOnly: readOnlyNotifications },
+      });
+      return lines;
+    }
+    writeHeartbeat('statusline-formatter', 'render_picked', {
+      latencyMs: Date.now() - t0,
+      extra: { paneWidth, bucket: 'singleLine', readOnly: readOnlyNotifications },
+    });
+    return lines;
+  }
+
+  /**
    * Format as single line for environments without tmux/unknown terminal width
    * Uses same 3-line structure: merged L1, session+message L2, notifications
+   *
+   * @param readOnlyNotifications When true, buildNotifications skips all
+   *        NotificationManager.register/remove/recordShown writes (P1-g).
    */
-  private static formatSingleLine(health: SessionHealth, marginPercent?: number | null): string[] {
+  private static formatSingleLine(
+    health: SessionHealth,
+    marginPercent?: number | null,
+    readOnlyNotifications: boolean = false,
+  ): string[] {
     const maxMsgLen = this.SINGLE_LINE_MSG_LENGTH;
     const lines: string[] = [];
 
     // Line 1: merged core + account — split at max length
-    const mergedLine = this.buildMergedLine1(health);
+    const mergedLine = this.buildMergedLine1(health, readOnlyNotifications);
     if (mergedLine) {
       const splitLines = this.splitAtWidth(mergedLine, this.SINGLE_LINE_MAX_LENGTH);
       lines.push(...splitLines);
@@ -112,6 +178,16 @@ export class StatuslineFormatter {
     // Session ID + last message
     const sessionLine = this.buildSessionLine(health, maxMsgLen);
     if (sessionLine) lines.push(sessionLine);
+
+    // Notifications (read-only when called from display-only hot path)
+    const isIdle = this.detectIdle(health);
+    const notifications = this.buildNotifications(
+      health,
+      this.SINGLE_LINE_MAX_LENGTH,
+      isIdle,
+      readOnlyNotifications,
+    );
+    lines.push(...notifications);
 
     return lines;
   }
@@ -122,8 +198,16 @@ export class StatuslineFormatter {
    * LINE 1: Core + Account (no width constraint — wraps naturally in terminal)
    * LINE 2: Session ID + Last message (message portion truncated to width)
    * LINE 3+: Notifications (conditional, truncated to width)
+   *
+   * @param readOnlyNotifications When true, buildNotifications skips all
+   *        NotificationManager.register/remove/recordShown writes (P1-g).
    */
-  private static formatForWidth(health: SessionHealth, width: number, marginPercent?: number | null): string[] {
+  private static formatForWidth(
+    health: SessionHealth,
+    width: number,
+    marginPercent?: number | null,
+    readOnlyNotifications: boolean = false,
+  ): string[] {
     // Ultra-narrow: bare minimum
     if (width < 30) {
       const dir = this.fmtDirectory(health.projectPath);
@@ -143,7 +227,7 @@ export class StatuslineFormatter {
 
     // Line 1: merged core + account — split into multiple lines at effectiveWidth
     // Claude Code's statusline doesn't support natural wrapping, so we split explicitly
-    const mergedLine = this.buildMergedLine1(health);
+    const mergedLine = this.buildMergedLine1(health, readOnlyNotifications);
     if (mergedLine) {
       const splitLines = this.splitAtWidth(mergedLine, effectiveWidth);
       lines.push(...splitLines);
@@ -157,7 +241,7 @@ export class StatuslineFormatter {
     const isIdle = this.detectIdle(health);
 
     // Notifications: account context removed (merged into L1), rest unchanged
-    const notifications = this.buildNotifications(health, effectiveWidth, isIdle);
+    const notifications = this.buildNotifications(health, effectiveWidth, isIdle, readOnlyNotifications);
     lines.push(...notifications);
 
     return lines;
@@ -167,8 +251,11 @@ export class StatuslineFormatter {
    * Build Line 1: Core + Account merged (no width constraint — wraps naturally)
    *
    * Format: 📁:dir 🌿:branch 🤖:Model 📟:vX.Y.Z 🧠:NK(X%) 👤SN|email|🕐:HH:MM|⌛:Xh(Y%)|📅:Zh(W%)@Day 💰:$X|$Y/h
+   *
+   * @param readOnlyNotifications When true, fmtAccountInline → fmtBurnRate skips
+   *        NotificationManager writes for transcript_sampler_dead (P1-g).
    */
-  private static buildMergedLine1(health: SessionHealth): string {
+  private static buildMergedLine1(health: SessionHealth, readOnlyNotifications: boolean = false): string {
     const parts: string[] = [];
 
     // 1. Directory — always
@@ -193,7 +280,7 @@ export class StatuslineFormatter {
     if (ctx) parts.push(ctx);
 
     // 6. Account context — inline (slot|email|time|daily|weekly)
-    const accountPart = this.fmtAccountInline(health);
+    const accountPart = this.fmtAccountInline(health, readOnlyNotifications);
     if (accountPart) parts.push(accountPart);
 
     // 7. Cost — if >= $0.01
@@ -237,8 +324,11 @@ export class StatuslineFormatter {
   /**
    * Format account context inline for Line 1
    * Format: [⛔]👤SN|email|🕐:HH:MM|⌛:Xh(Y%)|📅:Zh(W%)@Day [⚠ stale Nm]
+   *
+   * @param readOnlyNotifications Forwarded to fmtBurnRate so display-only hot
+   *        path never writes to notifications.json (P1-g).
    */
-  private static fmtAccountInline(health: SessionHealth): string {
+  private static fmtAccountInline(health: SessionHealth, readOnlyNotifications: boolean = false): string {
     const lock = SessionLockManager.read(health.sessionId);
     if (!lock?.slotId) return '';
 
@@ -269,7 +359,7 @@ export class StatuslineFormatter {
 
       // Tier 2: read live burn estimate (5s sampler) for the active slot
       const liveRead = this.readLiveBurn(lock.slotId);
-      const burn = this.fmtBurnRate(slot, liveRead?.estimate, liveRead?.ageS);
+      const burn = this.fmtBurnRate(slot, liveRead?.estimate, liveRead?.ageS, readOnlyNotifications);
       if (burn) segments.push(burn);
 
       // Heartbeat: log on staleness transitions and LKG fallbacks (not every render)
@@ -616,8 +706,18 @@ export class StatuslineFormatter {
    * - Idle session (transcript stale >2min): Always show
    *
    * Priority order: failover > slot_switch > version_update > version_mismatch > quota_stale > secrets
+   *
+   * @param readOnly When true (display-only hot path), SKIP all
+   *        NotificationManager.register/remove/recordShown writes — render-only.
+   *        The daemon path (formatAllVariants) remains the authoritative writer,
+   *        eliminating concurrent-spawn RMW races on notifications.json (P1-g).
    */
-  private static buildNotifications(health: SessionHealth, maxWidth: number, isIdle: boolean = false): string[] {
+  private static buildNotifications(
+    health: SessionHealth,
+    maxWidth: number,
+    isIdle: boolean = false,
+    readOnly: boolean = false,
+  ): string[] {
     const lines: string[] = [];
 
     try {
@@ -626,70 +726,75 @@ export class StatuslineFormatter {
         lines.push(`${c('critical')}${health.failoverNotification}${rst()}`);
       }
 
-      // Secret detection DISABLED — too many false positives
-      NotificationManager.remove('secrets_detected');
+      // Write path — daemon only (P1-g). Display-only is read-only: it reads
+      // the notifications.json file to pick which notifications to display but
+      // NEVER mutates it.
+      if (!readOnly) {
+        // Secret detection DISABLED — too many false positives
+        NotificationManager.remove('secrets_detected');
 
-      // active_slot is now rendered inline on Line 1 — remove from notification cycle
-      NotificationManager.remove('active_slot');
+        // active_slot is now rendered inline on Line 1 — remove from notification cycle
+        NotificationManager.remove('active_slot');
 
-      // Weekly quota waste risk — the one thing user MUST see if pace will lose quota.
-      // Compute from current slot's projections (populated by shell fetch-quotas.sh).
-      try {
-        const lock = SessionLockManager.read(health.sessionId);
-        const quotaData = QuotaBrokerClient.read();
-        const slot = lock?.slotId ? quotaData?.slots?.[lock.slotId] : null;
-        if (slot) {
-          const bestCase = slot.weekly_best_case_projected_util;
-          const projected = slot.weekly_projected_util;
-          const resetDay = slot.weekly_reset_day || 'reset';
-          const GUARANTEED_THRESHOLD = 95;   // best-case < this → waste guaranteed
-          const LIKELY_THRESHOLD = 85;       // current-pace < this → waste likely
-
-          // Weekly waste notifications — register when condition met, remove when cleared.
-          // IMPORTANT: do NOT remove before register — that destroys the 5min hide cycle (dedup).
-          if (bestCase != null && bestCase < GUARANTEED_THRESHOLD) {
-            const waste = Math.max(0, 100 - Math.round(bestCase));
-            const current = Math.round(bestCase);
-            NotificationManager.register(
-              'weekly_quota_waste_certain',
-              `⚠ Weekly Quota Loss Risk: best-case finish ~${current}% by ${resetDay}. Increase usage to avoid unused ${waste}% allotment.`,
-              9
-            );
-            NotificationManager.remove('weekly_quota_waste_likely');
-          } else if (projected != null && projected < LIKELY_THRESHOLD) {
-            const current = Math.round(projected);
-            NotificationManager.register(
-              'weekly_quota_waste_likely',
-              `Weekly Pacing Alert: trending toward ~${current}% used by ${resetDay}. Consider more sessions to avoid waste.`,
-              8
-            );
-            NotificationManager.remove('weekly_quota_waste_certain');
-          } else {
-            // Conditions cleared — remove both
-            NotificationManager.remove('weekly_quota_waste_certain');
-            NotificationManager.remove('weekly_quota_waste_likely');
-          }
-        }
-      } catch (e) {
-        // Weekly loss-risk is USER-CRITICAL — silent failure violates spec. Log
-        // so dashboards can surface "notification skipped due to source failure".
+        // Weekly quota waste risk — the one thing user MUST see if pace will lose quota.
+        // Compute from current slot's projections (populated by shell fetch-quotas.sh).
         try {
-          writeHeartbeat('statusline-formatter', 'weekly_waste_notification_skipped', {
-            status: 'warn',
-            extra: { error: e instanceof Error ? e.message : String(e) },
-          });
-        } catch { /* heartbeat is best-effort */ }
-      }
+          const lock = SessionLockManager.read(health.sessionId);
+          const quotaData = QuotaBrokerClient.read();
+          const slot = lock?.slotId ? quotaData?.slots?.[lock.slotId] : null;
+          if (slot) {
+            const bestCase = slot.weekly_best_case_projected_util;
+            const projected = slot.weekly_projected_util;
+            const resetDay = slot.weekly_reset_day || 'reset';
+            const GUARANTEED_THRESHOLD = 95;   // best-case < this → waste guaranteed
+            const LIKELY_THRESHOLD = 85;       // current-pace < this → waste likely
 
-      // Version mismatch: register notification if installed != running
-      if (health.versionMismatch) {
-        NotificationManager.register(
-          'version_mismatch',
-          `CLI v${health.versionMismatch.installed} installed — restart session to upgrade (running v${health.versionMismatch.running})`,
-          8
-        );
-      } else {
-        NotificationManager.remove('version_mismatch');
+            // Weekly waste notifications — register when condition met, remove when cleared.
+            // IMPORTANT: do NOT remove before register — that destroys the 5min hide cycle (dedup).
+            if (bestCase != null && bestCase < GUARANTEED_THRESHOLD) {
+              const waste = Math.max(0, 100 - Math.round(bestCase));
+              const current = Math.round(bestCase);
+              NotificationManager.register(
+                'weekly_quota_waste_certain',
+                `⚠ Weekly Quota Loss Risk: best-case finish ~${current}% by ${resetDay}. Increase usage to avoid unused ${waste}% allotment.`,
+                9
+              );
+              NotificationManager.remove('weekly_quota_waste_likely');
+            } else if (projected != null && projected < LIKELY_THRESHOLD) {
+              const current = Math.round(projected);
+              NotificationManager.register(
+                'weekly_quota_waste_likely',
+                `Weekly Pacing Alert: trending toward ~${current}% used by ${resetDay}. Consider more sessions to avoid waste.`,
+                8
+              );
+              NotificationManager.remove('weekly_quota_waste_certain');
+            } else {
+              // Conditions cleared — remove both
+              NotificationManager.remove('weekly_quota_waste_certain');
+              NotificationManager.remove('weekly_quota_waste_likely');
+            }
+          }
+        } catch (e) {
+          // Weekly loss-risk is USER-CRITICAL — silent failure violates spec. Log
+          // so dashboards can surface "notification skipped due to source failure".
+          try {
+            writeHeartbeat('statusline-formatter', 'weekly_waste_notification_skipped', {
+              status: 'warn',
+              extra: { error: e instanceof Error ? e.message : String(e) },
+            });
+          } catch { /* heartbeat is best-effort */ }
+        }
+
+        // Version mismatch: register notification if installed != running
+        if (health.versionMismatch) {
+          NotificationManager.register(
+            'version_mismatch',
+            `CLI v${health.versionMismatch.installed} installed — restart session to upgrade (running v${health.versionMismatch.running})`,
+            8
+          );
+        } else {
+          NotificationManager.remove('version_mismatch');
+        }
       }
 
       const active = isIdle
@@ -701,7 +806,9 @@ export class StatuslineFormatter {
         // Skip active_slot — it's on Line 1 now
         if (type === 'active_slot') continue;
 
-        NotificationManager.recordShown(type);
+        if (!readOnly) {
+          NotificationManager.recordShown(type);
+        }
 
         let line = '';
 
@@ -712,7 +819,8 @@ export class StatuslineFormatter {
             const currentNum = lock?.slotId?.match(/slot-(\d+)/)?.[1];
             const switchNum = notification.message.match(/Switch to S(\d+)/)?.[1];
             if (currentNum && switchNum && currentNum === switchNum) {
-              NotificationManager.remove('slot_switch');
+              // P1-g: only daemon removes from notifications.json
+              if (!readOnly) NotificationManager.remove('slot_switch');
               continue;
             }
             line = this.buildSwitchLine(notification.message);
@@ -867,6 +975,7 @@ export class StatuslineFormatter {
     slot: MergedQuotaSlot,
     liveEstimate?: LiveBurnEstimate | null,
     ageS?: number,
+    readOnlyNotifications: boolean = false,
   ): string {
     // ── 5h rate ──
     const target5h = slot.target_burn_rate_5h;
@@ -912,17 +1021,21 @@ export class StatuslineFormatter {
 
     // Dead sampler detection: ageS > 60 → one-time deduped notification
     // Fresh or absent data → clear notification so recovery is visible (sibling of lazy-mode inversion).
-    try {
-      if (liveEstimate !== undefined && liveEstimate !== null && effectiveAgeS > 60) {
-        NotificationManager.register(
-          'transcript_sampler_dead',
-          `Transcript sampler appears dead (${effectiveAgeS}s since last sample). Statusline using API baseline only.`,
-          6,
-        );
-      } else {
-        NotificationManager.remove('transcript_sampler_dead');
-      }
-    } catch { /* non-critical */ }
+    // P1-g: only the daemon path (readOnlyNotifications=false) writes; display-only
+    // hot path is read-only to eliminate the notifications.json RMW race.
+    if (!readOnlyNotifications) {
+      try {
+        if (liveEstimate !== undefined && liveEstimate !== null && effectiveAgeS > 60) {
+          NotificationManager.register(
+            'transcript_sampler_dead',
+            `Transcript sampler appears dead (${effectiveAgeS}s since last sample). Statusline using API baseline only.`,
+            6,
+          );
+        } else {
+          NotificationManager.remove('transcript_sampler_dead');
+        }
+      } catch { /* non-critical */ }
+    }
 
     // Fresh live data: append token-rate suffix
     const isFresh = liveEstimate != null && effectiveAgeS <= 30 && liveEstimate.session_count > 0;

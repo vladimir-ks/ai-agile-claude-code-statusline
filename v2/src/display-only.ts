@@ -36,6 +36,7 @@ process.stdout.on('error', () => { process.exit(0); });
 import { existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { StatuslineFormatter } from './lib/statusline-formatter';
+import { writeHeartbeat } from './lib/heartbeat';
 
 // ============================================================================
 // Types (inline to avoid import failures)
@@ -678,22 +679,6 @@ function display(): void {
 
     let variant: string[];
 
-    // Helper to select variant based on width
-    const selectVariant = (variants: any): string[] => {
-      if (useSingleLine) {
-        return variants.singleLine || variants.width120 || [];
-      }
-      // Ultra-narrow: force single-line to avoid catastrophic wrapping
-      if (paneWidth <= 30) return variants.singleLine || variants.width40 || [];
-      if (paneWidth <= 50) return variants.width40 || variants.width60 || [];
-      if (paneWidth <= 70) return variants.width60 || variants.width80 || [];
-      if (paneWidth <= 90) return variants.width80 || variants.width100 || [];
-      if (paneWidth <= 110) return variants.width100 || variants.width120 || [];
-      if (paneWidth <= 135) return variants.width120 || variants.width150 || [];
-      if (paneWidth <= 175) return variants.width150 || variants.width200 || [];
-      return variants.width200 || variants.width150 || [];
-    };
-
     // Always regenerate formatting on-the-fly (<5ms, pure computation).
     // Pre-formatted output from daemon is stale for: notifications (idle state
     // changes after daemon runs), time (clock drift), stdin overrides (context).
@@ -758,9 +743,30 @@ function display(): void {
       } catch { /* non-critical */ }
     }
 
-    // Margin calculation for line 2+ truncation (line 1 is unconstrained):
-    const allVariants = StatuslineFormatter.formatAllVariants(healthWithStdin, displayCfg.marginPercent);
-    variant = selectVariant(allVariants);
+    // P1-d: hot-path single-variant render (8× → 1×). Picks ONE width bucket
+    // directly in the formatter instead of computing all 8 variants then discarding 7.
+    // P1-g: readOnlyNotifications=true (default) — display-only never writes to
+    // notifications.json; the daemon path (unified-data-broker → formatAllVariants)
+    // is the singleton-owned writer.
+    //
+    // Observability: formatter emits `statusline-formatter:render_picked` heartbeat
+    // with latencyMs + width bucket. Kept permanent (hot-path perf regression alarm).
+    const renderT0 = Date.now();
+    variant = StatuslineFormatter.formatPicked(
+      healthWithStdin,
+      paneWidth,
+      useSingleLine,
+      displayCfg.marginPercent,
+      /*readOnlyNotifications*/ true,
+    );
+    // Hot-path self-timing: complements the formatter's own heartbeat so we can
+    // attribute any regression to display-only wiring vs. formatter internals.
+    try {
+      writeHeartbeat('display-only', 'render', {
+        latencyMs: Date.now() - renderT0,
+        extra: { paneWidth, singleLine: useSingleLine, variantLines: variant.length },
+      });
+    } catch { /* heartbeat is best-effort */ }
 
     // === ANTI-WRAPPING GUARDS ===
     // Guard 1: Max lines (configurable, default 6)
