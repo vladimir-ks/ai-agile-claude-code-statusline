@@ -21,7 +21,8 @@ export interface TranscriptHealth {
 }
 
 export interface ModelInfo {
-  value: string;               // "Opus4.5", "Sonnet4.5", etc.
+  value: string;               // "Opus4.6", "Opus4.6[1m]", "Sonnet4.6", etc.
+  id?: string;                 // Raw model ID (e.g. "claude-opus-4-6[1m]")
   source: 'transcript' | 'jsonInput' | 'settings' | 'default';
   confidence: number;          // 0-100
   reason?: string;
@@ -180,6 +181,38 @@ export interface MergedQuotaSlot {
   urgency: number;                 // Calculated urgency score
   rank: number;                    // 1 = best
   reason: string;                  // Why ranked here
+  // Burn rate & pacing (written by fetch-quotas.sh, merged by quota-broker.sh)
+  five_hour_burn_rate?: number | null;        // Measured %/hr from last delta
+  five_hour_burn_confidence?: 'none' | 'low' | 'high';
+  seven_day_burn_rate?: number | null;
+  seven_day_burn_confidence?: 'none' | 'low' | 'high';
+  target_burn_rate_5h?: number | null;        // Remaining%/hrs_to_reset
+  target_burn_rate_7d?: number | null;
+  burn_efficiency_5h?: number | null;         // actual*100/target (100=1.0x)
+  burn_efficiency_7d?: number | null;
+  // 6-band pacing (way_too_slow → way_too_fast) + legacy 5-band (under..over) for back-compat
+  // during the rollout.
+  pacing_status_5h?:
+    | 'way_too_slow' | 'not_fast_enough' | 'a_bit_too_slow' | 'good' | 'much_too_fast' | 'way_too_fast'
+    | 'under' | 'slow' | 'on_track' | 'fast' | 'over'
+    | 'exhausted' | 'reset' | 'unknown';
+  pacing_status_7d?:
+    | 'way_too_slow' | 'not_fast_enough' | 'a_bit_too_slow' | 'good' | 'much_too_fast' | 'way_too_fast'
+    | 'under' | 'slow' | 'on_track' | 'fast' | 'over'
+    | 'exhausted' | 'reset' | 'unknown';
+  // Range rates (computed from sample history, when ≥3 samples available)
+  burn_rate_1h_min_5h?: number | null;        // Min instantaneous rate within last 1h
+  burn_rate_1h_max_5h?: number | null;        // Max instantaneous rate within last 1h
+  burn_rate_1h_avg_5h?: number | null;        // Avg slope over last 1h
+  burn_sample_count_5h?: number;              // # samples used
+  // Weekly rates expressed in %/day (preserves precision vs %/hr at 168h scale)
+  target_burn_rate_7d_per_day?: number | null;
+  seven_day_burn_rate_per_day?: number | null;
+  // Weekly waste projections (see fetch-quotas.sh 7d block).
+  // best_case = current + daily_cap * days_left (physical ceiling). If < 100 → waste GUARANTEED.
+  // projected = current + actual_per_day * days_left (trend). If < ~85 → waste LIKELY.
+  weekly_best_case_projected_util?: number | null;
+  weekly_projected_util?: number | null;
 }
 
 export interface MergedQuotaData {
@@ -229,6 +262,10 @@ export interface SessionHealth {
 
   // Additional Metadata
   cliVersion?: string;             // Claude Code CLI version (e.g., "1.0.29")
+  versionMismatch?: {              // Set by display layer when installed != running
+    running: string;               // Version this session launched with
+    installed: string;             // Currently installed version (from daemon cache)
+  };
   project?: ProjectMetadata;
   performance?: PerformanceMetrics;
   failoverNotification?: string;   // "🔄 Swapped → slot-2 (3m ago)" if recent swap

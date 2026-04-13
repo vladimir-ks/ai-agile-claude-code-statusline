@@ -8,9 +8,10 @@
  */
 
 import { BillingInfo } from '../types/session-health';
-import { existsSync, statSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
+import { existsSync, statSync, writeFileSync, unlinkSync, mkdirSync, readFileSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
+import { isKeychainUnlocked } from '../lib/keychain-guard';
 
 const COOLDOWN_DIR = `${homedir()}/.claude/session-health/cooldowns`;
 
@@ -75,6 +76,116 @@ export class AnthropicOAuthAPI {
     } catch { /* ignore */ }
   }
 
+  // ── Shared rate-limit state (bidirectional with shell fetch-quotas.sh) ──
+  // Both TS statusline and shell scripts hit the same API endpoint.
+  // Share backoff state via .fetch-rate-limit-state.{slot} files so neither
+  // caller wastes the other's rate-limit budget.
+  private static readonly RATE_LIMIT_STATE_DIR = `${homedir()}/.claude/session-health`;
+
+  /**
+   * Check if a slot is in rate-limit backoff (reads shell-compatible state files).
+   * Used by BOTH the TS OAuth fetcher and QuotaBrokerClient.
+   */
+  static isSlotInBackoff(slotId: string): boolean {
+    try {
+      const statePath = `${this.RATE_LIMIT_STATE_DIR}/.fetch-rate-limit-state.${slotId}`;
+      if (!existsSync(statePath)) return false;
+      const content = readFileSync(statePath, 'utf-8');
+      const state = JSON.parse(content);
+      const backoffUntil = state.backoff_until_epoch || 0;
+      return Math.floor(Date.now() / 1000) < backoffUntil;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Record rate-limit backoff (writes shell-compatible state file).
+   * Shell fetch-quotas.sh reads these files to skip backed-off slots.
+   */
+  static recordRateLimitBackoff(slotId: string, retryAfterSec: number): void {
+    try {
+      const nowEpoch = Math.floor(Date.now() / 1000);
+      const statePath = `${this.RATE_LIMIT_STATE_DIR}/.fetch-rate-limit-state.${slotId}`;
+
+      // Read existing consecutive count
+      let consecutiveRl = 0;
+      if (existsSync(statePath)) {
+        try {
+          const existing = JSON.parse(readFileSync(statePath, 'utf-8'));
+          consecutiveRl = existing.consecutive_rate_limits || 0;
+        } catch { /* corrupted, start fresh */ }
+      }
+      consecutiveRl++;
+
+      // Use server Retry-After + 30s margin, or tiered fallback
+      let backoffSeconds: number;
+      if (retryAfterSec > 0) {
+        backoffSeconds = retryAfterSec + 30;
+      } else if (consecutiveRl <= 5) {
+        backoffSeconds = Math.min(15 * 60 * Math.pow(2, consecutiveRl - 1), 3600);
+      } else if (consecutiveRl <= 15) {
+        backoffSeconds = 7200;
+      } else {
+        backoffSeconds = 14400;
+      }
+
+      const state = {
+        consecutive_rate_limits: consecutiveRl,
+        backoff_until_epoch: nowEpoch + backoffSeconds,
+        backoff_minutes: Math.ceil(backoffSeconds / 60),
+        retry_after_sec: retryAfterSec,
+        last_hit: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        source: 'statusline-ts',
+      };
+
+      // Atomic write: write to tmp then rename
+      const tmpPath = `${statePath}.tmp.${process.pid}`;
+      writeFileSync(tmpPath, JSON.stringify(state) + '\n', { mode: 0o600 });
+      const { renameSync } = require('fs');
+      renameSync(tmpPath, statePath);
+
+      console.error(
+        `[AnthropicOAuthAPI] Rate-limit backoff for ${slotId}: ${state.backoff_minutes}min ` +
+        `(${retryAfterSec > 0 ? 'server' : 'tiered'}, hit #${consecutiveRl})`
+      );
+    } catch (err) {
+      console.error('[AnthropicOAuthAPI] Failed to write rate-limit state:', err);
+    }
+  }
+
+  /**
+   * Clear rate-limit backoff for a slot (after successful fetch).
+   */
+  private static clearRateLimitBackoff(slotId: string): void {
+    try {
+      const statePath = `${this.RATE_LIMIT_STATE_DIR}/.fetch-rate-limit-state.${slotId}`;
+      if (existsSync(statePath)) unlinkSync(statePath);
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * Resolve slot ID from keychainService or configDir.
+   * Reads merged-quota-cache.json to find which slot matches.
+   */
+  static resolveSlotId(keychainService?: string, configDir?: string): string | null {
+    try {
+      const cachePath = `${this.RATE_LIMIT_STATE_DIR}/merged-quota-cache.json`;
+      if (!existsSync(cachePath)) return null;
+      const cache = JSON.parse(readFileSync(cachePath, 'utf-8'));
+      if (!cache.slots) return null;
+
+      for (const [slotId, slot] of Object.entries(cache.slots) as [string, any][]) {
+        if (keychainService && slot.keychain_service === keychainService) return slotId;
+        if (configDir && slot.config_dir === configDir) return slotId;
+      }
+      // Fallback: active slot
+      return cache.active_slot || null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Clear cooldown for a service (e.g., after successful refresh).
    */
@@ -104,6 +215,17 @@ export class AnthropicOAuthAPI {
    */
   static async fetchUsage(authProfile?: string, keychainService?: string): Promise<BillingInfo | null> {
     try {
+      // Check shared rate-limit backoff BEFORE making API call
+      // This prevents the TS daemon from wasting rate-limit budget
+      // when the shell already knows the slot is backed off
+      const slotId = this.resolveSlotId(keychainService);
+      if (slotId && this.isSlotInBackoff(slotId)) {
+        console.error(
+          `[AnthropicOAuthAPI] Skipping fetch — ${slotId} in shared rate-limit backoff`
+        );
+        return null;
+      }
+
       // Get token from environment or keychain
       const token = await this.getOAuthToken(authProfile, keychainService);
       if (!token) {
@@ -123,6 +245,24 @@ export class AnthropicOAuthAPI {
       });
 
       if (!response.ok) {
+        if (response.status === 429) {
+          // Parse Retry-After header (shared with shell fetch-quotas.sh)
+          const retryAfterRaw = response.headers.get('retry-after') || '0';
+          const retryAfterSec = parseInt(retryAfterRaw, 10) || 0;
+          const resolvedSlot = slotId || 'unknown';
+          console.error(
+            `[AnthropicOAuthAPI] HTTP 429: Rate limited. ` +
+            `Retry-After: ${retryAfterSec}s, slot: ${resolvedSlot}`
+          );
+          // Write shell-compatible backoff state so both callers respect it
+          if (resolvedSlot !== 'unknown') {
+            this.recordRateLimitBackoff(resolvedSlot, retryAfterSec);
+          }
+          const service = keychainService || 'api-fetch';
+          this.recordFailure(service);
+          return null;
+        }
+
         // Record cooldown on auth failures to prevent retry storm
         if (response.status === 401 || response.status === 403) {
           const service = keychainService || 'api-fetch';
@@ -132,6 +272,11 @@ export class AnthropicOAuthAPI {
           console.error(`[AnthropicOAuthAPI] HTTP ${response.status}: ${response.statusText}`);
         }
         return null;
+      }
+
+      // Success — clear any rate-limit backoff for this slot
+      if (slotId) {
+        this.clearRateLimitBackoff(slotId);
       }
 
       const data: AnthropicOAuthUsageResponse = await response.json();
@@ -285,6 +430,13 @@ export class AnthropicOAuthAPI {
     const envToken = process.env.ANTHROPIC_API_KEY;
     if (envToken && envToken.startsWith('sk-ant-')) {
       return envToken;
+    }
+
+    // Keychain lock guard: all remaining paths touch macOS Keychain.
+    // When locked (sleep/screensaver), security commands spawn blocking dialogs.
+    if (!isKeychainUnlocked()) {
+      console.error('[AnthropicOAuthAPI] Keychain locked — skipping credential lookup');
+      return null;
     }
 
     // Priority 2: TARGETED keychain lookup (session-aware)
@@ -523,6 +675,9 @@ export class AnthropicOAuthAPI {
    * Returns the full parsed JSON object or null on failure.
    */
   private static readKeychainBlob(serviceName: string): Record<string, any> | null {
+    // Guard: keychain may lock during async token refresh network I/O
+    if (!isKeychainUnlocked()) return null;
+
     try {
       const { execSync } = require('child_process');
       const raw = execSync(
@@ -543,6 +698,12 @@ export class AnthropicOAuthAPI {
     serviceName: string,
     credentials: any
   ): Promise<boolean> {
+    // Keychain lock guard: don't attempt writes when keychain is locked
+    if (!isKeychainUnlocked()) {
+      console.error('[AnthropicOAuthAPI] Keychain locked — skipping credential update');
+      return false;
+    }
+
     try {
       const { execSync } = require('child_process');
       const credJson = JSON.stringify(credentials);

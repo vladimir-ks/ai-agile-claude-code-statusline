@@ -21,6 +21,7 @@ import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { resolve } from 'path';
 import { execSync } from 'child_process';
+import { isKeychainUnlocked } from '../lib/keychain-guard';
 
 export interface KeychainResolution {
   configDir: string | null;
@@ -108,6 +109,9 @@ export class KeychainResolver {
    * Does NOT perform refresh - caller handles that.
    */
   static readKeychainEntry(serviceName: string): KeychainEntry | null {
+    // Keychain lock guard: prevent dialog spam when keychain is locked
+    if (!isKeychainUnlocked()) return null;
+
     try {
       const credJson = execSync(
         `security find-generic-password -s "${serviceName}" -w 2>/dev/null`,
