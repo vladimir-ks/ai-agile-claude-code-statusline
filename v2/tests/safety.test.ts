@@ -52,6 +52,8 @@ describe('Safety: Orphan Process Prevention', () => {
 
     // After waiting, should have fewer than we started with
     // Allow higher threshold when machine is busy (other test suite daemons + e2e tests running)
+    // Threshold=12: Started 10, allow ~2 lingering (generous, but accounts for slow daemon finish)
+    // If this fails, daemons are not terminating properly (potential leak)
     expect(countBun).toBeLessThanOrEqual(12);
   }, 60000); // 60 second test timeout
 
@@ -191,9 +193,9 @@ describe('Safety: Error Indicators', () => {
       env: { ...process.env, NO_COLOR: '1' }  // Disable colors for test
     });
 
-    // New behavior: shows ⏳ (loading) instead of scary ⚠:NoData message
+    // Pre-first-message: minimal loading indicator only
     expect(output).toContain('⏳');
-    expect(output).toContain('🤖:Claude');
+    expect(output).not.toContain('🤖:');
   });
 
   test('display shows warning for invalid JSON', () => {

@@ -87,7 +87,7 @@ describe('E2E: Full System Integration', () => {
     // 6. Verify output contains expected components
     expect(output).toContain('📁:'); // Directory
     expect(output).toContain('🤖:'); // Model
-    expect(output).toContain('🕐:'); // Time
+    // Time (🕐) moved to account context notification line — not on main lines
 
     // 7. Verify output is not loading message
     expect(output).not.toBe('⏳ Loading...');

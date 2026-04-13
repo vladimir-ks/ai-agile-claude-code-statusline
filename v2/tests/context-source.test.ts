@@ -110,44 +110,44 @@ describe('contextSource', () => {
       expect(tooLarge.windowSize).toBe(200000);
     });
 
-    test('calculates percentUsed relative to 78% compaction threshold', () => {
-      // Window: 200k, threshold: 156k, used: 78k → 50%
+    test('calculates percentUsed relative to 83% compaction threshold', () => {
+      // Window: 200k, threshold: 166k, used: 83k → 50%
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
-          current_usage: { input_tokens: 78000 },
+          current_usage: { input_tokens: 83000 },
         },
       });
       expect(result.percentUsed).toBe(50);
     });
 
     test('calculates tokensLeft until compaction', () => {
-      // Window: 200k, threshold: 156k, used: 50k → left: 106k
+      // Window: 200k, threshold: 166k, used: 50k → left: 116k
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
           current_usage: { input_tokens: 50000 },
         },
       });
-      expect(result.tokensLeft).toBe(106000);
+      expect(result.tokensLeft).toBe(116000);
     });
 
     test('tokensLeft is 0 when above compaction threshold', () => {
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
-          current_usage: { input_tokens: 160000 },
+          current_usage: { input_tokens: 170000 },
         },
       });
       expect(result.tokensLeft).toBe(0);
     });
 
     test('nearCompaction is true at >=70%', () => {
-      // Window: 200k, threshold: 156k, 70% of threshold = 109.2k
+      // Window: 200k, threshold: 166k, 70% of threshold = 116.2k
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
-          current_usage: { input_tokens: 110000 },
+          current_usage: { input_tokens: 117000 },
         },
       });
       expect(result.nearCompaction).toBe(true);

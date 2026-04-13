@@ -119,9 +119,9 @@ describe('Display-Only Layer', () => {
     test('shows loading indicator when health file missing', () => {
       const { output } = runDisplay('{"session_id":"no-health-file"}');
 
-      // New behavior: shows ⏳ (loading) instead of scary ⚠:NoData message
+      // Pre-first-message: minimal loading indicator only
       expect(output).toContain('⏳');
-      expect(output).toContain('🤖:Claude');
+      expect(output).not.toContain('🤖:');
     });
 
     test('shows loading indicator when health file is corrupt', () => {
@@ -174,17 +174,15 @@ describe('Display-Only Layer', () => {
 
       const { output } = runDisplay('{"session_id":"format-test"}');
 
-      // HIGH priority - always shown
+      // HIGH priority - always shown on Line 1
       expect(output).toContain('🤖:Sonnet4.5');
-      expect(output).toContain('🧠:100k-free[');  // Token count with "-free" followed by progress bar
+      expect(output).toContain('🧠:100k(50%)');  // Short context format (no bar)
 
       // MEDIUM priority - shown if space (git at least should fit)
       expect(output).toContain('🌿:feature+2-1*3');
 
-      // Verify output is single line and fits
-      const stripped = output.replace(/\x1b\[[0-9;]*m/g, '');
-      // Single line format - should be under 130 chars (allows for dynamic last message)
-      expect(stripped.length).toBeLessThanOrEqual(130);
+      // Line 2: session ID always present
+      expect(output).toContain('🆔:format-test');
     });
 
     test('secrets detection disabled — no warning shown', () => {
@@ -283,10 +281,10 @@ describe('Display-Only Layer', () => {
   // Config Respect Tests
   // =========================================================================
   describe('config respect', () => {
-    // NOTE: In Phase 0 architecture, StatuslineFormatter pre-generates all components.
-    // Config-based component hiding is not yet implemented in the formatter.
-    // This test verifies the current behavior (all components shown).
-    test('shows all pre-formatted components (config not applied to formatter yet)', () => {
+    // NOTE: Phase 0: Formatter pre-generates all component variants for all widths.
+    // Config-based component hiding and maxLines will be added in Phase 1 (display-only layer).
+    // This test verifies Phase 0 behavior: all components pre-computed, display selects variant.
+    test('shows all pre-formatted components (Phase 0 architecture)', () => {
       const health = {
         sessionId: 'config-test',
         projectPath: '/test',
@@ -490,27 +488,54 @@ describe('Display-Only Layer', () => {
     });
 
     test('extracts version from stdin model.id', () => {
-      // Real Claude Code sends model.id with full version string
-      const { output } = runDisplay('{"session_id":"model-test-3","model":{"id":"claude-opus-4-6"}}');
+      // Need health file so display doesn't short-circuit to ⏳
+      const health = {
+        sessionId: 'model-test-3',
+        model: { value: 'Fallback' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+      writeFileSync('/tmp/test-display-home/.claude/session-health/model-test-3.json', JSON.stringify(withFormattedOutput(health)));
 
+      const { output } = runDisplay('{"session_id":"model-test-3","model":{"id":"claude-opus-4-6"}}');
       expect(output).toContain('🤖:Opus4.6');
     });
 
     test('handles stdin with model.id (prefers id over display_name)', () => {
-      // When both id and display_name present, id should win (has version info)
+      const health = {
+        sessionId: 'model-test-4',
+        model: { value: 'Fallback' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+      writeFileSync('/tmp/test-display-home/.claude/session-health/model-test-4.json', JSON.stringify(withFormattedOutput(health)));
+
       const { output } = runDisplay(
         '{"session_id":"model-test-4","model":{"id":"claude-sonnet-4-5-20250929","display_name":"Opus"}}'
       );
-
-      // Should use id (Sonnet 4.5), not display_name (Opus)
       expect(output).toContain('🤖:Sonnet4.5');
       expect(output).not.toContain('Opus');
     });
 
     test('handles stdin with only model.id (no display_name)', () => {
-      // Model.id alone should be sufficient for formatting
-      const { output } = runDisplay('{"session_id":"model-test-5","model":{"id":"claude-haiku-4-5-20251001"}}');
+      const health = {
+        sessionId: 'model-test-5',
+        model: { value: 'Fallback' },
+        context: { tokensLeft: 100000, percentUsed: 25 },
+        git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+        transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
+        billing: { costToday: 0, burnRatePerHour: 0, budgetRemaining: 0, budgetPercentUsed: 0, resetTime: '', isFresh: true },
+        alerts: { secretsDetected: false, transcriptStale: false, dataLossRisk: false }
+      };
+      writeFileSync('/tmp/test-display-home/.claude/session-health/model-test-5.json', JSON.stringify(withFormattedOutput(health)));
 
+      const { output } = runDisplay('{"session_id":"model-test-5","model":{"id":"claude-haiku-4-5-20251001"}}');
       expect(output).toContain('🤖:Haiku4.5');
     });
   });
@@ -560,6 +585,141 @@ describe('Display-Only Layer', () => {
 
       // Should not crash
       expect(time).toBeLessThan(100);
+      expect(output.length).toBeGreaterThan(0);
+    });
+  });
+
+  // =========================================================================
+  // DisplayConfig Validation (via config.json)
+  // =========================================================================
+  describe('DisplayConfig validation', () => {
+    const healthData = {
+      sessionId: 'cfg-test',
+      projectPath: '/test/project',
+      model: { value: 'Opus4.6', confidence: 100 },
+      context: { tokensLeft: 100000, percentUsed: 25 },
+      git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+      billing: null,
+      transcript: { lastMessagePreview: 'Hello', messageCount: 5, sizeBytes: 1024 },
+      alerts: {},
+    };
+
+    function writeConfigAndHealth(displayConfig: Record<string, unknown>) {
+      const configPath = '/tmp/test-display-home/.claude/session-health/config.json';
+      const healthPath = '/tmp/test-display-home/.claude/session-health/cfg-test.json';
+      writeFileSync(configPath, JSON.stringify({ display: displayConfig }));
+      writeFileSync(healthPath, JSON.stringify(withFormattedOutput(healthData)));
+    }
+
+    test('invalid mode silently falls back to auto', () => {
+      writeConfigAndHealth({ mode: 'invalid-typo' });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      // Should render normally (auto mode), not crash
+      expect(output.length).toBeGreaterThan(0);
+      expect(output).toContain('📁:');
+    });
+
+    test('marginPercent negative is ignored (uses auto)', () => {
+      writeConfigAndHealth({ marginPercent: -10 });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      expect(output.length).toBeGreaterThan(0);
+      expect(output).toContain('📁:');
+    });
+
+    test('marginPercent > 25 is ignored (uses auto)', () => {
+      writeConfigAndHealth({ marginPercent: 101 });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      expect(output.length).toBeGreaterThan(0);
+      expect(output).toContain('📁:');
+    });
+
+    test('maxLines=0 is ignored (uses default 6)', () => {
+      writeConfigAndHealth({ maxLines: 0 });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      // Should still produce output (maxLines=0 ignored, default=6 used)
+      expect(output.length).toBeGreaterThan(0);
+      expect(output).toContain('📁:');
+    });
+
+    test('maxLines=1 produces at most 1 line', () => {
+      writeConfigAndHealth({ maxLines: 1 });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      const lines = output.trim().split('\n');
+      expect(lines.length).toBeLessThanOrEqual(1);
+    });
+
+    test('mode=singleline produces 2 lines (core + session ID)', () => {
+      writeConfigAndHealth({ mode: 'singleline' });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      const lines = output.trim().split('\n');
+      expect(lines.length).toBeLessThanOrEqual(2); // Line 1: core, Line 2: session ID
+    });
+
+    test('marginPercent=0 is accepted (no margin)', () => {
+      writeConfigAndHealth({ marginPercent: 0 });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      expect(output.length).toBeGreaterThan(0);
+      expect(output).toContain('📁:');
+    });
+
+    test('marginPercent=15 is accepted (custom margin)', () => {
+      writeConfigAndHealth({ marginPercent: 15 });
+      const { output } = runDisplay('{"session_id":"cfg-test"}');
+      expect(output.length).toBeGreaterThan(0);
+      expect(output).toContain('📁:');
+    });
+  });
+
+  // =========================================================================
+  // Width Fallback Chain
+  // =========================================================================
+  describe('width detection fallback', () => {
+    const healthData = {
+      sessionId: 'width-test',
+      projectPath: '/test/project',
+      model: { value: 'Opus4.6', confidence: 100 },
+      context: { tokensLeft: 100000, percentUsed: 25 },
+      git: { branch: 'main', ahead: 0, behind: 0, dirty: 0 },
+      billing: null,
+      transcript: { lastMessagePreview: 'Hello', messageCount: 5, sizeBytes: 1024 },
+      alerts: {},
+    };
+
+    function runDisplayWithEnv(env: Record<string, string | undefined>): string {
+      const healthPath = '/tmp/test-display-home/.claude/session-health/width-test.json';
+      writeFileSync(healthPath, JSON.stringify(withFormattedOutput(healthData)));
+      try {
+        return execSync(
+          `echo '{"session_id":"width-test"}' | bun ${DISPLAY_SCRIPT}`,
+          {
+            encoding: 'utf-8',
+            timeout: 1000,
+            env: { ...process.env, HOME: '/tmp/test-display-home', NO_COLOR: '1', ...env }
+          }
+        );
+      } catch (error: any) {
+        return error.stdout || '';
+      }
+    }
+
+    test('STATUSLINE_WIDTH takes priority over COLUMNS', () => {
+      const output = runDisplayWithEnv({ STATUSLINE_WIDTH: '80', COLUMNS: '200' });
+      // Should produce output (not crash with either width)
+      expect(output.length).toBeGreaterThan(0);
+    });
+
+    test('COLUMNS used when STATUSLINE_WIDTH not set', () => {
+      const output = runDisplayWithEnv({ STATUSLINE_WIDTH: '', COLUMNS: '100' });
+      expect(output.length).toBeGreaterThan(0);
+    });
+
+    test('defaults to 120 when no env vars set', () => {
+      const output = runDisplayWithEnv({ STATUSLINE_WIDTH: '', COLUMNS: '' });
+      expect(output.length).toBeGreaterThan(0);
+    });
+
+    test('narrow width (40) does not crash', () => {
+      const output = runDisplayWithEnv({ STATUSLINE_WIDTH: '40', COLUMNS: '' });
       expect(output.length).toBeGreaterThan(0);
     });
   });

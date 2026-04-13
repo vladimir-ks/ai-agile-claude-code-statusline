@@ -100,7 +100,9 @@ describe('TelemetryDashboard CLI', () => {
   });
 
   test('daily command with valid date returns success', () => {
-    const exitCode = runCLI(['daily', '2026-02-08']);
+    // Use today's date since test data is inserted with Date.now() timestamps
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const exitCode = runCLI(['daily', today]);
     expect(exitCode).toBe(0);
     expect(consoleLogSpy).toHaveBeenCalled();
   });

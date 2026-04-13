@@ -232,7 +232,7 @@ describe('SPEC: Output Format', () => {
   // SPEC: Context Component
   // =========================================================================
   describe('Context Component (🧠)', () => {
-    test('shows tokens with progress bar', () => {
+    test('shows tokens with percentage (short format)', () => {
       createHealthFile('context-normal', {
         sessionId: 'context-normal',
         model: { value: 'Claude' },
@@ -245,11 +245,10 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"context-normal"}');
 
-      expect(output).toContain('🧠:138k');
-      expect(output).toMatch(/\[.+\|.+\]/);  // Progress bar with | marker
+      expect(output).toContain('🧠:138k(30%)');
     });
 
-    test('progress bar has threshold marker at position 9', () => {
+    test('session ID always present on line 2', () => {
       createHealthFile('context-bar', {
         sessionId: 'context-bar',
         model: { value: 'Claude' },
@@ -262,8 +261,7 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"context-bar"}');
 
-      // Bar format: [======---|--] where | is at position 9 (78% threshold, 12-char bar)
-      expect(output).toMatch(/\[.{9}\|.+\]/);
+      expect(output).toContain('🆔:context-bar');
     });
   });
 
@@ -415,23 +413,23 @@ describe('SPEC: Output Format', () => {
   // SPEC: Error Handling
   // =========================================================================
   describe('Error Handling', () => {
-    test('no stdin → shows 🤖:Claude with time', () => {
+    test('no stdin → shows 🤖:Claude fallback', () => {
       const output = runDisplay('{}');
       expect(output).toContain('🤖:Claude');
-      expect(output).toMatch(/🕐:\d{2}:\d{2}/);  // Time component HH:MM
+      // Time moved to account context notification line (not in main fallback)
     });
 
-    test('invalid JSON → shows 🤖:Claude with time', () => {
+    test('invalid JSON → shows 🤖:Claude fallback', () => {
       const output = runDisplay('not json');
       expect(output).toContain('🤖:Claude');
-      expect(output).toMatch(/🕐:\d{2}:\d{2}/);
+      // Time moved to account context notification line
     });
 
     test('no health file → shows loading indicator with model', () => {
       const output = runDisplay('{"session_id":"nonexistent"}');
-      // New behavior: shows ⏳ (loading) instead of scary ⚠:NoData message
+      // Pre-first-message: minimal loading indicator only
       expect(output).toContain('⏳');
-      expect(output).toContain('🤖:Claude');
+      expect(output).not.toContain('🤖:');
     });
   });
 

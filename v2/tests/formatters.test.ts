@@ -68,7 +68,7 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:0-free[');
+    expect(output).toContain('🧠:0(');
   });
 
   test('999 tokens shows as 999', () => {
@@ -80,7 +80,7 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:999-free[');
+    expect(output).toContain('🧠:999(');
   });
 
   test('1000 tokens shows as 1k', () => {
@@ -92,7 +92,7 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:1k-free[');
+    expect(output).toContain('🧠:1k(');
   });
 
   test('999999 tokens shows as 999k', () => {
@@ -104,7 +104,7 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:999k-free[');
+    expect(output).toContain('🧠:999k(');
   });
 
   test('1000000 tokens shows as 1.0M', () => {
@@ -116,7 +116,7 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:1.0M-free[');
+    expect(output).toContain('🧠:1.0M(');
   });
 
   test('1500000 tokens shows as 1.5M', () => {
@@ -128,7 +128,7 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:1.5M-free[');
+    expect(output).toContain('🧠:1.5M(');
   });
 
   test('negative tokens shows as 0', () => {
@@ -140,7 +140,7 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:0-free[');
+    expect(output).toContain('🧠:0(');
   });
 
   test('null tokens shows as 0', () => {
@@ -152,17 +152,17 @@ describe('formatTokens', () => {
       billing: {},
       alerts: {}
     });
-    expect(output).toContain('🧠:0-free[');
+    expect(output).toContain('🧠:0(');
   });
 });
 
 // formatMoney tests removed — cost moved from line 2 to account context notification line.
 // formatMoney helper is still correct (private, unchanged); exercised via notification rendering.
 
-describe('generateProgressBar', () => {
-  // Test progress bar rendering
+describe('context short format (no progress bar)', () => {
+  // New layout uses short context format: 🧠:Nk(X%) — no progress bar
 
-  test('0% shows empty bar', () => {
+  test('0% shows tokens with percentage', () => {
     const output = getDisplayOutput({
       context: { tokensLeft: 100000, percentUsed: 0 },
       model: { value: 'Claude' },
@@ -171,11 +171,10 @@ describe('generateProgressBar', () => {
       billing: {},
       alerts: {}
     });
-    // Bar should be [---------|-­-] at 0% (12 chars, threshold at pos 9)
-    expect(output).toMatch(/\[---------\|--\]/);
+    expect(output).toContain('🧠:100k(0%)');
   });
 
-  test('50% shows half filled', () => {
+  test('50% shows usage percentage', () => {
     const output = getDisplayOutput({
       context: { tokensLeft: 100000, percentUsed: 50 },
       model: { value: 'Claude' },
@@ -184,11 +183,10 @@ describe('generateProgressBar', () => {
       billing: {},
       alerts: {}
     });
-    // At 50% of 12 chars = 6 filled (threshold at pos 9)
-    expect(output).toMatch(/\[======---\|--\]/);
+    expect(output).toContain('🧠:100k(50%)');
   });
 
-  test('100% shows full bar', () => {
+  test('100% shows full usage', () => {
     const output = getDisplayOutput({
       context: { tokensLeft: 0, percentUsed: 100 },
       model: { value: 'Claude' },
@@ -197,22 +195,19 @@ describe('generateProgressBar', () => {
       billing: {},
       alerts: {}
     });
-    // At 100%, all 12 chars filled
-    expect(output).toMatch(/\[=========\|==\]/);
+    expect(output).toContain('🧠:0(100%)');
   });
 
-  test('threshold marker at position 9', () => {
+  test('high usage shows percentage', () => {
     const output = getDisplayOutput({
-      context: { tokensLeft: 100000, percentUsed: 25 },
+      context: { tokensLeft: 100000, percentUsed: 95 },
       model: { value: 'Claude' },
       transcript: { exists: true, lastModifiedAgo: '1m', isSynced: true },
       git: {},
       billing: {},
       alerts: {}
     });
-    // | should always be at position 9 (12-char bar, 78% threshold)
-    const match = output.match(/\[(.{9})\|(.+)\]/);
-    expect(match).not.toBeNull();
+    expect(output).toContain('🧠:100k(95%)');
   });
 });
 

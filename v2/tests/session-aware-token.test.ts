@@ -195,21 +195,31 @@ describe('Session-Aware Token Resolution', () => {
 
   describe('HotSwapQuotaReader configDir matching', () => {
     const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    const SESSIONS_PATH = `${HOME}/_claude-configs/hot-swap/claude-sessions.yaml`;
     let originalCache: string | null = null;
+    let originalSessions: string | null = null;
 
     beforeEach(() => {
       HotSwapQuotaReader.clearCache();
-      // Backup original cache
+      // Backup original cache and sessions
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
       }
+      if (existsSync(SESSIONS_PATH)) {
+        originalSessions = readFileSync(SESSIONS_PATH, 'utf-8');
+      }
+      // Write mock sessions.yaml so Strategy 2 fallback works
+      writeFileSync(SESSIONS_PATH, 'active_account: slot-1\n', 'utf-8');
     });
 
     afterEach(() => {
       HotSwapQuotaReader.clearCache();
-      // Restore original cache
+      // Restore originals
       if (originalCache) {
         writeFileSync(QUOTA_CACHE_PATH, originalCache, 'utf-8');
+      }
+      if (originalSessions) {
+        writeFileSync(SESSIONS_PATH, originalSessions, 'utf-8');
       }
     });
 

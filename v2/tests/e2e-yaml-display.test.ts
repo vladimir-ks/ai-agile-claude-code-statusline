@@ -97,11 +97,11 @@ describe('E2E: YAML-based Display System', () => {
       formattedOutput: {
         width40: ['🕐:13:18|⌛:42m(29%)', '📁:~/project 🤖:Sonnet4.5'],
         width60: ['🕐:13:18|⌛:42m(29%)', '📁:~/project 🤖:Sonnet4.5 🧠:154k'],
-        width80: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k-free[---------|--]', '🕐:13:18|⌛:42m(29%)'],
-        width100: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k-free[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h'],
-        width120: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k-free[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h 💬:5t'],
-        width150: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k-free[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h 📊:200ktok 💬:5t'],
-        width200: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k-free[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h 📊:200ktok(0tpm) 💬:5t', '💬(1m) Test message']
+        width80: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k[---------|--]', '🕐:13:18|⌛:42m(29%)'],
+        width100: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h'],
+        width120: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h 💬:5t'],
+        width150: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h 📊:200ktok 💬:5t'],
+        width200: ['📁:~/project 🌿:main 🤖:Sonnet4.5 🧠:154k[---------|--]', '🕐:13:18|⌛:42m(29%) 💰:$10.5|$5.2/h 📊:200ktok(0tpm) 💬:5t', '💬(1m) Test message']
       }
     };
 
