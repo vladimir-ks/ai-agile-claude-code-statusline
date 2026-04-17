@@ -229,10 +229,14 @@ describe('fmtTokPerHour — edge cases', () => {
   });
 });
 
-// ── fmtBurnRate — live suffix ─────────────────────────────────────────────────
+// ── fmtBurnRate — live suffix (removed in W3c) ───────────────────────────────
+// NOTE: The ~live token-rate suffix was removed in W3c (Edit 1).
+// Live burn data is still read but the raw tokens/hr display was replaced by
+// per-field staleness decoration via staleTier().
+// See tests/formatter-stale.test.ts for the new behaviour coverage.
 
 describe('fmtBurnRate — live suffix', () => {
-  test('appends tok/h suffix when live estimate is fresh', () => {
+  test('no ~live suffix when live estimate is fresh (Edit 1 — suffix removed)', () => {
     const slot = makeSlot({
       burn_rate_1h_avg_5h: 5,
       burn_sample_count_5h: 3,
@@ -241,10 +245,11 @@ describe('fmtBurnRate — live suffix', () => {
     const live = makeLiveEstimate({ tokens_per_hour: 3_200, session_count: 2 });
     const result: string = Fmt.fmtBurnRate(slot, live, 10); // ageS=10 → fresh
     expect(result).toContain('🔥:');
-    expect(result).toContain('3.2k/h~live');
+    // ~live suffix removed — rate already encoded in %/d field
+    expect(result).not.toContain('~live');
   });
 
-  test('omits suffix when liveEstimate is null', () => {
+  test('omits ~live suffix when liveEstimate is null', () => {
     const slot = makeSlot({
       burn_rate_1h_avg_5h: 5,
       burn_sample_count_5h: 3,
@@ -254,7 +259,7 @@ describe('fmtBurnRate — live suffix', () => {
     expect(result).not.toContain('~live');
   });
 
-  test('omits suffix when ageS > 30 (stale)', () => {
+  test('omits ~live suffix when ageS > 30 (stale)', () => {
     const slot = makeSlot({
       burn_rate_1h_avg_5h: 5,
       burn_sample_count_5h: 3,
@@ -265,7 +270,7 @@ describe('fmtBurnRate — live suffix', () => {
     expect(result).not.toContain('~live');
   });
 
-  test('omits suffix when session_count === 0 (no active sessions)', () => {
+  test('omits ~live suffix when session_count === 0 (no active sessions)', () => {
     const slot = makeSlot({
       burn_rate_1h_avg_5h: 5,
       burn_sample_count_5h: 3,
@@ -286,23 +291,24 @@ describe('fmtBurnRate — live suffix', () => {
     });
     const live = makeLiveEstimate({ tokens_per_hour: 3_200, session_count: 2 });
     const result: string = Fmt.fmtBurnRate(slot, live, 5);
-    // No rates → empty string (not even the live suffix, because there's no 🔥 base)
+    // No rates → empty string
     expect(result).toBe('');
   });
 
-  test('suffix uses fmtTokPerHour formatting (sub-1k)', () => {
+  test('no ~live suffix even with sub-1k token rate (Edit 1 regression guard)', () => {
     const slot = makeSlot({ burn_rate_1h_avg_5h: 5, burn_sample_count_5h: 3 });
     const live = makeLiveEstimate({ tokens_per_hour: 800, session_count: 1 });
     const result: string = Fmt.fmtBurnRate(slot, live, 5);
-    expect(result).toContain('800/h~live');
+    expect(result).not.toContain('~live');
+    expect(result).not.toContain('800');  // raw token count not displayed
   });
 
-  test('suffix uses fmtTokPerHour formatting (over 100k)', () => {
+  test('no ~live suffix even with high token rate (Edit 1 regression guard)', () => {
     const slot = makeSlot({ burn_rate_1h_avg_5h: 5, burn_sample_count_5h: 3 });
     const live = makeLiveEstimate({ tokens_per_hour: 8_073_665, session_count: 24 });
     const result: string = Fmt.fmtBurnRate(slot, live, 5);
-    // 8073665 / 1000 = 8073.665 → "8074k"
-    expect(result).toContain('8074k/h~live');
+    expect(result).not.toContain('~live');
+    expect(result).not.toContain('8074k');  // raw token rate not displayed
   });
 });
 

@@ -182,7 +182,7 @@ describe('fmtSlotWeeklyQuotaColored — inline projection', () => {
     expect(text).toContain('→98%');  // shows best_case (not weekly_projected)
   });
 
-  test('no projection available: plain format without arrow', () => {
+  test('no projection available: plain format without arrow (space-separated format)', () => {
     const slot = makeSlot({
       seven_day_util: 60,
       weekly_budget_remaining_hours: 72,
@@ -192,7 +192,9 @@ describe('fmtSlotWeeklyQuotaColored — inline projection', () => {
     });
     const { text } = Fmt.fmtSlotWeeklyQuotaColored(slot);
     expect(text).not.toContain('→');
-    expect(text).toMatch(/\d+h\(\d+%\)/);
+    // New format: "72h 60%" (space, not parens)
+    expect(text).toMatch(/\d+h \d+%/);
+    expect(text).not.toMatch(/\d+h\(\d+%\)/);
   });
 
   test('text contains hours and pct', () => {
@@ -300,6 +302,9 @@ describe('fmtSlotBadge — ban indicator', () => {
 });
 
 // ── fmtStaleWarning ────────────────────────────────────────────────────────────
+// NOTE: fmtStaleWarning is deprecated — replaced by per-field staleTier decorator.
+// It now always returns '' regardless of age.
+// Staleness UX is tested in tests/formatter-stale.test.ts via staleTier() + per-field tests.
 
 describe('fmtStaleWarning — stale data banner', () => {
   test('age < 15min: returns empty string', () => {
@@ -308,44 +313,36 @@ describe('fmtStaleWarning — stale data banner', () => {
     expect(result).toBe('');
   });
 
-  test('age exactly 15min: returns stale warning', () => {
+  test('age exactly 15min: returns empty string (deprecated — no longer emits banner)', () => {
     const fifteenMinAgo = Date.now() - 15 * 60_000 - 1000;
     const result = StatuslineFormatter.fmtStaleWarning(fifteenMinAgo);
-    expect(result).toContain('stale');
-    expect(result).toContain('15m');
+    expect(result).toBe('');
   });
 
-  test('age 15-30min: light warning with single ⚠', () => {
+  test('age 15-30min: returns empty string (deprecated — per-field ⚠ used instead)', () => {
     const twentyMinAgo = Date.now() - 20 * 60_000;
     const result = StatuslineFormatter.fmtStaleWarning(twentyMinAgo);
-    expect(result).toContain('⚠');
-    expect(result).toContain('stale 20m');
-    // Must NOT contain double ⚠⚠
-    expect(result).not.toContain('⚠⚠');
+    expect(result).toBe('');
   });
 
-  test('age 15-30min: uses neutralLight color when colors enabled', () => {
+  test('age 15-30min: no ANSI color codes emitted (no banner)', () => {
     delete process.env.NO_COLOR;
     const twentyMinAgo = Date.now() - 20 * 60_000;
     const result = StatuslineFormatter.fmtStaleWarning(twentyMinAgo);
-    expect(result).toContain('\x1b[38;5;245m');   // neutralLight
-    expect(result).not.toContain('\x1b[38;5;208m'); // NOT orange
+    expect(result).toBe('');
   });
 
-  test('age > 30min: bold double ⚠⚠ STALE', () => {
+  test('age > 30min: returns empty string (deprecated — per-field ⚠ used instead)', () => {
     const fortyMinAgo = Date.now() - 40 * 60_000;
     const result = StatuslineFormatter.fmtStaleWarning(fortyMinAgo);
-    expect(result).toContain('⚠⚠');
-    expect(result).toContain('STALE');
-    expect(result).toContain('40m');
+    expect(result).toBe('');
   });
 
-  test('age > 30min: uses pacingOrange + bold when colors enabled', () => {
+  test('age > 30min: no ANSI color codes when deprecated', () => {
     delete process.env.NO_COLOR;
     const fortyMinAgo = Date.now() - 40 * 60_000;
     const result = StatuslineFormatter.fmtStaleWarning(fortyMinAgo);
-    expect(result).toContain('\x1b[38;5;208m');   // pacingOrange
-    expect(result).toContain('\x1b[1m');           // bold
+    expect(result).toBe('');
   });
 
   test('fresh data (0 minutes): no warning', () => {

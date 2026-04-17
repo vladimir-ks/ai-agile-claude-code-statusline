@@ -61,9 +61,27 @@ const c = (name: keyof typeof COLORS) =>
 const rst = () =>
   (process.env.NO_COLOR === '1' || process.env.NO_COLOR === 'true') ? '' : COLORS.reset;
 
+// Staleness thresholds for per-field quota-cache decorators
+const STALE_WARN_MIN = 30;
+const STALE_SEVERE_MIN = 120;
+
 export class StatuslineFormatter {
   // Max length for single-line mode (no tmux/unknown width)
   private static readonly SINGLE_LINE_MAX_LENGTH = 240;
+
+  /**
+   * Quota-cache staleness tier based on merged-cache mtime.
+   *  - 'fresh':  age < 30 min
+   *  - 'warn':   30 min <= age < 120 min  -> field keeps numbers + appends ' ⚠'
+   *  - 'severe': age >= 120 min             -> field replaces contents with '⚠'
+   */
+  static staleTier(mergedAtMs: number): 'fresh' | 'warn' | 'severe' {
+    if (!mergedAtMs || mergedAtMs <= 0) return 'fresh';
+    const ageMin = (Date.now() - mergedAtMs) / 60_000;
+    if (ageMin < STALE_WARN_MIN) return 'fresh';
+    if (ageMin < STALE_SEVERE_MIN) return 'warn';
+    return 'severe';
+  }
   // Fixed length for last message preview in single-line mode
   private static readonly SINGLE_LINE_MSG_LENGTH = 50;
 
@@ -347,19 +365,23 @@ export class StatuslineFormatter {
     // Ban indicator: derive from rate-limit state file
     const isBanned = this.isSlotBanned(lock.slotId);
 
+    // Staleness tier — computed once, threaded into per-field decorators
+    const mergedAt = quotaData?.ts ? quotaData.ts * 1000 : 0;
+    const tier = this.staleTier(mergedAt);
+
     const segments: string[] = [];
     segments.push(this.fmtSlotBadge(slotNum, email, isBanned));
     segments.push(`🕐:${c('time')}${hh}:${mm}${rst()}`);
 
     if (slot) {
-      segments.push(`⌛:${c('budget')}${this.fmtSlotDailyBudget(slot)}${rst()}`);
-      // 📅 weekly quota — color computed inside fmtSlotWeeklyQuota
-      const { text: weeklyText, color: weeklyColor } = this.fmtSlotWeeklyQuotaColored(slot);
+      segments.push(`⌛:${c('budget')}${this.fmtSlotDailyBudget(slot, tier)}${rst()}`);
+      // 📅 weekly quota — color computed inside fmtSlotWeeklyQuotaColored
+      const { text: weeklyText, color: weeklyColor } = this.fmtSlotWeeklyQuotaColored(slot, tier);
       segments.push(`📅:${weeklyColor}${weeklyText}${rst()}`);
 
-      // Tier 2: read live burn estimate (5s sampler) for the active slot
+      // Read live burn estimate (5s sampler) for the active slot
       const liveRead = this.readLiveBurn(lock.slotId);
-      const burn = this.fmtBurnRate(slot, liveRead?.estimate, liveRead?.ageS, readOnlyNotifications);
+      const burn = this.fmtBurnRate(slot, liveRead?.estimate, liveRead?.ageS, readOnlyNotifications, tier);
       if (burn) segments.push(burn);
 
       // Heartbeat: log on staleness transitions and LKG fallbacks (not every render)
@@ -371,12 +393,8 @@ export class StatuslineFormatter {
       }
     }
 
-    // Stale data warning (appended to end)
-    const mergedAt = quotaData?.ts ? quotaData.ts * 1000 : 0;
-    const stale = mergedAt > 0 ? this.fmtStaleWarning(mergedAt) : '';
-
     if (segments.length === 0) return '';
-    return segments[0] + segments.slice(1).join('') + stale;
+    return segments[0] + segments.slice(1).join('');
   }
 
   /**
@@ -900,21 +918,31 @@ export class StatuslineFormatter {
   }
 
   /** Format slot daily budget: Xh(Y%) — time UNTIL reset from five_hour_resets_at */
-  private static fmtSlotDailyBudget(slot: MergedQuotaSlot): string {
+  private static fmtSlotDailyBudget(slot: MergedQuotaSlot, tier: 'fresh' | 'warn' | 'severe' = 'fresh'): string {
+    if (tier === 'severe') return '⚠';
+
     const pct = Math.round(slot.five_hour_util || 0);
+    let text: string;
 
     if (slot.five_hour_resets_at) {
       const resetMs = new Date(slot.five_hour_resets_at).getTime();
       if (!isNaN(resetMs)) {
         const diffSec = Math.max(0, Math.floor((resetMs - Date.now()) / 1000));
-        if (diffSec <= 0) return `reset(${pct}%)`;
-        const h = Math.floor(diffSec / 3600);
-        const m = Math.floor((diffSec % 3600) / 60);
-        const tl = h > 0 ? (m > 0 ? `${h}h${m}m` : `${h}h`) : `${m}m`;
-        return `${tl}(${pct}%)`;
+        if (diffSec <= 0) { text = `reset(${pct}%)`; }
+        else {
+          const h = Math.floor(diffSec / 3600);
+          const m = Math.floor((diffSec % 3600) / 60);
+          const tl = h > 0 ? (m > 0 ? `${h}h${m}m` : `${h}h`) : `${m}m`;
+          text = `${tl}(${pct}%)`;
+        }
+      } else {
+        text = `(${pct}%)`;
       }
+    } else {
+      text = `(${pct}%)`;
     }
-    return `(${pct}%)`;
+
+    return tier === 'warn' ? `${text} ⚠` : text;
   }
 
   /**
@@ -957,7 +985,7 @@ export class StatuslineFormatter {
   }
 
   /**
-   * Format combined burn rate segment: 🔥:{5h_rate}%/h|{7d_rate}%/d [Xk/h~live]
+   * Format combined burn rate segment: 🔥:{5h_rate}%/h|{7d_rate}%/d
    *
    * Low-confidence marker (burn_sample_count_5h < 3):
    * - Rate prefixed with `~` (estimate)
@@ -966,16 +994,16 @@ export class StatuslineFormatter {
    * High-confidence (≥3 samples): normal 6-band pacing color.
    * Shows min-max range for 5h when ≥3 distinct samples and min ≠ max.
    *
-   * Live tier (Tier 2): when liveEstimate is fresh (ageS ≤ 30) and session_count > 0,
-   * appends a muted " Xk/h~live" suffix showing real-time token burn rate.
-   * Stale / missing live data → no suffix (silent fallback to API baseline).
+   * Live estimate is read for dead-sampler notification only (W3c: raw token-rate suffix removed).
    * Dead sampler (ageS > 60) → register transcript_sampler_dead notification (once/30min).
+   * Staleness tier (tier param): 'warn' → appends ' ⚠'; 'severe' → returns '🔥:⚠'.
    */
   private static fmtBurnRate(
     slot: MergedQuotaSlot,
     liveEstimate?: LiveBurnEstimate | null,
     ageS?: number,
     readOnlyNotifications: boolean = false,
+    tier: 'fresh' | 'warn' | 'severe' = 'fresh',
   ): string {
     // ── 5h rate ──
     const target5h = slot.target_burn_rate_5h;
@@ -1013,10 +1041,12 @@ export class StatuslineFormatter {
 
     if (!part5h && !part7d) return '';
 
+    if (tier === 'severe') return `🔥:⚠`;
+
     const inner = [part5h, part7d].filter(Boolean).join('|');
     let result = `🔥:${inner}`;
 
-    // ── Tier 2 live suffix ──
+    // ── Dead sampler detection ──
     const effectiveAgeS = ageS ?? 0;
 
     // Dead sampler detection: ageS > 60 → one-time deduped notification
@@ -1037,12 +1067,8 @@ export class StatuslineFormatter {
       } catch { /* non-critical */ }
     }
 
-    // Fresh live data: append token-rate suffix
-    const isFresh = liveEstimate != null && effectiveAgeS <= 30 && liveEstimate.session_count > 0;
-    if (isFresh) {
-      const tokSuffix = StatuslineFormatter.fmtTokPerHour(liveEstimate!.tokens_per_hour);
-      result += ` ${c('neutralLight')}${tokSuffix}/h~live${rst()}`;
-    }
+    // Replaced: live token-rate suffix (/h~live) removed — rate already encoded in %/d field
+    if (tier === 'warn') result += ' ⚠';
 
     return result;
   }
@@ -1085,9 +1111,14 @@ export class StatuslineFormatter {
    * 6. weekly_projected_util > 105                                               → WASTING (blue)
    * 7. missing data                                                               → neutral (250)
    *
-   * Text format: Zh(W%→P%) when projection available, else Zh(W%).
+   * // Format: {weekly_budget_remaining_hours}h {seven_day_util}%→{weekly_projected_util}%
+   * // - 120h    = hours of quota remaining this week
+   * // - 65%     = current 7-day utilization (tokens consumed / weekly budget)
+   * // - 114%    = projected end-of-week utilization if current burn continues (>100% = overrun)
    */
-  private static fmtSlotWeeklyQuotaColored(slot: MergedQuotaSlot): { text: string; color: string } {
+  private static fmtSlotWeeklyQuotaColored(slot: MergedQuotaSlot, tier: 'fresh' | 'warn' | 'severe' = 'fresh'): { text: string; color: string } {
+    if (tier === 'severe') return { text: '⚠', color: '' };
+
     const pct = Math.round(slot.seven_day_util || 0);
     const hours = Math.max(0, Math.floor(slot.weekly_budget_remaining_hours || 0));
     const sampleCt = slot.burn_sample_count_5h ?? 0;
@@ -1102,9 +1133,10 @@ export class StatuslineFormatter {
     } else if (bestCase != null) {
       projSuffix = `→${Math.round(bestCase)}%`;
     }
-    const text = projSuffix
-      ? `${hours}h(${pct}%${projSuffix})`
-      : `${hours}h(${pct}%)`;
+    const baseText = projSuffix
+      ? `${hours}h ${pct}%${projSuffix}`
+      : `${hours}h ${pct}%`;
+    const text = tier === 'warn' ? `${baseText} ⚠` : baseText;
 
     // Color rules
     const noColor = (process.env.NO_COLOR === '1' || process.env.NO_COLOR === 'true');
@@ -1131,9 +1163,9 @@ export class StatuslineFormatter {
     return { text, color: noColor ? '' : COLORS.neutralId };
   }
 
-  /** Format slot weekly quota: Zh(W%) — legacy plain text (kept for external use) */
-  private static fmtSlotWeeklyQuota(slot: MergedQuotaSlot): string {
-    return this.fmtSlotWeeklyQuotaColored(slot).text;
+  /** Format slot weekly quota: legacy plain text (kept for external use) */
+  private static fmtSlotWeeklyQuota(slot: MergedQuotaSlot, tier: 'fresh' | 'warn' | 'severe' = 'fresh'): string {
+    return this.fmtSlotWeeklyQuotaColored(slot, tier).text;
   }
 
   /**
@@ -1166,22 +1198,10 @@ export class StatuslineFormatter {
   }
 
   /**
-   * Format stale data warning based on mergedAtMs (Unix timestamp ms of cache write).
-   * - < 15min  → empty string
-   * - 15–30min → " ⚠ stale Nm" in neutralLight (245)
-   * - > 30min  → " ⚠⚠ STALE Nm" in pacingOrange (208) + bold
+   * Replaced by per-field staleTier decorator — see staleTier() above.
+   * Kept for API compatibility; always returns empty string.
    */
-  static fmtStaleWarning(mergedAtMs: number): string {
-    const ageMin = Math.floor((Date.now() - mergedAtMs) / 60_000);
-    const noColor = (process.env.NO_COLOR === '1' || process.env.NO_COLOR === 'true');
-    if (ageMin < 15) return '';
-    if (ageMin <= 30) {
-      const col = noColor ? '' : COLORS.neutralLight;
-      const r = noColor ? '' : COLORS.reset;
-      return ` ${col}⚠ stale ${ageMin}m${r}`;
-    }
-    const col = noColor ? '' : `${COLORS.bold}${COLORS.pacingOrange}`;
-    const r = noColor ? '' : COLORS.reset;
-    return ` ${col}⚠⚠ STALE ${ageMin}m${r}`;
+  static fmtStaleWarning(_mergedAtMs: number): string {
+    return '';
   }
 }
