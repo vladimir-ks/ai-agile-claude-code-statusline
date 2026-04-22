@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { contextSource, calculateContext } from '../src/lib/sources/context-source';
+import { contextSource, calculateContext, detectWindowFromModel } from '../src/lib/sources/context-source';
 import type { GatherContext } from '../src/lib/sources/types';
 import type { SessionHealth } from '../src/types/session-health';
 import { createDefaultHealth } from '../src/types/session-health';
@@ -101,13 +101,27 @@ describe('contextSource', () => {
       });
       expect(tooSmall.windowSize).toBe(200000);
 
+      // Values above 2M are still rejected (upper bound raised to 2M, not removed)
       const tooLarge = calculateContext({
         context_window: {
-          context_window_size: 1_000_000, // > 500k
+          context_window_size: 3_000_000, // > 2M
           current_usage: {},
         },
       });
       expect(tooLarge.windowSize).toBe(200000);
+    });
+
+    test('accepts 1M window size (claude-opus-4-7[1m] class models)', () => {
+      const result = calculateContext({
+        context_window: {
+          context_window_size: 1_000_000,
+          current_usage: { input_tokens: 517500 },
+        },
+      });
+      expect(result.windowSize).toBe(1_000_000);
+      // 517.5k / (1M * 0.83) ≈ 62%
+      expect(result.percentUsed).toBeGreaterThan(60);
+      expect(result.percentUsed).toBeLessThan(65);
     });
 
     test('calculates percentUsed relative to 83% compaction threshold', () => {
@@ -210,6 +224,74 @@ describe('contextSource', () => {
         },
       });
       expect(result.percentUsed).toBeLessThanOrEqual(100);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // detectWindowFromModel
+  // -------------------------------------------------------------------------
+
+  describe('detectWindowFromModel', () => {
+    test('parses [1m] suffix as 1_000_000', () => {
+      expect(detectWindowFromModel('claude-opus-4-7[1m]')).toBe(1_000_000);
+    });
+
+    test('parses [1M] suffix (uppercase) as 1_000_000', () => {
+      expect(detectWindowFromModel('claude-opus-4-7[1M]')).toBe(1_000_000);
+    });
+
+    test('parses [200k] suffix as 200_000', () => {
+      expect(detectWindowFromModel('claude-haiku-3-5[200k]')).toBe(200_000);
+    });
+
+    test('returns null when no suffix', () => {
+      expect(detectWindowFromModel('claude-opus-4-5-20251101')).toBeNull();
+    });
+
+    test('returns null for undefined', () => {
+      expect(detectWindowFromModel(undefined)).toBeNull();
+    });
+
+    test('returns null for empty string', () => {
+      expect(detectWindowFromModel('')).toBeNull();
+    });
+  });
+
+  describe('model-ID window fallback', () => {
+    test('uses [1m] model suffix when context_window_size is absent', () => {
+      // context_window_size missing → falls back to detectWindowFromModel
+      const result = calculateContext(
+        { context_window: { current_usage: { input_tokens: 517500 } } },
+        'claude-opus-4-7[1m]'
+      );
+      expect(result.windowSize).toBe(1_000_000);
+    });
+
+    test('JSON context_window_size takes priority over model-ID suffix', () => {
+      // Explicit field wins even when model has [1m]
+      const result = calculateContext(
+        { context_window: { context_window_size: 128000, current_usage: {} } },
+        'claude-opus-4-7[1m]'
+      );
+      expect(result.windowSize).toBe(128000);
+    });
+
+    test('fetch() extracts model ID from jsonInput.model.id', async () => {
+      const ctx = makeCtx({
+        model: { id: 'claude-opus-4-7[1m]' },
+        context_window: { current_usage: { input_tokens: 517500 } },
+      });
+      const result = await contextSource.fetch(ctx);
+      expect(result.windowSize).toBe(1_000_000);
+    });
+
+    test('fetch() falls back to jsonInput.model.model_id', async () => {
+      const ctx = makeCtx({
+        model: { model_id: 'claude-opus-4-7[1m]' },
+        context_window: { current_usage: { input_tokens: 100000 } },
+      });
+      const result = await contextSource.fetch(ctx);
+      expect(result.windowSize).toBe(1_000_000);
     });
   });
 

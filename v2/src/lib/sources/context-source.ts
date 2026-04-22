@@ -19,7 +19,9 @@ export const contextSource: DataSourceDescriptor<ContextInfo> = {
   timeoutMs: 100, // Pure computation, virtually instant
 
   async fetch(ctx: GatherContext): Promise<ContextInfo> {
-    return calculateContext(ctx.jsonInput);
+    // Extract model ID from jsonInput for window-size inference (e.g. [1m] suffix)
+    const modelId = ctx.jsonInput?.model?.id || ctx.jsonInput?.model?.model_id || undefined;
+    return calculateContext(ctx.jsonInput, modelId);
   },
 
   merge(target: SessionHealth, data: ContextInfo): void {
@@ -29,6 +31,28 @@ export const contextSource: DataSourceDescriptor<ContextInfo> = {
 };
 
 /**
+ * Detect context window size from model ID suffix.
+ *
+ * Examples:
+ *   "claude-opus-4-7[1m]"   → 1_000_000
+ *   "claude-sonnet-4-6[1m]" → 1_000_000
+ *   "claude-haiku-3-5[200k]" → 200_000
+ *
+ * Returns null when no suffix is present or suffix is unrecognised.
+ */
+export function detectWindowFromModel(modelId?: string): number | null {
+  if (!modelId) return null;
+  // Match [1m], [1M], [200k], [200K] style suffixes
+  const match = modelId.match(/\[(\d+)([mk])\]/i);
+  if (!match) return null;
+  const value = parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+  if (unit === 'm') return value * 1_000_000;
+  if (unit === 'k') return value * 1_000;
+  return null;
+}
+
+/**
  * Calculate context window usage from JSON input.
  *
  * Claude Code provides nested structure:
@@ -36,8 +60,12 @@ export const contextSource: DataSourceDescriptor<ContextInfo> = {
  *   context_window.current_usage.output_tokens
  *   context_window.current_usage.cache_read_input_tokens
  *   context_window.current_usage.cache_creation_input_tokens
+ *
+ * NOTE: cache_creation_input_tokens is intentionally excluded from tokensUsed.
+ * It represents tokens charged for writing to the cache, not the context
+ * footprint of the current turn.
  */
-function calculateContext(jsonInput: any): ContextInfo {
+function calculateContext(jsonInput: any, modelId?: string): ContextInfo {
   const result: ContextInfo = {
     tokensUsed: 0,
     tokensLeft: 0,
@@ -51,21 +79,25 @@ function calculateContext(jsonInput: any): ContextInfo {
   }
 
   const ctx = jsonInput.context_window;
-  result.windowSize = ctx.context_window_size || 200000;
+  // Prefer explicit JSON field; fall back to model-ID suffix; then hard default.
+  result.windowSize = ctx.context_window_size || detectWindowFromModel(modelId) || 200000;
 
-  // Validate window size (10k - 500k tokens)
-  if (result.windowSize < 10000 || result.windowSize > 500000) {
+  // Validate window size (10k - 2M tokens).
+  // Upper bound raised to 2M to accommodate 1M-context models (e.g. claude-opus-4-7[1m]).
+  if (result.windowSize < 10000 || result.windowSize > 2_000_000) {
     result.windowSize = 200000;
   }
 
   const currentUsage = ctx.current_usage;
 
-  // Extract and validate token counts (must be non-negative)
+  // Extract and validate token counts (must be non-negative).
+  // Aggregates current-turn footprint: input + output + cache reads.
+  // cache_creation_input_tokens is deliberately excluded (cache-write cost, not window usage).
   const inputTokens = Math.max(0, Number(currentUsage?.input_tokens) || 0);
   const outputTokens = Math.max(0, Number(currentUsage?.output_tokens) || 0);
   const cacheReadTokens = Math.max(0, Number(currentUsage?.cache_read_input_tokens) || 0);
 
-  // Total tokens = input + output + cache reads
+  // Total tokens = input + output + cache reads (current turn only)
   result.tokensUsed = inputTokens + outputTokens + cacheReadTokens;
 
   // Cap at 1.5x window size (bad data guard)
@@ -90,5 +122,6 @@ function calculateContext(jsonInput: any): ContextInfo {
 
 // Export for testing
 export { calculateContext };
+// detectWindowFromModel already exported via named export above
 
 export default contextSource;
