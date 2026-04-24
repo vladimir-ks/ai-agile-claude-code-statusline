@@ -1,13 +1,20 @@
 /**
  * Quota Broker Client - Single read-through cache for merged quota data
  *
- * Reads from: ~/.claude/session-health/merged-quota-cache.json
+ * Reads from: $CLAUDE_HS_HOME/session-health/merged-quota-cache.json
+ *             (default: ~/.claude-hs/session-health/; legacy: ~/.claude/session-health/)
  * Written by: quota-broker.sh (single-flight, background refresh)
  *
  * Pattern: Instant read → trigger background refresh if stale
  * The statusline NEVER writes quota data — the broker is the sole writer.
  *
  * Fallback: If merged cache doesn't exist, caller falls back to HotSwapQuotaReader.
+ *
+ * Path-resolution (Apr 2026 CLAUDE_HS_HOME contract —
+ *   see _claude-configs/tests/contracts/statusline-contract.md):
+ *   1. $CLAUDE_HS_HOME/session-health/ if env var set (authoritative)
+ *   2. ~/.claude-hs/session-health/ if directory exists (current default)
+ *   3. ~/.claude/session-health/ (LEGACY; removed in v2.2)
  */
 
 import { existsSync, readFileSync } from 'fs';
@@ -25,9 +32,26 @@ const MEMORY_TTL = 10_000; // 10 seconds
 // Stale threshold — matches broker's STALE_THRESHOLD
 const STALE_THRESHOLD_S = 300; // 5 minutes
 
+// Resolve the hot-swap session-health directory per the CLAUDE_HS_HOME contract.
+// Hot-swap moved add-on state out of ~/.claude/ (statusline-owned) into ~/.claude-hs/
+// to eliminate dual-ownership of the directory. Consumers honor this split via
+// the env var + default, falling back to the legacy path only when neither exists.
+function resolveSessionHealthDir(): string {
+  const envHome = process.env.CLAUDE_HS_HOME;
+  if (envHome && envHome.length > 0) {
+    return `${envHome.replace(/\/+$/, '')}/session-health`;
+  }
+  const hsDir = `${homedir()}/.claude-hs/session-health`;
+  if (existsSync(hsDir)) {
+    return hsDir;
+  }
+  return `${homedir()}/.claude/session-health`;
+}
+
 export class QuotaBrokerClient {
-  private static readonly CACHE_PATH = `${homedir()}/.claude/session-health/merged-quota-cache.json`;
-  private static readonly LOCK_PATH = `${homedir()}/.claude/session-health/.quota-fetch.lock`;
+  private static readonly SESSION_HEALTH_DIR = resolveSessionHealthDir();
+  private static readonly CACHE_PATH = `${QuotaBrokerClient.SESSION_HEALTH_DIR}/merged-quota-cache.json`;
+  private static readonly LOCK_PATH = `${QuotaBrokerClient.SESSION_HEALTH_DIR}/.quota-fetch.lock`;
 
   // Configurable broker script path for cloud configs migration
   // Priority: ENV var → cloud_configs → legacy _claude-configs
@@ -393,7 +417,7 @@ export class QuotaBrokerClient {
   private static allSlotsInBackoff(): boolean {
     try {
       const { readdirSync } = require('fs') as typeof import('fs');
-      const stateDir = `${homedir()}/.claude/session-health`;
+      const stateDir = QuotaBrokerClient.SESSION_HEALTH_DIR;
       const files = readdirSync(stateDir).filter(f => f.startsWith('.fetch-rate-limit-state.'));
       if (files.length === 0) return false; // No backoff files = not backed off
 

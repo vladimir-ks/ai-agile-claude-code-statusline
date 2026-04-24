@@ -39,7 +39,23 @@ DAEMON_SCRIPT="$SCRIPT_DIR/data-daemon.ts"
 # ============================================================================
 # STATUSLINE_LAZY_MODE=1 → always skip daemon, render inline from quota cache.
 # Auto-trigger: session file age >30s OR .statusline-lazy-mode-forced present.
+#
+# NOTE: HEALTH_DIR stays ~/.claude/session-health because the statusline daemon
+# OWNS that directory (session files, daemon logs, lockfiles, watchdog state).
+# Hot-swap-produced files (merged-quota-cache.json, .fetch-rate-limit-state.*)
+# live under HS_HEALTH_DIR per the CLAUDE_HS_HOME contract.
 HEALTH_DIR="${HOME}/.claude/session-health"
+
+# Hot-swap add-on state dir (per CLAUDE_HS_HOME contract, Apr 2026).
+# Precedence: $CLAUDE_HS_HOME env var → ~/.claude-hs/ (current default) →
+# ~/.claude/ (legacy fallback for pre-split installs).
+if [[ -n "${CLAUDE_HS_HOME:-}" ]]; then
+    HS_HEALTH_DIR="${CLAUDE_HS_HOME%/}/session-health"
+elif [[ -d "${HOME}/.claude-hs/session-health" ]]; then
+    HS_HEALTH_DIR="${HOME}/.claude-hs/session-health"
+else
+    HS_HEALTH_DIR="${HEALTH_DIR}"
+fi
 LAZY_MODE_FORCED_FILE="${HEALTH_DIR}/.statusline-lazy-mode-forced"
 SESSION_FILE_STALE_TTL=30   # seconds — if session file older than this, fallback
 DAEMON_RESPAWN_LIMIT=3      # consecutive failures before writing forced-file
@@ -119,8 +135,8 @@ _fallback_render() {
   local out=""
   local slot email pct reset_in burn seven_day_hrs seven_day_pct badge
 
-  # ── Read merged-quota-cache.json ──────────────────────────────────────────
-  local cache_file="${HEALTH_DIR}/merged-quota-cache.json"
+  # ── Read merged-quota-cache.json (hot-swap-owned, HS_HEALTH_DIR) ─────────
+  local cache_file="${HS_HEALTH_DIR}/merged-quota-cache.json"
   if [[ ! -f "$cache_file" ]]; then
     # Absolute minimum: just show time
     local hhmm
