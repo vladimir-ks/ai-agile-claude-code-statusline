@@ -121,13 +121,24 @@ export class QuotaBrokerClient {
             allSlotsInactive = false;
           }
 
-          // Check slot data freshness
+          // Check slot data freshness — age + reset-boundary (spec §11.2)
           const slotAge = nowSeconds - Math.floor((slot.last_fetched || 0) / 1000);
-          if (slotAge > STALE_THRESHOLD_S) {
+          const ageStale = slotAge > STALE_THRESHOLD_S;
+          const boundaryPassed = QuotaBrokerClient.resetBoundaryPassed(slot, now);
+
+          if (ageStale || boundaryPassed) {
             anySlotStale = true;
+            // Per spec §11.2: a passed five_hour_resets_at boundary with a pre-reset
+            // last_fetched forces consumers to treat the row as stale, regardless of
+            // last_fetched age. Mark slot.is_fresh=false so getActiveQuota's isStale
+            // logic and the broker-spawn trigger both pick it up.
+            if (boundaryPassed && slot.is_fresh !== false) {
+              slot.is_fresh = false;
+            }
             console.warn(
               `[QuotaBrokerClient] Slot ${slotId} (${slot.email}) data is stale ` +
-              `(age: ${Math.floor(slotAge / 60)}min, status: ${slot.status || 'unknown'})`
+              `(age: ${Math.floor(slotAge / 60)}min, status: ${slot.status || 'unknown'}` +
+              `${boundaryPassed ? ', boundary_passed=true' : ''})`
             );
           }
         }
@@ -407,6 +418,36 @@ export class QuotaBrokerClient {
     }
 
     return null;
+  }
+
+  /**
+   * Reset-boundary freshness check — spec §11.2 (07_quota-pipeline.md).
+   *
+   * Returns true when an ACTIVE slot's `five_hour_resets_at` moment has
+   * already passed but `last_fetched` still reflects pre-reset utilization.
+   * Such a row is effectively stale: the cache says "98% used" but the new
+   * 5h window has reset to 0%. Force-refresh is mandatory.
+   *
+   * Mirrors the broker's `_reset_boundary_passed` helper covered by T12a-T12f
+   * fixtures in `_claude-configs/tests/unit/test-quota-broker.sh`.
+   *
+   * Thrash guard: if last_fetched ≥ reset moment, a post-reset fetch already
+   * happened — return false so we don't keep re-staling a freshly-refreshed row.
+   *
+   * Inactive slots are ignored (status !== "active" → false).
+   * Millisecond-epoch `last_fetched` (>1e12) is normalized to seconds.
+   */
+  private static resetBoundaryPassed(slot: MergedQuotaSlot, nowMs: number): boolean {
+    if ((slot.status || '') !== 'active') return false;
+    const resetIso = slot.five_hour_resets_at;
+    if (!resetIso) return false;
+    const resetMs = Date.parse(resetIso);
+    if (isNaN(resetMs)) return false;
+    if (resetMs > nowMs) return false; // reset still in future
+    const lf = slot.last_fetched;
+    if (lf == null) return false;
+    const lfMs = lf > 1_000_000_000_000 ? lf : lf * 1000;
+    return lfMs < resetMs;
   }
 
   /**

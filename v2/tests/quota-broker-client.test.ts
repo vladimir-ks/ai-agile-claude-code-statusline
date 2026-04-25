@@ -431,6 +431,165 @@ describe('QuotaBrokerClient', () => {
     });
   });
 
+  // --- T12: Reset-boundary freshness (spec §11.2) ---
+  // Mirrors fixtures T12a-T12f from _claude-configs/tests/unit/test-quota-broker.sh
+  // (W18 broker-side helper). When five_hour_resets_at has passed but last_fetched
+  // is still pre-reset, consumers MUST treat the slot as stale (force-refresh).
+
+  describe('reset-boundary freshness (§11.2)', () => {
+    const NOW_S = Math.floor(Date.now() / 1000);
+    const NOW_MS = NOW_S * 1000;
+
+    function isoOffset(seconds: number): string {
+      return new Date((NOW_S + seconds) * 1000).toISOString();
+    }
+
+    test('T12a: reset_at in future → boundary NOT passed (slot stays fresh)', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({
+            status: 'active',
+            five_hour_resets_at: isoOffset(7200), // +2h
+            last_fetched: NOW_MS,
+            is_fresh: true
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      expect(result!.slots['slot-1'].is_fresh).toBe(true);
+
+      const active = QuotaBrokerClient.getActiveQuota('/tmp/test-config');
+      expect(active).not.toBeNull();
+      expect(active!.isStale).toBe(false);
+    });
+
+    test('T12b: reset_at in past + last_fetched pre-reset → boundary PASSED (forces stale)', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({
+            status: 'active',
+            five_hour_resets_at: isoOffset(-600), // 10min ago
+            last_fetched: (NOW_S - 900) * 1000,    // fetched 15min ago, BEFORE reset
+            is_fresh: true,
+            config_dir: '/tmp/t12b'
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      // Boundary-crossing forces is_fresh=false even though raw age is borderline
+      expect(result!.slots['slot-1'].is_fresh).toBe(false);
+
+      const active = QuotaBrokerClient.getActiveQuota('/tmp/t12b');
+      expect(active).not.toBeNull();
+      expect(active!.isStale).toBe(true);
+    });
+
+    test('T12c: reset_at in past + last_fetched POST-reset → boundary NOT passed (thrash guard)', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({
+            status: 'active',
+            five_hour_resets_at: isoOffset(-600),  // 10min ago
+            last_fetched: (NOW_S - 60) * 1000,      // fetched 1min ago, AFTER reset
+            is_fresh: true,
+            config_dir: '/tmp/t12c'
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      // Post-reset fetch already happened — DO NOT re-stale
+      expect(result!.slots['slot-1'].is_fresh).toBe(true);
+
+      const active = QuotaBrokerClient.getActiveQuota('/tmp/t12c');
+      expect(active).not.toBeNull();
+      expect(active!.isStale).toBe(false);
+    });
+
+    test('T12d: inactive slot → ignored even if reset passed', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({
+            status: 'inactive',
+            five_hour_resets_at: isoOffset(-600),
+            last_fetched: (NOW_S - 900) * 1000, // pre-reset
+            is_fresh: true
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      // Inactive slots are not subject to boundary-stale forcing
+      expect(result!.slots['slot-1'].is_fresh).toBe(true);
+    });
+
+    test('T12e: missing five_hour_resets_at → no boundary crossing (preserves is_fresh)', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({
+            status: 'active',
+            five_hour_resets_at: undefined,
+            last_fetched: NOW_MS,
+            is_fresh: true
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      expect(result!.slots['slot-1'].is_fresh).toBe(true);
+    });
+
+    test('T12f: ms-epoch last_fetched (>1e12) handled correctly across boundary', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({
+            status: 'active',
+            five_hour_resets_at: isoOffset(-600),       // 10min ago
+            last_fetched: (NOW_S - 900) * 1000,          // ms-epoch, pre-reset
+            is_fresh: true,
+            config_dir: '/tmp/t12f'
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      // ms-epoch normalization mirrors broker helper; boundary should fire
+      expect(result!.slots['slot-1'].is_fresh).toBe(false);
+    });
+
+    test('T12g: invalid ISO in five_hour_resets_at → ignored, no false-positive', () => {
+      const data = makeCache({
+        slots: {
+          'slot-1': makeSlot({
+            status: 'active',
+            five_hour_resets_at: 'not-an-iso-string',
+            last_fetched: NOW_MS,
+            is_fresh: true
+          })
+        }
+      });
+      writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      expect(result!.slots['slot-1'].is_fresh).toBe(true);
+    });
+  });
+
   // --- isLockAlive (private, tested indirectly via read) ---
 
   describe('lock and refresh behavior', () => {
