@@ -436,15 +436,22 @@ export class QuotaBrokerClient {
    *
    * Inactive slots are ignored (status !== "active" → false).
    * Millisecond-epoch `last_fetched` (>1e12) is normalized to seconds.
+   *
+   * Empty/missing resetIso on an active+previously-fetched slot signals the
+   * uninitialized-window state seen post-reactivation (W23: F-W23-9). The OAuth
+   * payload omits `resets_at`, fetch-quotas writes "", and downstream renderers
+   * can't anchor a window. Treat as boundary-stale so the freshness gate fires
+   * and a fresh fetch is scheduled. A slot with no `last_fetched` is genuinely
+   * never-fetched — return false (no boundary to pass yet).
    */
   private static resetBoundaryPassed(slot: MergedQuotaSlot, nowMs: number): boolean {
     if ((slot.status || '') !== 'active') return false;
     const resetIso = slot.five_hour_resets_at;
-    if (!resetIso) return false;
-    const resetMs = Date.parse(resetIso);
-    if (isNaN(resetMs)) return false;
-    if (resetMs > nowMs) return false; // reset still in future
     const lf = slot.last_fetched;
+    if (!resetIso) return lf != null;
+    const resetMs = Date.parse(resetIso);
+    if (isNaN(resetMs)) return lf != null;
+    if (resetMs > nowMs) return false; // reset still in future
     if (lf == null) return false;
     const lfMs = lf > 1_000_000_000_000 ? lf : lf * 1000;
     return lfMs < resetMs;

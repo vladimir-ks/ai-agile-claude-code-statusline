@@ -113,7 +113,7 @@ describe('TranscriptMonitor', () => {
       expect(result.isSynced).toBe(false);
     });
 
-    test('shows days for very old file', () => {
+    test('shows calendar date for very old file (>= 24h)', () => {
       const path = join(TEST_DIR, 'ancient.jsonl');
       writeFileSync(path, '{"test": true}\n');
 
@@ -123,7 +123,9 @@ describe('TranscriptMonitor', () => {
 
       const result = monitor.checkHealth(path);
 
-      expect(result.lastModifiedAgo).toBe('5d');
+      // FIX-5e: format changed from "Xd" to "Mon DD HH:MM" for >= 24h
+      // e.g. "May 13 14:30" — contains a space between date and time parts
+      expect(result.lastModifiedAgo).toMatch(/^[A-Z][a-z]+ \d{1,2} \d{2}:\d{2}$/);
     });
   });
 

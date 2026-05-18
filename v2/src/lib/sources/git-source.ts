@@ -33,7 +33,9 @@ export const gitSource: DataSourceDescriptor<GitSourceData> = {
 
   async fetch(ctx: GatherContext): Promise<GitSourceData> {
     const fetchStart = Date.now();
-    const gitData = await gitModule.fetch(ctx.sessionId);
+    // F-D2: pass ctx.projectPath so gitModule uses the session's project directory
+    // rather than process.cwd() (which is the daemon's CWD, not the project).
+    const gitData = await gitModule.fetch(ctx.sessionId, ctx.projectPath);
 
     return {
       branch: gitData?.branch || '',

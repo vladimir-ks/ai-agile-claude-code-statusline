@@ -6,7 +6,7 @@
  * Updated: Mutable fields on subsequent invocations
  *
  * Immutable fields: sessionId, launchedAt, slotId, configDir, keychainService, email, transcriptPath
- * Mutable fields: claudeVersion, lastVersionCheck, lastIdleCheck, updatedAt
+ * Mutable fields: claudeVersion (re-pinned on each process start), lastVersionCheck, lastIdleCheck, updatedAt
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
@@ -18,9 +18,13 @@ import type { SessionLock } from '../types/session-health';
 export class SessionLockManager {
   private static readonly LOCK_DIR = `${homedir()}/.claude/session-health`;
 
-  /** Validate sessionId to prevent path traversal */
+  /** Validate sessionId to prevent path traversal.
+   *  Mirrors `sanitize.ts:SESSION_ID_PATTERN` (which allows dots) so any value
+   *  produced by `sanitizeSessionId` round-trips through the lock manager.
+   *  Slashes remain forbidden — `..` in a filename is harmless without a path
+   *  separator (W23: F-W23-11). */
   private static isValidSessionId(sessionId: string): boolean {
-    return /^[a-zA-Z0-9_-]+$/.test(sessionId);
+    return /^[a-zA-Z0-9._-]+$/.test(sessionId);
   }
 
   /**
@@ -149,7 +153,7 @@ export class SessionLockManager {
   /**
    * Update mutable fields in existing lock
    */
-  static update(sessionId: string, updates: Partial<Pick<SessionLock, 'claudeVersion' | 'lastVersionCheck' | 'lastIdleCheck'>>): boolean {
+  static update(sessionId: string, updates: Partial<Pick<SessionLock, 'lastVersionCheck' | 'lastIdleCheck'>>): boolean {
     const existing = this.read(sessionId);
     if (!existing) {
       return false;
@@ -166,7 +170,14 @@ export class SessionLockManager {
 
   /**
    * Get or create session lock
-   * Creates if doesn't exist, returns existing if present
+   * Creates if doesn't exist; on resume, re-pins claudeVersion to the current binary.
+   *
+   * Re-pin policy: the process that called getOrCreate() IS the current binary.
+   * A resumed session (claude --resume) starts a new OS process running the
+   * currently-installed binary, so we must refresh claudeVersion here rather than
+   * keeping the value frozen from the original create() call.  This eliminates the
+   * false "restart to upgrade" badge that fires when the lock carries an old version
+   * but the daemon's installed-version.json already shows the new one.
    */
   static getOrCreate(
     sessionId: string,
@@ -179,6 +190,18 @@ export class SessionLockManager {
   ): SessionLock {
     const existing = this.read(sessionId);
     if (existing) {
+      // Re-pin version: the current process runs the currently-installed binary.
+      // Re-pinning an unchanged version is a no-op (no disk write).
+      const currentVersion = this.getClaudeVersion();
+      if (currentVersion !== 'unknown' && currentVersion !== existing.claudeVersion) {
+        const updated: SessionLock = {
+          ...existing,
+          claudeVersion: currentVersion,
+          updatedAt: Date.now()
+        };
+        this.write(updated);
+        return updated;
+      }
       return existing;
     }
 

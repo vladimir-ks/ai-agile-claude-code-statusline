@@ -246,7 +246,11 @@ class TranscriptMonitor {
   }
 
   /**
-   * Format timestamp as human-readable "Xm", "Xh", "Xd"
+   * Format timestamp as human-readable age string.
+   * < 60s   → "<1m"
+   * 1–59m   → "Xm"
+   * 1–23h   → "Xh" (coarse; matches D14 field use in TranscriptHealth)
+   * >= 24h  → "Mon DD HH:MM" (calendar date + clock time — no ambiguous elapsed)
    */
   private formatAgo(timestamp: number): string {
     if (!timestamp || timestamp === 0) {
@@ -264,7 +268,12 @@ class TranscriptMonitor {
     } else if (seconds < 86400) {
       return `${Math.floor(seconds / 3600)}h`;
     } else {
-      return `${Math.floor(seconds / 86400)}d`;
+      // >= 24h: show calendar date + clock time so user can anchor to the specific day
+      const d = new Date(timestamp);
+      const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${dateStr} ${hh}:${mm}`;
     }
   }
 

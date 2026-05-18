@@ -177,7 +177,8 @@ export interface MergedQuotaSlot {
   last_fetched: number;            // Unix timestamp ms
   is_fresh: boolean;
   config_dir?: string;             // CLAUDE_CONFIG_DIR for this slot
-  keychain_hash?: string;          // SHA256 hash prefix
+  keychain_hash?: string;          // SHA256 hash prefix (8 chars)
+  keychain_service?: string;       // Full macOS Keychain service name — preferred match key over keychain_hash for getActiveQuota slot resolution. Written by quota-broker.sh from claude-sessions.yaml accounts.<slot>.keychain_service.
   urgency: number;                 // Calculated urgency score
   rank: number;                    // 1 = best
   reason: string;                  // Why ranked here
@@ -215,6 +216,16 @@ export interface MergedQuotaSlot {
   weekly_projected_util?: number | null;
 }
 
+export type PipelineRemediation =
+  | 'ok'
+  | 'refresh_in_progress'
+  | 'blocked_rate_limited'
+  | 'blocked_auth_required'
+  | 'blocked_no_active_slot'
+  | 'blocked_no_scheduler'
+  | 'degraded_scheduler'
+  | 'unknown';
+
 export interface MergedQuotaData {
   ts: number;                      // Unix epoch seconds
   active_slot: string;             // "slot-N"
@@ -222,6 +233,8 @@ export interface MergedQuotaData {
   failover_needed: boolean;
   all_exhausted: boolean;
   slots: Record<string, MergedQuotaSlot>;
+  // Written by quota-broker.sh::merge_caches (cycle-3, schema_version 2)
+  pipeline_remediation?: PipelineRemediation;
   // Computed by client, not in file
   age_seconds?: number;
   is_fresh?: boolean;

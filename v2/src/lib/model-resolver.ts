@@ -2,8 +2,10 @@
  * Model Resolver - Multi-source model resolution with validation
  *
  * Priority:
- * 1. Fresh transcript (<1 hour) - highest confidence
- * 2. JSON input from Claude Code - current session
+ * 1. Fresh transcript (<5 min) overrides stdin when they disagree — transcript
+ *    reflects the model the API actually ran; stdin can carry the launch-frozen model
+ *    (does not update after /model switch until the next process restart)
+ * 2. JSON input from Claude Code - current session (all other cases)
  * 3. Settings.json - global default
  * 4. "Claude" - fallback
  *
@@ -109,7 +111,21 @@ class ModelResolver {
     const jsonInput = sources.jsonInput;
     const settings = sources.settings;
 
-    // Priority 1: JSON input (real-time, current session) - ALWAYS wins if available
+    // Priority 1a: Fresh transcript (<5 min) AND disagrees with jsonInput →
+    // transcript wins. CC stdin carries the launch-frozen model and does NOT
+    // update after a /model switch; the transcript reflects what the API actually
+    // ran, so it is the more authoritative source when it is fresh.
+    if (jsonInput && transcript && transcript.age < 300 && transcript.value !== jsonInput.value) {
+      return {
+        source: 'transcript',
+        value: transcript.value,
+        confidence: transcript.confidence,
+        reason: 'Fresh transcript overrides stale stdin model'
+      };
+    }
+
+    // Priority 1b: JSON input (real-time, current session) - wins when transcript
+    // is absent, stale (≥5 min), or agrees with jsonInput
     if (jsonInput) {
       return {
         source: 'jsonInput',

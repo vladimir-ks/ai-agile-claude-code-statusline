@@ -90,22 +90,26 @@ class LastMessageModule implements DataModule<LastMessageData> {
       const elapsedMs = now.getTime() - timestamp.getTime();
       const elapsedSec = Math.floor(elapsedMs / 1000);
 
-      // Format elapsed time
-      let elapsed = '';
-      if (elapsedSec < 60) {
-        elapsed = `${elapsedSec}s`;
-      } else if (elapsedSec < 3600) {
-        elapsed = `${Math.floor(elapsedSec / 60)}m`;
-      } else if (elapsedSec < 86400) {
-        const hours = Math.floor(elapsedSec / 3600);
-        const mins = Math.floor((elapsedSec % 3600) / 60);
-        elapsed = `${hours}h${mins}m`;
-      } else {
-        elapsed = `${Math.floor(elapsedSec / 86400)}d`;
-      }
-
-      // Format display time (HH:MM)
+      // Format display time (HH:MM) — always show clock time
       const displayTime = `${String(timestamp.getHours()).padStart(2, '0')}:${String(timestamp.getMinutes()).padStart(2, '0')}`;
+
+      // Format elapsed time per spec:
+      //   < 60s   → "<1m"
+      //   1–59m   → "Xm"
+      //   1–23h   → "Xh Ym"  (e.g. "2h43m")
+      //   >= 24h  → calendar date replaces elapsed (elapsed = '')
+      let elapsed = '';
+      if (elapsedSec < 86400) {
+        if (elapsedSec < 60) {
+          elapsed = '<1m';
+        } else if (elapsedSec < 3600) {
+          elapsed = `${Math.floor(elapsedSec / 60)}m`;
+        } else {
+          const hours = Math.floor(elapsedSec / 3600);
+          const mins = Math.floor((elapsedSec % 3600) / 60);
+          elapsed = `${hours}h${mins}m`;
+        }
+      }
 
       // Color based on recency
       let color = '245';  // gray (default: old)
@@ -149,6 +153,12 @@ class LastMessageModule implements DataModule<LastMessageData> {
   format(data: LastMessageData): string {
     if (!data || !data.text || !data.displayTime) {
       return '';  // Don't show if no message
+    }
+
+    // >= 24h: render "Mon DD HH:MM preview" (date replaces elapsed)
+    if (data.timestamp && data.elapsed === '') {
+      const dateStr = data.timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return `💬:${dateStr} ${data.displayTime} ${data.text}`;
     }
 
     return `💬:${data.displayTime}(${data.elapsed}) ${data.text}`;

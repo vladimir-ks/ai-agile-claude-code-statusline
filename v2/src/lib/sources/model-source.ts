@@ -2,8 +2,9 @@
  * Model Source — Tier 1 (instant, from stdin + transcript + settings)
  *
  * Multi-source model resolution with priority:
- *   1. JSON input (real-time, highest priority)
- *   2. Fresh transcript (<5 min)
+ *   1. Fresh transcript (<5 min) overrides stdin when they disagree
+ *      — transcript reflects what the API ran; stdin is launch-frozen
+ *   2. JSON input (stdin, all other cases)
  *   3. Settings.json (global default)
  *   4. "Claude" (fallback)
  *

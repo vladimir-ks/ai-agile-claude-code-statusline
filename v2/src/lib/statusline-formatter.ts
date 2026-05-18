@@ -321,7 +321,7 @@ export class StatuslineFormatter {
     // 💬 message — appended if available
     if (!health.transcript?.lastMessagePreview) return sidPrefix;
 
-    const elapsed = health.transcript.lastModifiedAgo || '';
+    const elapsed = health.transcript.lastMessageAgo || health.transcript.lastModifiedAgo || '';
     let preview = health.transcript.lastMessagePreview;
 
     // Filter out system/XML content
@@ -523,9 +523,20 @@ export class StatuslineFormatter {
    */
 
   // Short context: "🧠:54k(97%)"
+  // FIX-6: If all context fields are zero AND the health file is older than 30s,
+  // this is almost certainly a stale prior-session snapshot read before the daemon
+  // writes a fresh one. Render "🧠:—" so the user sees "no data yet" rather than
+  // misleading "0k(0%)". Resolves automatically once the daemon (~5s cycle) writes fresh data.
   private static fmtContextShort(health: SessionHealth): string {
-    const left = this.formatTokens(health.context?.tokensLeft || 0);
+    const tokensLeft = health.context?.tokensLeft || 0;
+    const tokensUsed = health.context?.tokensUsed || 0;
     const pct = health.context?.percentUsed || 0;
+    const allZero = tokensLeft === 0 && tokensUsed === 0 && pct === 0;
+    const healthAge = Date.now() - (health.gatheredAt || 0);
+    if (allZero && healthAge > 30_000) {
+      return `🧠:${c('stale')}—${rst()}`;
+    }
+    const left = this.formatTokens(tokensLeft);
     const colorName = this.getContextColor(pct);
     return `🧠:${c(colorName)}${left}(${pct}%)${rst()}`;
   }
@@ -754,6 +765,31 @@ export class StatuslineFormatter {
         // active_slot is now rendered inline on Line 1 — remove from notification cycle
         NotificationManager.remove('active_slot');
 
+        // FIX-3b: pipeline_remediation — surface blocked/degraded pipeline state.
+        // ok / refresh_in_progress → no notification; blocked_* / degraded_scheduler → warn.
+        try {
+          const quotaData = QuotaBrokerClient.read();
+          const remediation = quotaData?.pipeline_remediation;
+          const BLOCKED_STATES = [
+            'blocked_rate_limited',
+            'blocked_auth_required',
+            'blocked_no_active_slot',
+            'blocked_no_scheduler',
+            'degraded_scheduler',
+          ] as const;
+          if (remediation && BLOCKED_STATES.includes(remediation as any)) {
+            NotificationManager.register(
+              'pipeline_blocked',
+              `⚠ quota:${remediation.replace(/_/g, '-')} — quota pipeline frozen, data may be stale`,
+              9
+            );
+          } else {
+            NotificationManager.remove('pipeline_blocked');
+          }
+        } catch {
+          // Pipeline check is best-effort; never interrupt the notification cycle
+        }
+
         // Weekly quota waste risk — the one thing user MUST see if pace will lose quota.
         // Compute from current slot's projections (populated by shell fetch-quotas.sh).
         try {
@@ -862,6 +898,10 @@ export class StatuslineFormatter {
             line = `${c('critical')}⚠ ${notification.message}${rst()}`;
             break;
 
+          case 'pipeline_blocked':
+            line = `${c('critical')}⚠ ${notification.message}${rst()}`;
+            break;
+
           case 'weekly_quota_waste_certain':
             // Bright red: loss is mathematically guaranteed — needs user's full attention
             line = `${c('pacingRed')}${notification.message}${rst()}`;
@@ -922,9 +962,14 @@ export class StatuslineFormatter {
     if (tier === 'severe') return '⚠';
 
     const pct = Math.round(slot.five_hour_util || 0);
+    // Distinguish "uninitialized 5h window" (empty resets_at, common after a
+    // slot reactivation before the next API fetch lands data) from "valid 0%
+    // utilization with known reset". Rendering `(0%)` for both was misleading
+    // the user. (W23 pipeline bug.)
+    const hasReset = typeof slot.five_hour_resets_at === 'string' && slot.five_hour_resets_at.trim() !== '';
     let text: string;
 
-    if (slot.five_hour_resets_at) {
+    if (hasReset) {
       const resetMs = new Date(slot.five_hour_resets_at).getTime();
       if (!isNaN(resetMs)) {
         const diffSec = Math.max(0, Math.floor((resetMs - Date.now()) / 1000));
@@ -938,8 +983,13 @@ export class StatuslineFormatter {
       } else {
         text = `(${pct}%)`;
       }
+    } else if (pct > 0) {
+      // Have utilization but no reset boundary — render value with a stale
+      // marker rather than a fake "0%" or unbounded number.
+      text = `(${pct}% ⚠)`;
     } else {
-      text = `(${pct}%)`;
+      // No reset, no utilization → window not initialized yet (post-reactivation).
+      text = '(?)';
     }
 
     return tier === 'warn' ? `${text} ⚠` : text;
@@ -1024,7 +1074,10 @@ export class StatuslineFormatter {
         part5h = `${color}${tilde}${avg5h}%/h${rst()}`;
       }
     } else if (target5h != null && target5h > 0) {
-      part5h = `${c('version')}${target5h}%/h${rst()}`;
+      // Target rate (no actual sampled yet). Prefix `→` distinguishes target
+      // from actual — without it the user reads the styled-dim color as "your
+      // burn rate" rather than "your planned pace target". (W23 pipeline bug.)
+      part5h = `${c('version')}→${target5h}%/h${rst()}`;
     }
 
     // ── 7d rate (%/day) ──
@@ -1036,7 +1089,8 @@ export class StatuslineFormatter {
       const color = this.pacingColor(slot.pacing_status_7d);
       part7d = `${color}${actual7d}%/d${rst()}`;
     } else if (target7d != null && target7d > 0) {
-      part7d = `${c('version')}${target7d}%/d${rst()}`;
+      // Target rate — `→` marks it as target, not actual. (W23 pipeline bug.)
+      part7d = `${c('version')}→${target7d}%/d${rst()}`;
     }
 
     if (!part5h && !part7d) return '';

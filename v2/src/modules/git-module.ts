@@ -33,8 +33,10 @@ class GitModule implements DataModule<GitData> {
     this.cooldownManager = new CooldownManager();
   }
 
-  async fetch(sessionId: string): Promise<GitData> {
-    const repoPath = process.cwd();
+  async fetch(sessionId: string, projectPath?: string): Promise<GitData> {
+    // F-D2: prefer the session's projectPath over daemon's process.cwd().
+    // Falls back to process.cwd() when not provided (e.g. direct module callers).
+    const repoPath = (projectPath && projectPath.length > 0) ? projectPath : process.cwd();
 
     // Check cooldown - skip if another session checked recently (per-repo)
     if (!this.cooldownManager.shouldRun('git-status', undefined, repoPath)) {

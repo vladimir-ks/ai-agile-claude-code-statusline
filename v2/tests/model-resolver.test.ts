@@ -48,9 +48,30 @@ describe('ModelResolver', () => {
   // UT-3.1: Fresh Transcript Wins
   // =========================================================================
   describe('source priority', () => {
-    test('jsonInput wins over transcript (real-time priority)', () => {
+    test('fresh transcript overrides stale jsonInput when they disagree (post-/model switch)', () => {
+      // When CC stdin carries the launch-frozen model (e.g. opus from session start)
+      // but the user switched to sonnet via /model, the transcript will reflect the
+      // new model after the first response while stdin still shows opus.
+      // The resolver must prefer the fresh transcript in this disagreement case.
       const transcriptPath = join(TEST_DIR, 'transcript.jsonl');
-      createTranscript(transcriptPath, 'opus', 1); // 1 min ago
+      createTranscript(transcriptPath, 'opus', 1); // 1 min ago — "new" model in transcript
+
+      // jsonInput carries the stale launch model (sonnet — the one used before /model switch)
+      const jsonInput: ClaudeCodeInput = {
+        model: { id: 'claude-sonnet-4-5-20250929', display_name: 'Sonnet' }
+      };
+
+      const result = resolver.resolve(transcriptPath, jsonInput, null);
+
+      // Fresh transcript (opus, <5 min, disagrees with jsonInput) wins
+      expect(result.value).toBe('Opus4.5');
+      expect(result.source).toBe('transcript');
+      expect(result.reason).toContain('Fresh transcript overrides stale stdin model');
+    });
+
+    test('jsonInput wins over transcript when they agree', () => {
+      const transcriptPath = join(TEST_DIR, 'transcript-agree.jsonl');
+      createTranscript(transcriptPath, 'sonnet', 1); // 1 min ago
 
       // model.id preferred over display_name (has version info)
       const jsonInput: ClaudeCodeInput = {
@@ -59,9 +80,25 @@ describe('ModelResolver', () => {
 
       const result = resolver.resolve(transcriptPath, jsonInput, null);
 
+      // Both agree on sonnet → jsonInput wins (no disagreement override)
       expect(result.value).toBe('Sonnet4.5');
       expect(result.source).toBe('jsonInput');
       expect(result.confidence).toBe(80);
+    });
+
+    test('jsonInput wins when transcript is stale (≥5 min) even if they disagree', () => {
+      const transcriptPath = join(TEST_DIR, 'transcript-stale.jsonl');
+      createTranscript(transcriptPath, 'opus', 6); // 6 min ago — stale (past 300s threshold)
+
+      const jsonInput: ClaudeCodeInput = {
+        model: { id: 'claude-sonnet-4-5-20250929', display_name: 'Sonnet' }
+      };
+
+      const result = resolver.resolve(transcriptPath, jsonInput, null);
+
+      // Stale transcript (>5 min) — jsonInput wins as before
+      expect(result.value).toBe('Sonnet4.5');
+      expect(result.source).toBe('jsonInput');
     });
 
     test('fresh transcript wins over settings (when no jsonInput)', () => {
@@ -175,11 +212,12 @@ describe('ModelResolver', () => {
 
       const result = resolver.resolve(transcriptPath, jsonInput, null);
 
-      // Result should use jsonInput (real-time priority)
-      expect(result.value).toBe('Sonnet4.5');
-      expect(result.source).toBe('jsonInput');
+      // Fresh transcript (opus) disagrees with jsonInput (sonnet) →
+      // transcript wins under the post-/model-switch fix
+      expect(result.value).toBe('Opus4.5');
+      expect(result.source).toBe('transcript');
 
-      // But disagreement should be detected
+      // Disagreement should still be detected and logged
       const lastDisagreement = resolver.getLastDisagreement();
       expect(lastDisagreement).not.toBeNull();
       expect(lastDisagreement).toContain('disagree');

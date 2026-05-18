@@ -201,7 +201,7 @@ describe('SessionLockManager', () => {
   });
 
   describe('update', () => {
-    test('updates mutable fields', () => {
+    test('updates mutable fields (lastVersionCheck, lastIdleCheck)', () => {
       SessionLockManager.create(
         'test-session-9',
         'slot-1',
@@ -213,22 +213,24 @@ describe('SessionLockManager', () => {
 
       const before = SessionLockManager.read('test-session-9')!;
       const beforeUpdatedAt = before.updatedAt;
+      const versionBefore = before.claudeVersion;
 
       // Wait 1ms to ensure updatedAt changes
       const start = Date.now();
       while (Date.now() - start < 2) { /* wait */ }
 
+      const checkTs = Date.now();
       const success = SessionLockManager.update('test-session-9', {
-        claudeVersion: '2.1.32',
-        lastVersionCheck: Date.now()
+        lastVersionCheck: checkTs
       });
 
       expect(success).toBe(true);
 
       const after = SessionLockManager.read('test-session-9')!;
-      expect(after.claudeVersion).toBe('2.1.32');
-      expect(after.lastVersionCheck).toBeDefined();
+      expect(after.lastVersionCheck).toBe(checkTs);
       expect(after.updatedAt).toBeGreaterThan(beforeUpdatedAt);
+      // claudeVersion must NOT be mutated by update() — it is controlled by getOrCreate()
+      expect(after.claudeVersion).toBe(versionBefore);
     });
 
     test('preserves immutable fields', () => {
@@ -244,7 +246,7 @@ describe('SessionLockManager', () => {
       const before = SessionLockManager.read('test-session-10')!;
 
       SessionLockManager.update('test-session-10', {
-        claudeVersion: '2.1.32'
+        lastVersionCheck: Date.now()
       });
 
       const after = SessionLockManager.read('test-session-10')!;
@@ -255,11 +257,12 @@ describe('SessionLockManager', () => {
       expect(after.email).toBe(before.email);
       expect(after.transcriptPath).toBe(before.transcriptPath);
       expect(after.launchedAt).toBe(before.launchedAt);
+      expect(after.claudeVersion).toBe(before.claudeVersion);
     });
 
     test('returns false for nonexistent session', () => {
       const success = SessionLockManager.update('nonexistent-session', {
-        claudeVersion: '2.1.32'
+        lastVersionCheck: Date.now()
       });
 
       expect(success).toBe(false);
@@ -305,6 +308,81 @@ describe('SessionLockManager', () => {
       expect(lock.sessionId).toBe('test-session-12');
       expect(lock.slotId).toBe('slot-2');
       expect(SessionLockManager.exists('test-session-12')).toBe(true);
+    });
+
+    test('re-pins claudeVersion on resume when binary version changed', () => {
+      // Simulate a lock written by an older binary
+      const lockPath = require('path').join(LOCK_DIR, 'test-resume-repin.lock');
+      const oldLock = {
+        sessionId: 'test-resume-repin',
+        launchedAt: Date.now() - 60000,
+        slotId: 'slot-1',
+        configDir: '/home/user/.claude',
+        keychainService: 'Claude Code-credentials',
+        email: 'user@example.com',
+        transcriptPath: '/home/user/.claude/projects/-test/session.jsonl',
+        claudeVersion: '0.0.0-old', // intentionally outdated
+        lockFileVersion: 1,
+        updatedAt: Date.now() - 60000
+      };
+      require('fs').writeFileSync(lockPath, JSON.stringify(oldLock, null, 2), { mode: 0o600 });
+
+      const retrieved = SessionLockManager.getOrCreate(
+        'test-resume-repin',
+        'slot-1',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      // claudeVersion must be refreshed to the current binary version (not '0.0.0-old')
+      // The current binary may return 'unknown' in test env (no claude CLI); either way
+      // it must not remain '0.0.0-old'.
+      const currentVersion = (SessionLockManager as any).getClaudeVersion();
+      if (currentVersion !== 'unknown') {
+        expect(retrieved.claudeVersion).toBe(currentVersion);
+        expect(retrieved.claudeVersion).not.toBe('0.0.0-old');
+        // Lock file on disk must also be updated
+        const onDisk = SessionLockManager.read('test-resume-repin');
+        expect(onDisk?.claudeVersion).toBe(currentVersion);
+      } else {
+        // getClaudeVersion() returned 'unknown' → no re-pin → old version preserved
+        expect(retrieved.claudeVersion).toBe('0.0.0-old');
+      }
+    });
+
+    test('no disk write when claudeVersion is unchanged on resume', () => {
+      // Write a lock with the exact current version so no update is needed
+      const currentVersion = (SessionLockManager as any).getClaudeVersion();
+      const lockPath = require('path').join(LOCK_DIR, 'test-resume-noop.lock');
+      const now = Date.now() - 60000;
+      const existingLock = {
+        sessionId: 'test-resume-noop',
+        launchedAt: now,
+        slotId: 'slot-1',
+        configDir: '/home/user/.claude',
+        keychainService: 'Claude Code-credentials',
+        email: 'user@example.com',
+        transcriptPath: '/home/user/.claude/projects/-test/session.jsonl',
+        claudeVersion: currentVersion,
+        lockFileVersion: 1,
+        updatedAt: now
+      };
+      require('fs').writeFileSync(lockPath, JSON.stringify(existingLock, null, 2), { mode: 0o600 });
+
+      const retrieved = SessionLockManager.getOrCreate(
+        'test-resume-noop',
+        'slot-1',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      // No re-pin needed — version identical → updatedAt unchanged
+      expect(retrieved.claudeVersion).toBe(currentVersion);
+      expect(retrieved.updatedAt).toBe(now);
     });
   });
 

@@ -13,7 +13,7 @@ import type { DataExtractor } from '../types';
 export class LastMessageExtractor implements DataExtractor<MessageInfo> {
   readonly id = 'last_message';
   readonly shouldCache = true;
-  readonly cacheTTL = 300_000; // 5 minutes
+  readonly cacheTTL = 10_000; // 10 seconds — matches daemon poll rate
 
   /**
    * Extract last user message from lines
