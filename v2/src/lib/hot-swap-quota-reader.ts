@@ -81,8 +81,28 @@ const HOT_SWAP_SESSIONS_PATHS = [
   `${homedir()}/.claude/config/claude-sessions.yaml`,
 ];
 
+// Resolve hot-swap-owned cache dir per CLAUDE_HS_HOME contract (statusline-contract.md v1.2,
+// Apr 2026). Priority: CLAUDE_HS_HOME env → ~/.claude-hs/ (current default) → ~/.claude/
+// (legacy fallback for pre-split installs). Mirrors the resolver in statusline-bulletproof.sh
+// and quota-broker-client.ts. Without this, the reader hits an Apr 2026 stale-fixture path
+// owned by no live writer, returning fictional emails (user-a/b@example.com).
+function resolveHotSwapCachePath(): string {
+  const fromEnv = process.env.CLAUDE_HS_HOME;
+  const candidates = [
+    fromEnv ? `${fromEnv.replace(/\/$/, '')}/session-health/hot-swap-quota.json` : null,
+    `${homedir()}/.claude-hs/session-health/hot-swap-quota.json`,
+    `${homedir()}/.claude/session-health/hot-swap-quota.json`,
+  ].filter((p): p is string => Boolean(p));
+  for (const p of candidates) {
+    try { if (existsSync(p)) return p; } catch { /* fall through */ }
+  }
+  // Last-resort default (legacy path) so callers that read the constant
+  // before the file lands still get a deterministic location.
+  return candidates[candidates.length - 1];
+}
+
 export class HotSwapQuotaReader {
-  private static readonly CACHE_PATH = `${homedir()}/.claude/session-health/hot-swap-quota.json`;
+  private static readonly CACHE_PATH = resolveHotSwapCachePath();
 
   /**
    * Read hot-swap quota cache (with memory caching)

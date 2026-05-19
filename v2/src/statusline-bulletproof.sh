@@ -335,10 +335,13 @@ fi
 # LAYER 1: DISPLAY (synchronous, fast, guaranteed to complete)
 # ============================================================================
 
-# Run display with timeout (1.5s max — bun cold start can take 300-800ms under load)
-# If it fails for ANY reason, output safe fallback
-# Note: timeout -k sends SIGKILL after grace period
-DISPLAY_OUTPUT=$(echo "${JSON_INPUT}" | timeout -k 0.5 1.5 bun "$DISPLAY_SCRIPT" 2>/dev/null) || DISPLAY_OUTPUT=""
+# Run display with timeout (3.0s max — bun cold start 300-800ms + W23 broker
+# freshness check + KeychainResolver hash compute push real total to ~1.6s.
+# Prior 1.5s budget was too tight; raised post-W23 to absorb the new latency
+# until 3B-2 broker rewrite consolidates the freshness path.)
+# If it fails for ANY reason, output safe fallback.
+# Note: timeout -k sends SIGKILL after grace period.
+DISPLAY_OUTPUT=$(echo "${JSON_INPUT}" | timeout -k 0.5 3.0 bun "$DISPLAY_SCRIPT" 2>/dev/null) || DISPLAY_OUTPUT=""
 
 # If display-only produced nothing AND we have no session file, try fallback as safety net
 if [[ -z "$DISPLAY_OUTPUT" ]]; then

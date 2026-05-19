@@ -159,21 +159,44 @@ export const authSource: DataSourceDescriptor<AuthSourceData> = {
   timeoutMs: 2000, // Keychain read is fast; API fingerprint only as fallback
 
   async fetch(ctx: GatherContext): Promise<AuthSourceData> {
-    // Step 1: Resolve configDir and keychainService from transcript path
-    const { configDir, keychainService } = KeychainResolver.resolveFromTranscript(
-      ctx.transcriptPath
-    );
+    // Step 1: Resolve configDir and keychainService.
+    // PRIORITY: process.env.CLAUDE_CONFIG_DIR is the runtime authority — set by
+    // hot-swap router when launching a slot. Transcript-path derivation is a
+    // fallback for the rare case env is unset (e.g. the daemon was launched
+    // outside the router). Without this priority, resuming a session whose
+    // transcript was originally written under slot S2 while currently launched
+    // into S1 displays the wrong slot AND wrong email (W23 pipeline bug).
+    let configDir: string | null = null;
+    let keychainService: string | null = null;
+    const envConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    if (envConfigDir && existsSync(envConfigDir)) {
+      configDir = resolve(envConfigDir);
+      keychainService = KeychainResolver.computeKeychainService(configDir);
+    } else {
+      const fromTranscript = KeychainResolver.resolveFromTranscript(ctx.transcriptPath);
+      configDir = fromTranscript.configDir;
+      keychainService = fromTranscript.keychainService;
+    }
 
     let authProfile = '';
     let detectionMethod = 'default';
     let slotId: string | null = null;
 
-    // Step 2: SESSION-LOCKED — if already detected via trusted method, reuse
+    // Step 2: SESSION-LOCKED — if already detected via trusted method, reuse.
+    // INVALIDATION: drop the lock when freshly-computed keychainService disagrees
+    // with the locked-in one. Without this, a first wrong detection (e.g. before
+    // CLAUDE_CONFIG_DIR was wired in, or before the stale-fixture cache fix
+    // landed) sticks for the entire session. (W23 pipeline bug.)
     const existing = ctx.existingHealth?.launch;
     const trustedMethods = ['keychain_identity', 'path', 'api_fingerprint'];
+    const lockKeychainAgrees =
+      !existing?.keychainService ||
+      !keychainService ||
+      existing.keychainService === keychainService;
     if (existing?.authProfile &&
         existing.authProfile !== 'default' &&
-        trustedMethods.includes(existing.detectionMethod || '')) {
+        trustedMethods.includes(existing.detectionMethod || '') &&
+        lockKeychainAgrees) {
       const cache = HotSwapQuotaReader.read();
       const resolvedSlotId = cache ? findSlotByEmail(existing.authProfile, cache) : null;
       return {

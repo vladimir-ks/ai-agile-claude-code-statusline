@@ -26,6 +26,10 @@ npm-debug.log
 package-lock.json
 yarn.lock
 
+# Build output
+dist/
+build/
+
 # Test artifacts
 test-output/
 .test-temp/

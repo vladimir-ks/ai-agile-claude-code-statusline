@@ -24,7 +24,7 @@ import {
   createDefaultHealth
 } from '../types/session-health';
 import { existsSync, readFileSync, statSync } from 'fs';
-import { basename, dirname } from 'path';
+import { basename, dirname, resolve } from 'path';
 import { homedir } from 'os';
 import { execSync } from 'child_process';
 
@@ -106,8 +106,21 @@ class DataGatherer {
     const DEADLINE_MS = 20000;
     const deadline = startTime + DEADLINE_MS;
 
-    // Derive session context for broker
-    const { configDir, keychainService } = KeychainResolver.resolveFromTranscript(transcriptPath);
+    // Derive session context for broker. Mirrors auth-source.ts:fetch() priority
+    // (W23: F-W23-2 / F-W23-10): runtime CLAUDE_CONFIG_DIR is authoritative when
+    // present, so per-slot launches resolve to the slot they were spawned in even
+    // if the resumed transcript was originally written under a different slot.
+    // Fall back to transcript-path derivation only when env is absent (e.g. daemon
+    // started outside the router).
+    let configDir: string | null;
+    let keychainService: string | null;
+    const envConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    if (envConfigDir && existsSync(envConfigDir)) {
+      configDir = resolve(envConfigDir);
+      keychainService = KeychainResolver.computeKeychainService(configDir);
+    } else {
+      ({ configDir, keychainService } = KeychainResolver.resolveFromTranscript(transcriptPath));
+    }
     const existingHealth = this.healthStore.readSessionHealth(sessionId);
     const projectPath = jsonInput?.start_directory || process.cwd() || this.extractProjectPath(transcriptPath);
 
