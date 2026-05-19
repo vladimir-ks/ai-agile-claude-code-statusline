@@ -469,7 +469,8 @@ describe('SPEC: Output Format', () => {
       }
     });
 
-    test('long content wraps to multiple lines instead of truncating', () => {
+    test('last-message idle timer renders without preview, lines stay within width', () => {
+      const now = Date.now();
       createHealthFile('width-wrap', {
         sessionId: 'width-wrap',
         model: { value: 'Claude' },
@@ -477,10 +478,14 @@ describe('SPEC: Output Format', () => {
         git: { branch: '', ahead: 0, behind: 0, dirty: 0 },
         transcript: {
           exists: true,
-          lastModifiedAgo: '2m',  // This is what appears in output
+          lastModified: now,
+          lastModifiedAgo: '2m',
           isSynced: true,
-          lastMessagePreview: 'This is a very long message that should wrap to next line because it exceeds available space',
-          lastMessageAgo: '2m'
+          // Preview is retained in the health record but no longer rendered (W26 idle-timer redesign)
+          lastMessagePreview: 'This very long message must never appear in the statusline output',
+          lastMessageTime: now - 2 * 60 * 1000,  // 2 min ago → cache warm (< CACHE_TTL_SECONDS)
+          lastMessageAgo: '2m',
+          cacheWarmth: 'warm'
         },
         billing: { isFresh: true },
         alerts: {}
@@ -488,11 +493,18 @@ describe('SPEC: Output Format', () => {
 
       const output = runDisplay('{"session_id":"width-wrap"}');
 
-      // With multi-line wrapping, full message should appear (not truncated)
+      // New design: 💬: is an idle/cache-warmth timer — clock + elapsed + warmth glyph, no preview text
       expect(output).toContain('💬:');
       expect(output).toContain('(2m)');
-      // Should wrap to multiple lines
-      expect(output).toContain('\n');
+      expect(output).toContain('🔥');                      // cache warm (idle < 5min)
+      expect(output).not.toContain('must never appear');   // message preview is NOT rendered
+
+      // Width contract: every rendered line stays under 150 visible columns
+      const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu;
+      for (const line of output.split('\n')) {
+        const emojiCount = (line.match(emojiRegex) || []).length;
+        expect(line.length + emojiCount).toBeLessThanOrEqual(150);
+      }
     });
   });
 

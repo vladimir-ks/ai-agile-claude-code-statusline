@@ -52,9 +52,10 @@ interface SessionHealth {
     lastModifiedAgo: string;
     isSynced: boolean;
     messageCount?: number;       // Turn count
-    lastMessageTime?: number;    // Unix timestamp ms
-    lastMessagePreview?: string;
+    lastMessageTime?: number;    // Unix timestamp ms — last entry of any role
+    lastMessagePreview?: string; // Kept for backward-compat; no longer rendered
     lastMessageAgo?: string;
+    cacheWarmth?: 'warm' | 'cold' | 'unknown';  // Anthropic prompt-cache warmth
   };
   model: { value: string };
   context: { tokensLeft: number; percentUsed: number; tokensUsed?: number; windowSize?: number };
@@ -422,11 +423,26 @@ function fmtMessageCount(h: SessionHealth): string {
 }
 
 function fmtLastMessage(h: SessionHealth): string {
-  if (!h.transcript?.lastMessagePreview) return '';
-  const ago = h.transcript.lastMessageAgo || '?';
-  const preview = h.transcript.lastMessagePreview;
-  // Simple format: just elapsed time + preview (no clock time)
-  return `💬:${c('lastMsg')}(${ago})${rst()} ${preview}`;
+  // Use lastMessageTime (any-role idle timer) as the gate; preview no longer rendered
+  const lastTime = h.transcript?.lastMessageTime || 0;
+  if (!lastTime) return '';
+  const elapsed = h.transcript?.lastMessageAgo || '';
+  const warmth = h.transcript?.cacheWarmth;
+  const warmthGlyph = warmth === 'warm' ? '🔥' : warmth === 'cold' ? '❄️' : '';
+
+  // >= 24h: elapsed is a date string like "May 19 14:30" → render without clock dupe
+  if (!elapsed || elapsed.match(/^[A-Z][a-z]+ \d/)) {
+    const ts = new Date(lastTime);
+    const dateStr = ts.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const hh = String(ts.getHours()).padStart(2, '0');
+    const mm = String(ts.getMinutes()).padStart(2, '0');
+    return `💬:${c('lastMsg')}${dateStr} ${hh}:${mm} ${warmthGlyph}${rst()}`.trimEnd() + rst();
+  }
+  // < 24h: HH:MM(elapsed)warmthGlyph
+  const ts = new Date(lastTime);
+  const hh = String(ts.getHours()).padStart(2, '0');
+  const mm = String(ts.getMinutes()).padStart(2, '0');
+  return `💬:${c('lastMsg')}${hh}:${mm}(${elapsed})${warmthGlyph}${rst()}`;
 }
 
 function fmtBudget(h: SessionHealth): string {

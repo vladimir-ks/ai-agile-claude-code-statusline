@@ -178,10 +178,10 @@ describe('TranscriptMonitor', () => {
   });
 
   // =========================================================================
-  // UT-2.8: Last Message Time
+  // UT-2.8: Last Message Time (any-role idle timer source)
   // =========================================================================
   describe('last message time', () => {
-    test('extracts timestamp from last message', () => {
+    test('extracts timestamp from last entry of any role', () => {
       const path = join(TEST_DIR, 'timestamped.jsonl');
       const timestamp = '2026-01-30T10:15:00.000Z';
       const lines = [
@@ -196,6 +196,22 @@ describe('TranscriptMonitor', () => {
       expect(result.lastMessageTime).toBe(new Date(timestamp).getTime());
     });
 
+    test('uses LAST timestamped entry regardless of role (assistant is last)', () => {
+      // Assistant message is after the user message — should use assistant timestamp
+      const path = join(TEST_DIR, 'any-role.jsonl');
+      const userTs = '2026-01-30T10:00:00.000Z';
+      const assistantTs = '2026-01-30T10:00:05.000Z';
+      const lines = [
+        JSON.stringify({ type: 'user', timestamp: userTs, message: { content: 'Hi' } }),
+        JSON.stringify({ type: 'assistant', timestamp: assistantTs, message: { content: 'Hello' } })
+      ];
+      writeFileSync(path, lines.join('\n') + '\n');
+
+      const result = monitor.checkHealth(path);
+
+      expect(result.lastMessageTime).toBe(new Date(assistantTs).getTime());
+    });
+
     test('handles missing timestamp gracefully', () => {
       const path = join(TEST_DIR, 'no-timestamp.jsonl');
       writeFileSync(path, '{"id": 1}\n{"id": 2}\n');
@@ -203,6 +219,34 @@ describe('TranscriptMonitor', () => {
       const result = monitor.checkHealth(path);
 
       expect(result.lastMessageTime).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // UT-2.9: Cache Warmth
+  // =========================================================================
+  describe('cacheWarmth', () => {
+    test('returns "unknown" when no lastMessageTime', () => {
+      const path = join(TEST_DIR, 'no-ts-warmth.jsonl');
+      writeFileSync(path, '{"id": 1}\n');
+      const result = monitor.checkHealth(path);
+      expect(result.cacheWarmth).toBe('unknown');
+    });
+
+    test('returns "warm" for a very recent transcript (just written)', () => {
+      const path = join(TEST_DIR, 'warm.jsonl');
+      const nowIso = new Date().toISOString();
+      writeFileSync(path, JSON.stringify({ type: 'user', timestamp: nowIso }) + '\n');
+      const result = monitor.checkHealth(path);
+      expect(result.cacheWarmth).toBe('warm');
+    });
+
+    test('returns "cold" for a transcript older than 5 min', () => {
+      const path = join(TEST_DIR, 'cold.jsonl');
+      const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+      writeFileSync(path, JSON.stringify({ type: 'user', timestamp: sixMinAgo }) + '\n');
+      const result = monitor.checkHealth(path);
+      expect(result.cacheWarmth).toBe('cold');
     });
   });
 

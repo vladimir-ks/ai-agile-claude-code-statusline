@@ -14,9 +14,10 @@ export interface TranscriptHealth {
   lastModified: number;        // Unix timestamp ms
   lastModifiedAgo: string;     // "2m", "1h", etc.
   messageCount: number;
-  lastMessageTime: number;     // Unix timestamp ms
-  lastMessagePreview: string;  // Truncated preview of last user message
-  lastMessageAgo: string;      // "2m", "1h", etc. since last message
+  lastMessageTime: number;     // Unix timestamp ms — last entry of ANY role (idle timer source)
+  lastMessagePreview: string;  // Kept for backward-compat; no longer rendered in statusline
+  lastMessageAgo: string;      // "2m", "1h", etc. since last transcript entry (any role)
+  cacheWarmth: 'warm' | 'cold' | 'unknown';  // Anthropic prompt-cache warmth (CACHE_TTL_SECONDS threshold)
   isSynced: boolean;           // mtime < 60s = synced
 }
 
@@ -447,6 +448,7 @@ export function createDefaultHealth(sessionId: string): SessionHealth {
       lastMessageTime: 0,
       lastMessagePreview: '',
       lastMessageAgo: '',
+      cacheWarmth: 'unknown',
       isSynced: false
     },
     model: {

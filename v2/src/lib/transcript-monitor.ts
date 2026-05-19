@@ -6,7 +6,7 @@
  * - File size
  * - Last modified time (mtime)
  * - Message count
- * - Last message timestamp
+ * - Last message timestamp (last entry of ANY role — idle timer source)
  *
  * Purpose: Detect when transcript hasn't been updated during active session
  * (indicates potential data loss risk)
@@ -14,6 +14,13 @@
 
 import { existsSync, statSync, readFileSync, openSync, closeSync, readSync, fstatSync } from 'fs';
 import { TranscriptHealth } from '../types/session-health';
+
+// Anthropic prompt-cache eviction threshold (seconds). Mirrors last-message-module constant.
+// Override via CACHE_TTL_SECONDS env var.
+const CACHE_TTL_SECONDS = (() => {
+  const env = parseInt(process.env.CACHE_TTL_SECONDS || '', 10);
+  return isFinite(env) && env > 0 ? env : 300;
+})();
 
 class TranscriptMonitor {
   /**
@@ -29,6 +36,7 @@ class TranscriptMonitor {
       lastMessageTime: 0,
       lastMessagePreview: '',
       lastMessageAgo: '',
+      cacheWarmth: 'unknown',
       isSynced: false
     };
 
@@ -56,7 +64,7 @@ class TranscriptMonitor {
       // For large files (>1MB), use estimation and tail reading
       if (stats.size > 1_000_000) {
         result.messageCount = this.estimateMessageCount(stats.size);
-        const lastMsg = this.getLastUserMessageFromTail(transcriptPath);
+        const lastMsg = this.getLastEntryFromTail(transcriptPath);
         result.lastMessageTime = lastMsg.timestamp;
         result.lastMessagePreview = lastMsg.preview;
         result.lastMessageAgo = lastMsg.timestamp ? this.formatAgo(lastMsg.timestamp) : '';
@@ -67,6 +75,12 @@ class TranscriptMonitor {
         result.lastMessageTime = parsed.lastTimestamp;
         result.lastMessagePreview = parsed.lastUserMessagePreview;
         result.lastMessageAgo = parsed.lastTimestamp ? this.formatAgo(parsed.lastTimestamp) : '';
+      }
+
+      // Cache warmth: warm if idle < CACHE_TTL_SECONDS
+      if (result.lastMessageTime > 0) {
+        const idleSec = (Date.now() - result.lastMessageTime) / 1000;
+        result.cacheWarmth = idleSec < CACHE_TTL_SECONDS ? 'warm' : 'cold';
       }
 
       return result;
@@ -86,11 +100,11 @@ class TranscriptMonitor {
   }
 
   /**
-   * Read last ~2MB of file to find last user message
+   * Read last ~2MB of file to find last transcript entry (any role).
    * (Large size needed for sessions with heavy tool activity)
-   * Uses seeked read to avoid loading entire file into memory
+   * Uses seeked read to avoid loading entire file into memory.
    */
-  private getLastUserMessageFromTail(path: string): { timestamp: number; preview: string } {
+  private getLastEntryFromTail(path: string): { timestamp: number; preview: string } {
     try {
       const fd = openSync(path, 'r');
       const stats = fstatSync(fd);
@@ -101,7 +115,7 @@ class TranscriptMonitor {
       closeSync(fd);
 
       const content = buffer.toString('utf-8');
-      return this.extractLastUserMessage(content);
+      return this.extractLastEntry(content);
     } catch {
       return { timestamp: 0, preview: '' };
     }
@@ -162,38 +176,29 @@ class TranscriptMonitor {
   }
 
   /**
-   * Extract last user message from a chunk of text (tail of file)
+   * Extract last transcript entry (any role) from a chunk of text (tail of file).
+   * Used for large files (>1MB tail-read path).
+   * Returns timestamp of the most recent entry regardless of role.
+   * preview field kept for backward compat but always empty (no longer rendered).
    */
-  private extractLastUserMessage(chunk: string): { timestamp: number; preview: string } {
+  private extractLastEntry(chunk: string): { timestamp: number; preview: string } {
     const lines = chunk.split('\n').filter(line => line.trim() !== '');
     let timestamp = 0;
-    let preview = '';
 
-    // Search from end to find user message
+    // Search from end for ANY entry with a timestamp
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
-
-        if (!timestamp && obj.timestamp) {
+        if (obj.timestamp) {
           timestamp = new Date(obj.timestamp).getTime();
+          break;  // First (most recent) timestamped entry found — stop
         }
-
-        if (!preview && obj.type === 'user' && obj.message?.content) {
-          const text = this.extractUserText(obj.message.content);
-          // Only use if we found actual text (not empty from tool_result-only messages)
-          if (text) {
-            preview = this.truncatePreview(text, 80);
-          }
-          // Continue searching if this was a tool_result-only message
-        }
-
-        if (timestamp && preview) break;
       } catch {
         // Not valid JSON or partial line, continue
       }
     }
 
-    return { timestamp, preview };
+    return { timestamp, preview: '' };
   }
 
   /**

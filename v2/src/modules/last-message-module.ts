@@ -1,7 +1,13 @@
 /**
- * Last Message Module - Display Last User Message
+ * Last Message Module - Idle / Cache-Warmth Timer
  *
- * Displays: 💬:14:30(2h43m) What is...
+ * Shows elapsed time since the LAST transcript entry (any role) and a
+ * cache-warmth indicator based on Anthropic's prompt-cache TTL.
+ *
+ * Display format:
+ *   < 24h, warm  → 💬:HH:MM(Xm)🔥Xm   (idle < CACHE_TTL_SECONDS)
+ *   < 24h, cold  → 💬:HH:MM(Xm)❄️Xm   (idle ≥ CACHE_TTL_SECONDS)
+ *   >= 24h       → 💬:Mon DD HH:MM ❄️Xh (date replaces elapsed)
  */
 
 import type { DataModule, DataModuleConfig } from '../broker/data-broker';
@@ -9,12 +15,20 @@ import type { ValidationResult } from '../types/validation';
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 
+// Anthropic prompt-cache eviction threshold (seconds).
+// Override via CACHE_TTL_SECONDS env var for custom deployments.
+export const CACHE_TTL_SECONDS = (() => {
+  const env = parseInt(process.env.CACHE_TTL_SECONDS || '', 10);
+  return isFinite(env) && env > 0 ? env : 300;
+})();
+
 interface LastMessageData {
-  text: string;
   timestamp: Date | null;
   displayTime: string;
   elapsed: string;
-  color: string;  // Based on recency
+  /** 'warm' = cache likely still hot; 'cold' = cache evicted */
+  cacheWarmth: 'warm' | 'cold' | 'unknown';
+  color: string;
 }
 
 class LastMessageModule implements DataModule<LastMessageData> {
@@ -37,18 +51,18 @@ class LastMessageModule implements DataModule<LastMessageData> {
         return this.getDefaultData();
       }
 
-      // Read last 50 lines (optimization from V1)
+      // Read last 50 lines — scan for last entry of ANY role
       const content = await readFile(this.transcriptPath, 'utf-8');
       const lines = content.trim().split('\n');
       const last50 = lines.slice(-50);
 
-      // Find last user message (role: "user")
-      let lastUserMsg: any = null;
+      // Find last timestamped entry of any role (user, assistant, tool_result, …)
+      let lastEntry: any = null;
       for (let i = last50.length - 1; i >= 0; i--) {
         try {
           const parsed = JSON.parse(last50[i]);
-          if (parsed.type === 'user' || parsed.role === 'user') {
-            lastUserMsg = parsed;
+          if (parsed.timestamp) {
+            lastEntry = parsed;
             break;
           }
         } catch {
@@ -56,32 +70,12 @@ class LastMessageModule implements DataModule<LastMessageData> {
         }
       }
 
-      if (!lastUserMsg) {
+      if (!lastEntry) {
         return this.getDefaultData();
       }
 
-      // Extract text
-      let text = '';
-      if (lastUserMsg.message?.content) {
-        if (Array.isArray(lastUserMsg.message.content)) {
-          const textContent = lastUserMsg.message.content.find((c: any) => c.type === 'text');
-          text = textContent?.text || '';
-        } else {
-          text = lastUserMsg.message.content;
-        }
-      }
-
-      // Strip HTML-like tags
-      text = text.replace(/<[^>]*>/g, '').trim();
-
-      // Truncate to 60 chars
-      if (text.length > 60) {
-        text = text.substring(0, 60) + '...';
-      }
-
       // Parse timestamp
-      const timestamp = lastUserMsg.timestamp ? new Date(lastUserMsg.timestamp) : null;
-
+      const timestamp = lastEntry.timestamp ? new Date(lastEntry.timestamp) : null;
       if (!timestamp) {
         return this.getDefaultData();
       }
@@ -96,7 +90,7 @@ class LastMessageModule implements DataModule<LastMessageData> {
       // Format elapsed time per spec:
       //   < 60s   → "<1m"
       //   1–59m   → "Xm"
-      //   1–23h   → "Xh Ym"  (e.g. "2h43m")
+      //   1–23h   → "XhYm"
       //   >= 24h  → calendar date replaces elapsed (elapsed = '')
       let elapsed = '';
       if (elapsedSec < 86400) {
@@ -111,6 +105,9 @@ class LastMessageModule implements DataModule<LastMessageData> {
         }
       }
 
+      // Cache warmth: warm if idle < CACHE_TTL_SECONDS, cold otherwise
+      const cacheWarmth: 'warm' | 'cold' = elapsedSec < CACHE_TTL_SECONDS ? 'warm' : 'cold';
+
       // Color based on recency
       let color = '245';  // gray (default: old)
       if (elapsedSec < 300) {  // <5 min
@@ -120,10 +117,10 @@ class LastMessageModule implements DataModule<LastMessageData> {
       }
 
       return {
-        text,
         timestamp,
         displayTime,
         elapsed,
+        cacheWarmth,
         color
       };
     } catch (error) {
@@ -133,10 +130,10 @@ class LastMessageModule implements DataModule<LastMessageData> {
 
   private getDefaultData(): LastMessageData {
     return {
-      text: '',
       timestamp: null,
       displayTime: '',
       elapsed: '',
+      cacheWarmth: 'unknown',
       color: '245'
     };
   }
@@ -151,17 +148,19 @@ class LastMessageModule implements DataModule<LastMessageData> {
   }
 
   format(data: LastMessageData): string {
-    if (!data || !data.text || !data.displayTime) {
-      return '';  // Don't show if no message
+    if (!data || !data.displayTime || !data.timestamp) {
+      return '';  // Don't show if no timestamp available
     }
 
-    // >= 24h: render "Mon DD HH:MM preview" (date replaces elapsed)
+    const warmthGlyph = data.cacheWarmth === 'warm' ? '🔥' : data.cacheWarmth === 'cold' ? '❄️' : '';
+
+    // >= 24h: render "Mon DD HH:MM ❄️Xh" (date replaces elapsed)
     if (data.timestamp && data.elapsed === '') {
       const dateStr = data.timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      return `💬:${dateStr} ${data.displayTime} ${data.text}`;
+      return `💬:${dateStr} ${data.displayTime} ${warmthGlyph}`.trimEnd();
     }
 
-    return `💬:${data.displayTime}(${data.elapsed}) ${data.text}`;
+    return `💬:${data.displayTime}(${data.elapsed})${warmthGlyph}`;
   }
 }
 

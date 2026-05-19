@@ -1,17 +1,19 @@
 /**
  * LastMessageModule format() Tests
  *
- * Focused on FIX-5b/5c: elapsed format spec + >=24h calendar-date branch.
+ * Updated for W4 change: preview removed, replaced with idle/cache-warmth timer.
  *
- * Spec (C-report Display Format Spec):
- *   < 60s   → 💬:HH:MM(<1m) preview
- *   1–59m   → 💬:HH:MM(Xm) preview
- *   1–23h   → 💬:HH:MM(Xh Ym) preview    [module renders e.g. "2h43m"]
- *   >= 24h  → 💬:Mon DD HH:MM preview     (date replaces elapsed entirely)
+ * New display format:
+ *   < 24h, warm → 💬:HH:MM(<1m)🔥
+ *   < 24h, cold → 💬:HH:MM(Xm)❄️
+ *   >= 24h      → 💬:Mon DD HH:MM ❄️   (date replaces elapsed)
+ *   no data     → ''
+ *
+ * CACHE_TTL_SECONDS = 300 (5 min)
  */
 
 import { describe, test, expect } from 'bun:test';
-import LastMessageModule from '../src/modules/last-message-module';
+import LastMessageModule, { CACHE_TTL_SECONDS } from '../src/modules/last-message-module';
 import type { LastMessageData } from '../src/modules/last-message-module';
 
 function makeData(elapsedSec: number, overrides: Partial<LastMessageData> = {}): LastMessageData {
@@ -36,68 +38,113 @@ function makeData(elapsedSec: number, overrides: Partial<LastMessageData> = {}):
   }
   // >= 24h: elapsed stays '' — triggers calendar-date branch
 
+  const cacheWarmth: 'warm' | 'cold' = elapsedSec < CACHE_TTL_SECONDS ? 'warm' : 'cold';
+
   return {
-    text: 'hello world',
     timestamp,
     displayTime,
     elapsed,
+    cacheWarmth,
     color: '245',
     ...overrides,
   };
 }
 
-describe('LastMessageModule.format() — elapsed format spec (FIX-5b/5c)', () => {
+describe('LastMessageModule.format() — idle/cache-warmth timer (W4)', () => {
   const mod = new LastMessageModule();
 
-  test('< 60s → <1m', () => {
+  // ── < 60s (warm) ──
+  test('< 60s → <1m with 🔥 (warm)', () => {
     const d = makeData(30);
     const out = mod.format(d);
-    expect(out).toContain('(<1m)');
-    expect(out).toMatch(/^💬:\d{2}:\d{2}\(<1m\) /);
+    expect(out).toMatch(/^💬:\d{2}:\d{2}\(<1m\)🔥$/);
+    expect(out).not.toContain(' ');  // no trailing preview text
   });
 
-  test('1–59m → Xm', () => {
-    const d = makeData(5 * 60); // 5 min
+  // ── 5m (border: CACHE_TTL_SECONDS = 300s) ──
+  test('exactly 5m (300s) → cold ❄️', () => {
+    const d = makeData(300);
+    expect(d.cacheWarmth).toBe('cold');
+    const out = mod.format(d);
+    expect(out).toContain('❄️');
+    expect(out).not.toContain('🔥');
+  });
+
+  test('4m59s (299s) → warm 🔥', () => {
+    const d = makeData(299);
+    expect(d.cacheWarmth).toBe('warm');
+    const out = mod.format(d);
+    expect(out).toContain('🔥');
+    expect(out).not.toContain('❄️');
+  });
+
+  // ── 1–59m ──
+  test('5m → Xm with ❄️ (cold)', () => {
+    const d = makeData(5 * 60);
     const out = mod.format(d);
     expect(out).toContain('(5m)');
-    expect(out).toMatch(/^💬:\d{2}:\d{2}\(\d+m\) /);
+    expect(out).toMatch(/^💬:\d{2}:\d{2}\(\d+m\)❄️$/);
   });
 
-  test('1–23h → XhYm', () => {
-    const d = makeData(2 * 3600 + 43 * 60); // 2h43m
+  // ── 1–23h ──
+  test('2h43m → XhYm with ❄️', () => {
+    const d = makeData(2 * 3600 + 43 * 60);
     const out = mod.format(d);
     expect(out).toContain('(2h43m)');
-    expect(out).toMatch(/^💬:\d{2}:\d{2}\(\d+h\d+m\) /);
+    expect(out).toMatch(/^💬:\d{2}:\d{2}\(\d+h\d+m\)❄️$/);
   });
 
-  test('>= 24h → "Mon DD HH:MM preview" (date replaces elapsed)', () => {
-    const d = makeData(2 * 86400); // 2 days
+  // ── >= 24h ──
+  test('>= 24h → "Mon DD HH:MM ❄️" — no elapsed parens', () => {
+    const d = makeData(2 * 86400);
     const out = mod.format(d);
-    // Must NOT have parenthesised elapsed
-    expect(out).not.toMatch(/\(\d/);
-    // Must match "💬:Mon DD HH:MM preview" pattern
-    expect(out).toMatch(/^💬:[A-Z][a-z]+ \d{1,2} \d{2}:\d{2} /);
+    expect(out).not.toMatch(/\(\d/);  // no parenthesised elapsed
+    expect(out).toMatch(/^💬:[A-Z][a-z]+ \d{1,2} \d{2}:\d{2} ❄️$/);
   });
 
-  test('>= 24h — exactly 24h boundary triggers calendar date', () => {
-    const d = makeData(86400); // exactly 24h
+  test('exactly 24h boundary triggers calendar date', () => {
+    const d = makeData(86400);
     const out = mod.format(d);
-    expect(out).toMatch(/^💬:[A-Z][a-z]+ \d{1,2} \d{2}:\d{2} /);
+    expect(out).toMatch(/^💬:[A-Z][a-z]+ \d{1,2} \d{2}:\d{2} ❄️$/);
   });
 
-  test('returns empty string when text is missing', () => {
-    const d = makeData(60, { text: '', displayTime: '14:30' });
-    expect(mod.format(d)).toBe('');
-  });
-
+  // ── no data / missing displayTime ──
   test('returns empty string when displayTime is missing', () => {
     const d = makeData(60, { displayTime: '' });
     expect(mod.format(d)).toBe('');
   });
+
+  test('returns empty string when timestamp is null', () => {
+    const d = makeData(60, { timestamp: null });
+    expect(mod.format(d)).toBe('');
+  });
+
+  // ── no preview text in output ──
+  test('output never contains preview text — only timer + warmth', () => {
+    const d = makeData(30);
+    const out = mod.format(d);
+    // Format must be 💬:HH:MM(elapsed)glyph — no space+text after glyph
+    expect(out).toMatch(/^💬:\d{2}:\d{2}\([^)]+\)[🔥❄️]+$/);
+  });
+
+  // ── unknown warmth ──
+  test('unknown cacheWarmth → no glyph appended (< 24h)', () => {
+    const d = makeData(60, { cacheWarmth: 'unknown' });
+    const out = mod.format(d);
+    expect(out).not.toContain('🔥');
+    expect(out).not.toContain('❄️');
+    expect(out).toMatch(/^💬:\d{2}:\d{2}\(\d+m\)$/);
+  });
 });
 
-describe('LastMessageModule cacheTTL and extractor TTL', () => {
-  test('module cacheTTL is 5s', () => {
+describe('CACHE_TTL_SECONDS constant', () => {
+  test('default is 300 (5 minutes)', () => {
+    expect(CACHE_TTL_SECONDS).toBe(300);
+  });
+});
+
+describe('LastMessageModule config', () => {
+  test('cacheTTL is 5s', () => {
     const mod = new LastMessageModule();
     expect(mod.config.cacheTTL).toBe(5000);
   });

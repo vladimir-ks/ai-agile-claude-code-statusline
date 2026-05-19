@@ -309,34 +309,41 @@ export class StatuslineFormatter {
   }
 
   /**
-   * Build Line 2: Session ID + Last message
+   * Build Line 2: Session ID + idle/cache-warmth timer
    *
-   * Format: 🆔:full-uuid 💬:(5m) message preview...
-   * Session ID is always present. Message appended when available, truncated to width.
+   * Format: 🆔:full-uuid 💬:(5m)🔥   (warm: idle < CACHE_TTL_SECONDS)
+   *         🆔:full-uuid 💬:(12m)❄️  (cold: idle ≥ CACHE_TTL_SECONDS)
+   *         🆔:full-uuid 💬:Mon DD HH:MM ❄️  (≥ 24h: date replaces elapsed)
+   * Session ID is always present. 💬 appended when lastMessageTime is available.
    */
-  private static buildSessionLine(health: SessionHealth, width: number): string {
+  private static buildSessionLine(health: SessionHealth, _width: number): string {
     // 🆔 prefix — always present, no color (easily parseable)
     const sidPrefix = `🆔:${health.sessionId}`;
 
-    // 💬 message — appended if available
-    if (!health.transcript?.lastMessagePreview) return sidPrefix;
+    const lastTime = health.transcript?.lastMessageTime || 0;
+    if (!lastTime) return sidPrefix;
 
-    const elapsed = health.transcript.lastMessageAgo || health.transcript.lastModifiedAgo || '';
-    let preview = health.transcript.lastMessagePreview;
+    const elapsed = health.transcript?.lastMessageAgo || '';
+    const warmth = health.transcript?.cacheWarmth ?? 'unknown';
+    const warmthGlyph = warmth === 'warm' ? '🔥' : warmth === 'cold' ? '❄️' : '';
 
-    // Filter out system/XML content
-    if (preview.startsWith('<') && preview.includes('>')) {
-      preview = '(system message)';
+    let idlePart: string;
+    if (!elapsed || elapsed.match(/^[A-Z][a-z]+ \d/)) {
+      // >= 24h: elapsed is already a date string (e.g. "May 19 14:30") or empty
+      const ts = new Date(lastTime);
+      const dateStr = ts.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const hh = String(ts.getHours()).padStart(2, '0');
+      const mm = String(ts.getMinutes()).padStart(2, '0');
+      idlePart = ` 💬:${c('lastMessage')}${dateStr} ${hh}:${mm} ${warmthGlyph}${rst()}`;
+    } else {
+      // < 24h: show HH:MM(elapsed)warmthGlyph
+      const ts = new Date(lastTime);
+      const hh = String(ts.getHours()).padStart(2, '0');
+      const mm = String(ts.getMinutes()).padStart(2, '0');
+      idlePart = ` 💬:${c('lastMessage')}${hh}:${mm}(${elapsed})${warmthGlyph}${rst()}`;
     }
 
-    const msgPrefix = ` 💬:${c('lastMessage')}(${elapsed}) `;
-    const sidWidth = this.visibleWidth(sidPrefix);
-    const msgPrefixWidth = this.visibleWidth(msgPrefix);
-    const availableForPreview = Math.max(10, width - sidWidth - msgPrefixWidth - 2);
-
-    const truncatedPreview = this.truncateString(preview, availableForPreview);
-
-    return `${sidPrefix}${msgPrefix}${truncatedPreview}${rst()}`;
+    return `${sidPrefix}${idlePart}`;
   }
 
   /**
