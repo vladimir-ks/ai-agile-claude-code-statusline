@@ -11,6 +11,18 @@ Real-time cost tracking and session monitoring for Claude Code.
 
 ---
 
+## Git Boundary
+
+This is **module 01 — Statusline**, an **independent git repo**, gitignored by the AIGILE-OS umbrella (`.gitignore`: `[0-9][0-9]_*/`). Its commits never appear in umbrella history.
+
+- Commit + push module source HERE: `git push origin main` — `origin` = `git@gitea:vladimir-ks/aigile-statusline.git`.
+- `github` remote = GitHub mirror `vladimir-ks/ai-agile-claude-code-statusline` (provenance — never deleted).
+- Never run `git add` from the umbrella root expecting it to catch this dir.
+- The umbrella tracks only docs/specs/handoffs/registry — never module source.
+- Module root holds metadata (`README`, `CHANGELOG`, `LICENSE`, `package.json`); the V2 implementation lives in `v2/`.
+
+---
+
 ## Architecture
 
 V2 uses a **decoupled architecture** for reliability:
