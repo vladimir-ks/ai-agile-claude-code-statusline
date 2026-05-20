@@ -21,6 +21,8 @@ This is **module 01 — Statusline**, an **independent git repo**, gitignored by
 - The umbrella tracks only docs/specs/handoffs/registry — never module source.
 - Module root holds metadata (`README`, `CHANGELOG`, `LICENSE`, `package.json`); the V2 implementation lives in `v2/`.
 
+> ⚠ **Deployment coupling.** Claude Code configs reference this dir by absolute path in `statusLine.command` — `~/_AIgile-OS/01_statusline/v2/src/statusline-bulletproof.sh`. Live consumers: `~/_claude-configs/specialists/general/settings.json` and `~/_claude-configs/settings-configs/{standard,full-trust,restricted}.json`. **If this dir is ever renamed/relocated, update those configs** or the statusline silently stops rendering.
+
 ---
 
 ## Architecture
