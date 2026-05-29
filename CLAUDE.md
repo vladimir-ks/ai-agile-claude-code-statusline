@@ -69,7 +69,8 @@ V2 uses a **decoupled architecture** for reliability:
 | Indicator | Meaning |
 |-----------|---------|
 | 🔴 | Billing data stale (after budget/cost) |
-| ⏳ | Health data loading (new session) |
+| ⏳ | Degraded render — per-session health file not yet written (fresh session, OR daemon blocked e.g. locked login keychain). Fresh stdin fields (dir/model/context/time/cache) render at full color; cached quota renders **dimmed grey** with a trailing `⏳stale <age>` marker. Never a lone glyph. Git/live-cost omitted (need the daemon). Upgrades to the full render once the daemon writes health. |
+| dimmed grey + `⏳stale 12h` | Quota block is last-known-good from `merged-quota-cache.json`, not live; `<age>` = cache age |
 | 📝:5m⚠ | Transcript not saved in 5+ minutes |
 
 ---

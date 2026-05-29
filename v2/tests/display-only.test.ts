@@ -16,18 +16,32 @@ const TEST_HEALTH_DIR = '/tmp/test-display-only-health';
 const DISPLAY_SCRIPT = join(__dirname, '../src/display-only.ts');
 
 // Helper to run display-only with mocked health dir
-function runDisplay(stdin: string, healthDir: string = TEST_HEALTH_DIR): { output: string; time: number } {
+function runDisplay(
+  stdin: string,
+  healthDir: string = TEST_HEALTH_DIR,
+  extraEnv: Record<string, string> = {},
+): { output: string; time: number } {
   const start = Date.now();
   try {
     // Set HOME to redirect health dir lookups
     // Set NO_COLOR=1 to disable ANSI colors for consistent test output
     // Set STATUSLINE_WIDTH=120 to get multi-line output (default is single-line mode)
+    // Pin CLAUDE_HS_HOME under the test HOME so the degraded-render quota read is
+    // ISOLATED from the developer's real ~/.claude-hs cache (deterministic in CI).
+    // extraEnv can point it at a fixture to exercise the cached-quota path.
     const output = execSync(
       `echo '${stdin.replace(/'/g, "'\\''")}' | bun ${DISPLAY_SCRIPT}`,
       {
         encoding: 'utf-8',
         timeout: 1000,  // 1 second max (should be <50ms)
-        env: { ...process.env, HOME: '/tmp/test-display-home', NO_COLOR: '1', STATUSLINE_WIDTH: '120' }
+        env: {
+          ...process.env,
+          HOME: '/tmp/test-display-home',
+          CLAUDE_HS_HOME: '/tmp/test-display-home/.claude-hs',
+          NO_COLOR: '1',
+          STATUSLINE_WIDTH: '120',
+          ...extraEnv,
+        }
       }
     );
     return { output, time: Date.now() - start };
@@ -116,12 +130,15 @@ describe('Display-Only Layer', () => {
       expect(output).toContain('🤖:Claude');
     });
 
-    test('shows loading indicator when health file missing', () => {
+    test('shows loading indicator when health file missing (no stdin data)', () => {
       const { output } = runDisplay('{"session_id":"no-health-file"}');
 
-      // Pre-first-message: minimal loading indicator only
+      // Degraded marker present; with no stdin model there is no 🤖: segment,
+      // but the ⏳ degraded-render contract still holds.
       expect(output).toContain('⏳');
       expect(output).not.toContain('🤖:');
+      // Time is always available even in degraded mode.
+      expect(output).toContain('🕐:');
     });
 
     test('shows loading indicator when health file is corrupt', () => {
@@ -144,6 +161,105 @@ describe('Display-Only Layer', () => {
       const { output } = runDisplay('{"session_id":"empty"}');
 
       expect(output).toContain('⏳');
+    });
+  });
+
+  // =========================================================================
+  // Degraded Render Tests (no per-session health file → cached + stdin data)
+  // =========================================================================
+  // Regression guard for the "lone hourglass that never resolves" bug: when the
+  // daemon can't write the per-session health file (fresh session OR blocked by a
+  // locked login keychain), display-only must STILL render the best available
+  // data — fresh stdin (model/context/time) + last-known-good quota from cache —
+  // rather than a bare ⏳.
+  describe('degraded render (no health file)', () => {
+    const HS_FIXTURE = '/tmp/test-display-degraded-hs';
+    const CACHE_DIR = `${HS_FIXTURE}/session-health`;
+
+    function writeQuotaFixture(overrides: Record<string, any> = {}): void {
+      mkdirSync(CACHE_DIR, { recursive: true });
+      const cache = {
+        active_slot: 'slot-1',
+        schema_version: 2,
+        slots: {
+          'slot-1': {
+            email: 'user@example.com',
+            status: 'active',
+            five_hour_util: 42,
+            five_hour_resets_at: new Date(Date.now() + 90 * 60 * 1000).toISOString(), // 1h30m out
+            seven_day_util: 15,
+            weekly_budget_remaining_hours: 54,
+            five_hour_burn_rate: 13,
+            ...overrides,
+          },
+        },
+      };
+      writeFileSync(`${CACHE_DIR}/merged-quota-cache.json`, JSON.stringify(cache));
+    }
+
+    afterEach(() => {
+      if (existsSync(HS_FIXTURE)) rmSync(HS_FIXTURE, { recursive: true });
+    });
+
+    test('renders ALL fresh stdin fields (dir+model+context+time) without health file', () => {
+      const stdin = JSON.stringify({
+        session_id: 'degraded-1',
+        model: { id: 'claude-opus-4-6', display_name: 'Opus' },
+        workspace: { current_dir: '/tmp/my-proj' },
+        context_window: {
+          context_window_size: 200000,
+          current_usage: { input_tokens: 100000, output_tokens: 2000, cache_read_input_tokens: 1000 },
+        },
+      });
+      const { output } = runDisplay(stdin);
+      expect(output).toContain('⏳');          // degraded marker preserved
+      expect(output).toContain('📁:/tmp/my-proj'); // directory — never stale, must show
+      expect(output).toContain('🤖:Opus4.6');   // fresh model from stdin
+      expect(output).toContain('🧠:');          // fresh context bar from stdin
+      expect(output).toContain('🕐:');          // time
+      expect(output).toContain('💾:');          // cache hit ratio from stdin context window
+    });
+
+    test('blends last-known-good quota from cache, dimmed + stale-marked', () => {
+      writeQuotaFixture();
+      const stdin = JSON.stringify({
+        session_id: 'degraded-2',
+        model: { id: 'claude-opus-4-6' },
+      });
+      const { output } = runDisplay(stdin, TEST_HEALTH_DIR, { CLAUDE_HS_HOME: HS_FIXTURE });
+      expect(output).toContain('🤖:Opus4.6'); // fresh
+      expect(output).toContain('[S1]');     // slot from cache
+      expect(output).toContain('(42%)');    // 5h util from cache
+      expect(output).toContain('📅:54h(15%)'); // 7d budget from cache
+      expect(output).toContain('🔥:13/h');  // burn from cache
+      expect(output).toContain('stale');    // explicit stale marker (cache is "wrong-but-marked")
+    });
+
+    test('dims the cached quota block in dark grey (color mode)', () => {
+      writeQuotaFixture();
+      // color ON (omit NO_COLOR by passing it empty) → cached segments use the dim 240 grey
+      const { output } = runDisplay('{"session_id":"degraded-2c","model":{"id":"claude-opus-4-6"}}',
+        TEST_HEALTH_DIR, { CLAUDE_HS_HOME: HS_FIXTURE, NO_COLOR: '' });
+      expect(output).toContain('\x1b[38;5;240m'); // dim grey applied to stale block
+      expect(output).toContain('\x1b[38;5;147m'); // model still full-color (not dimmed)
+    });
+
+    test('degrades gracefully to fresh data + ⏳ when no cache exists', () => {
+      // CLAUDE_HS_HOME points at an empty dir → no merged-quota-cache.json
+      const { output } = runDisplay('{"session_id":"degraded-3","model":{"id":"claude-opus-4-6"}}',
+        TEST_HEALTH_DIR, { CLAUDE_HS_HOME: '/tmp/test-display-degraded-empty' });
+      expect(output).toContain('⏳');
+      expect(output).toContain('🤖:Opus4.6');
+      expect(output).toContain('🕐:');
+      expect(output).not.toContain('[S');     // no slot data → no quota segment
+      expect(output).not.toContain('stale');  // no cache → no "stale N" age marker
+    });
+
+    test('shows RESET when the cached 5h window has already rolled over', () => {
+      writeQuotaFixture({ five_hour_resets_at: new Date(Date.now() - 60 * 1000).toISOString() });
+      const { output } = runDisplay('{"session_id":"degraded-4"}',
+        TEST_HEALTH_DIR, { CLAUDE_HS_HOME: HS_FIXTURE });
+      expect(output).toContain('RESET');
     });
   });
 

@@ -33,7 +33,7 @@ process.on('unhandledRejection', () => {
 });
 process.stdout.on('error', () => { process.exit(0); });
 
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { StatuslineFormatter } from './lib/statusline-formatter';
 import { writeHeartbeat } from './lib/heartbeat';
@@ -136,6 +136,7 @@ const COLORS = {
   critical: '\x1b[38;5;203m',     // coral red
   secrets: '\x1b[38;5;196m',      // bright red
   stale: '\x1b[38;5;208m',        // orange
+  dim: '\x1b[38;5;240m',          // dark grey — cached/stale data in degraded mode
 };
 
 function c(colorName: keyof typeof COLORS): string {
@@ -593,6 +594,192 @@ function formatModelId(modelId: string): string {
 }
 
 // ============================================================================
+// Degraded Render (no per-session health file yet)
+// ============================================================================
+// Replaces the old bare-⏳ loading indicator. When the per-session health file
+// is missing (fresh session, OR daemon blocked — e.g. locked login keychain
+// stops the daemon from ever writing), we still render the best DATA we have:
+//   • model + context  → from stdin (always fresh, always correct)
+//   • time             → local clock (always fresh)
+//   • slot/quota/reset/7d/burn → from merged-quota-cache.json (last-known-good,
+//                                explicitly age-stamped so stale ≠ silently wrong)
+// Leads with ⏳ (documented "loading/degraded" glyph; preserves contract) and
+// trails with ⟳<age> so the user knows the quota half is cached, not live.
+// Read-only, no subprocess, never throws — same guarantees as the rest of this file.
+
+// Resolve merged-quota-cache.json per the CLAUDE_HS_HOME contract.
+// Mirrors statusline-bulletproof.sh + hot-swap-quota-reader.ts precedence:
+//   $CLAUDE_HS_HOME → ~/.claude-hs → ~/.claude (legacy).
+function resolveMergedQuotaCachePath(): string {
+  const fromEnv = process.env.CLAUDE_HS_HOME;
+  const candidates = [
+    fromEnv ? `${fromEnv.replace(/\/+$/, '')}/session-health/merged-quota-cache.json` : null,
+    `${homedir()}/.claude-hs/session-health/merged-quota-cache.json`,
+    `${homedir()}/.claude/session-health/merged-quota-cache.json`,
+  ].filter((p): p is string => Boolean(p));
+  for (const p of candidates) {
+    try { if (existsSync(p)) return p; } catch { /* fall through */ }
+  }
+  return candidates[candidates.length - 1];
+}
+
+interface CachedQuota {
+  slotNum: string;
+  pct: number;        // 5h util %
+  resetIn: string;    // countdown to 5h reset, or 'RESET' / '?'
+  sevenPct: number;   // 7d util %
+  sevenHrs: number;   // weekly budget remaining hours
+  burn: string;       // burn rate per hour, or '?'
+  ageSec: number;     // age of the cache file (mtime)
+}
+
+function humanAge(sec: number): string {
+  if (!isFinite(sec) || sec < 0) return '';
+  if (sec < 90) return `${Math.floor(sec)}s`;
+  if (sec < 5400) return `${Math.round(sec / 60)}m`;
+  if (sec < 172800) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86400)}d`;
+}
+
+// Read last-known-good quota from merged-quota-cache.json. Returns null on any
+// failure (missing/corrupt/no slots). Never throws.
+function readCachedQuota(): CachedQuota | null {
+  try {
+    const path = resolveMergedQuotaCachePath();
+    if (!existsSync(path)) return null;
+    const raw = readFileSync(path, 'utf-8');
+    if (!raw || raw.trim() === '') return null;
+    const d = JSON.parse(raw) as { active_slot?: string; slots?: Record<string, any> };
+    const slots = d.slots || {};
+    let active = d.active_slot || '';
+    let s: any = active ? slots[active] : null;
+    if (!s) {
+      for (const [k, v] of Object.entries(slots)) {
+        if (v && (v as any).status === 'active') { s = v; active = k; break; }
+      }
+    }
+    if (!s) {
+      const keys = Object.keys(slots);
+      if (keys.length) { active = keys[0]; s = slots[active]; }
+    }
+    if (!s) return null;
+
+    const pct = Math.round(Number(s.five_hour_util) || 0);
+    const sevenPct = Math.round(Number(s.seven_day_util) || 0);
+    const sevenHrs = Math.floor(Number(s.weekly_budget_remaining_hours) || 0);
+    const burnRaw = s.burn_rate_1h_avg_5h ?? s.five_hour_burn_rate;
+    const burn = (burnRaw === null || burnRaw === undefined || burnRaw === '')
+      ? '?' : String(Math.round(Number(burnRaw) || 0));
+
+    let resetIn = '?';
+    const resetIso = s.five_hour_resets_at || '';
+    if (resetIso) {
+      const dt = new Date(resetIso);
+      const diff = Math.floor((dt.getTime() - Date.now()) / 1000);
+      if (!isNaN(diff)) {
+        if (diff < 0) {
+          resetIn = 'RESET';
+        } else {
+          const h = Math.floor(diff / 3600);
+          const m = Math.floor((diff % 3600) / 60);
+          resetIn = h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`;
+        }
+      }
+    }
+
+    let ageSec = 0;
+    try { ageSec = Math.floor((Date.now() - statSync(path).mtimeMs) / 1000); } catch { /* unknown */ }
+
+    return { slotNum: active.replace('slot-', '') || '?', pct, resetIn, sevenPct, sevenHrs, burn, ageSec };
+  } catch {
+    return null;
+  }
+}
+
+// Build the degraded render. Philosophy: show EVERYTHING we have at full fidelity;
+// only DIM (dark grey) + age-mark the fields that are genuinely cached (quota); only
+// OMIT what's truly unavailable without the daemon (git — needs a subprocess, which
+// this layer must never spawn). Fresh stdin fields (dir/model/context/time/cache) are
+// the same as the live render — they never go stale, so they never get dimmed.
+function renderDegraded(
+  stdinDirectory: string | null,
+  stdinModel: string | null,
+  stdinContext: { tokensLeft: number; percentUsed: number } | null,
+  cacheRatio: number | null,
+): string {
+  const fresh: string[] = [];
+
+  // Directory — from stdin, never stale (full path, never truncated; matches fmtDirectory).
+  if (stdinDirectory) {
+    const home = homedir();
+    const dp = stdinDirectory.startsWith(home) ? '~' + stdinDirectory.slice(home.length) : stdinDirectory;
+    fresh.push(`📁:${c('directory')}${dp}${rst()}`);
+  }
+
+  // Model — from stdin, fresh.
+  if (stdinModel) {
+    fresh.push(`🤖:${c('model')}${stdinModel.replace(/\s+/g, '')}${rst()}`);
+  }
+
+  // Context — from stdin, fresh.
+  if (stdinContext) {
+    const left = formatTokens(stdinContext.tokensLeft || 0);
+    const pct = stdinContext.percentUsed || 0;
+    let cn: keyof typeof COLORS = 'contextGood';
+    if (pct >= 95) cn = 'contextCrit';
+    else if (pct >= 80) cn = 'contextWarn';
+    fresh.push(`🧠:${c(cn)}${left}${generateProgressBar(pct, 12)}${rst()}`);
+  }
+
+  // Time — always fresh.
+  fresh.push(fmtTime());
+
+  // Cache hit ratio — derived from stdin context_window, fresh.
+  if (cacheRatio !== null) {
+    fresh.push(`💾:${c('cache')}${cacheRatio}%${rst()}`);
+  }
+
+  // Quota block — last-known-good from cache. DIMMED dark grey + an explicit age
+  // marker so the user can see at a glance it's cached, not live (and how old).
+  const stale: string[] = [];
+  const q = readCachedQuota();
+  const D = c('dim');
+  if (q) {
+    stale.push(`${D}[S${q.slotNum}]⌛${q.resetIn}(${q.pct}%)${rst()}`);
+    if (q.sevenHrs > 0 || q.sevenPct > 0) {
+      stale.push(`${D}📅:${q.sevenHrs}h(${q.sevenPct}%)${rst()}`);
+    }
+    if (q.burn !== '?') {
+      stale.push(`${D}🔥:${q.burn}/h${rst()}`);
+    }
+    const age = humanAge(q.ageSec);
+    stale.push(`${D}⏳${age ? `stale ${age}` : 'stale'}${rst()}`);
+  } else {
+    // No cache at all → daemon hasn't produced quota yet. Single dim marker so the
+    // user knows live data (git/quota/cost) is still pending — never a lone glyph.
+    stale.push(`${D}⏳${rst()}`);
+  }
+
+  let line = [...fresh, ...stale].join(' ');
+
+  // Hard-truncate to pane width (this path returns early, bypassing the main guards).
+  const paneWidthRaw = process.env.STATUSLINE_WIDTH || process.env.COLUMNS;
+  const paneWidth = paneWidthRaw ? parseInt(paneWidthRaw, 10) : 0;
+  if (paneWidth > 0 && stripAnsi(line).length > paneWidth) {
+    let visCount = 0, cutIdx = line.length, inEsc = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === '\x1b') { inEsc = true; continue; }
+      if (inEsc) { if (line[i] === 'm') inEsc = false; continue; }
+      visCount++;
+      if (visCount >= paneWidth - 1) { cutIdx = i + 1; break; }
+    }
+    line = line.slice(0, cutIdx) + '\x1b[0m';
+  }
+
+  return line;
+}
+
+// ============================================================================
 // Main Display Logic
 // ============================================================================
 
@@ -662,11 +849,21 @@ function display(): void {
     const healthPath = `${HEALTH_DIR}/${sessionId}.json`;
     const health = safeReadJson<SessionHealth>(healthPath);
 
-    // 4. If no health data, show minimal loading indicator
-    // Applies to: fresh session start, resumed session (stale health), any !health state
-    // Daemon will write health file shortly → next render shows full display
+    // 4. If no health data, render DEGRADED instead of a bare loading glyph.
+    // Applies to: fresh session start, resumed session (stale health), OR daemon
+    // permanently blocked (e.g. locked login keychain stops it from ever writing
+    // the per-session health file). Old behavior was a lone ⏳ that never resolved
+    // until the next re-render. Now we show the best available data:
+    //   • model + context → fresh from stdin (parsed above)
+    //   • time            → local clock
+    //   • slot/quota/7d/burn → last-known-good from merged-quota-cache.json (age-stamped)
+    // Daemon (if it can run) writes the full health file → next render upgrades.
     if (!health) {
-      process.stdout.write(`${c('stale')}⏳${rst()}`);
+      let degradedContext: { tokensLeft: number; percentUsed: number } | null = null;
+      if (stdinContext) {
+        degradedContext = { tokensLeft: stdinContext.tokensLeft, percentUsed: stdinContext.percentUsed };
+      }
+      process.stdout.write(renderDegraded(stdinDirectory, stdinModel, degradedContext, cacheRatio));
       return;
     }
 
