@@ -82,7 +82,9 @@ class DataGatherer {
       name: 'CCUsage Module',
       enabled: true,
       cacheTTL: 120000,  // 2min cooldown
-      timeout: 25000
+      // ccusage runs ~23-24s; 25s was too tight (1-2s margin → intermittent timeouts).
+      // 28s keeps ~4s headroom yet stays under bulletproof.sh's 30s daemon hard-kill.
+      timeout: 28000
     });
 
     // Ensure runtime state is initialized (migrate from old files if needed)
