@@ -29,6 +29,7 @@
 # - Daemon is orphan-adopted by init on parent exit
 
 set -u  # Fail on undefined variables (but not on errors - we handle those)
+export STATUSLINE_LAZY_MODE="${STATUSLINE_LAZY_MODE:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISPLAY_SCRIPT="$SCRIPT_DIR/display-only.ts"
