@@ -373,6 +373,18 @@ is_keychain_unlocked() {
 if should_spawn_daemon && is_keychain_unlocked && [[ "${STATUSLINE_LAZY_MODE:-0}" != "1" ]] && [[ ! -f "$LAZY_MODE_FORCED_FILE" ]]; then
   mark_daemon_spawn
 
+  # ── Litter retention (r49) ─────────────────────────────────────────────
+  # The daemon's per-session artifacts ({uuid}.debug.json, {uuid}.lock,
+  # *.tmp.* from interrupted atomic writes) had NO retention — 1,681 files
+  # accumulated by Jun 2026. Prune on this infrequent daemon-spawn path
+  # (never the per-render hot path). Backgrounded + nice'd; ~ms over a few
+  # thousand files. Age gates keep anything plausibly-live untouched.
+  (
+    find "$HEALTH_DIR" -maxdepth 1 -name '*.debug.json' -mtime +14 -delete 2>/dev/null
+    find "$HEALTH_DIR" -maxdepth 1 -name '*.lock' -mtime +14 -delete 2>/dev/null
+    find "$HEALTH_DIR" -maxdepth 1 -name '*.tmp.*' -mtime +2 -delete 2>/dev/null
+  ) &
+
   # Run data daemon in background with strict limits:
   # - timeout 30s with SIGKILL after 1s grace period
   # - Nice +10 to lower CPU priority
