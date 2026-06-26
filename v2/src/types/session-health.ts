@@ -92,6 +92,11 @@ export interface LaunchContext {
   shellCommand?: string;       // Full command if detectable
   configDir?: string;          // Derived CLAUDE_CONFIG_DIR from transcript path
   keychainService?: string;    // Exact keychain service name for this session
+  tmuxPaneId?: string;         // $TMUX_PANE (e.g. "%2") — exact tmux pane key for this
+                               // session. Statusline runs as a child of the claude
+                               // process and inherits TMUX_PANE; the Observatory
+                               // collector resolves %N -> pane target (cwd/configDir
+                               // are NOT unique across sessions). Absent outside tmux.
 }
 
 export interface TmuxContext {

@@ -78,6 +78,15 @@ class HealthStore {
    */
   writeSessionHealth(sessionId: string, health: SessionHealth): void {
     this.ensureDirectory();
+    // Stamp the exact tmux pane id ($TMUX_PANE, e.g. "%2") so the Observatory
+    // collector can map this session to its live tmux pane with certainty —
+    // cwd/configDir are not unique across concurrent sessions. The statusline
+    // runs as a child of the claude process and inherits TMUX_PANE; this is a
+    // free env read (no spawn) and is the single per-session write site.
+    const paneId = process.env.TMUX_PANE;
+    if (paneId && health.launch) {
+      health.launch.tmuxPaneId = paneId;
+    }
     const filePath = this.sessionPath(sessionId);
     const data = JSON.stringify(health, null, 2);
     this.atomicWrite(filePath, data);
