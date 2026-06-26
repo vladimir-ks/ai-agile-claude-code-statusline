@@ -69,9 +69,26 @@ DAEMON_RESPAWN_COUNT_FILE="${HEALTH_DIR}/.daemon-respawn-count"
 # Layer 2 (ProcessLock in data-daemon.ts) provides the hard singleton guarantee.
 
 DAEMON_SPAWN_GATE="${HEALTH_DIR}/.daemon-spawn.gate"
-MIN_DAEMON_INTERVAL=5  # seconds
+MIN_DAEMON_INTERVAL=15  # seconds — gate must exceed daemon runtime (p90 ~3.8s,
+                        # max ~22s) so heavy instances don't stack. Quota/cost
+                        # do not need 5s freshness; 15s cuts global spawns ~3x.
+MAX_LOADAVG=8           # skip daemon spawn when 1-min load exceeds this. The
+                        # display layer runs synchronously and shares CPU with
+                        # the daemons it spawns; under 40+ concurrent sessions
+                        # load climbs past 10 and the foreground bun cold-start
+                        # blows its 3.0s budget → SIGKILL → degraded fallback.
+                        # Gating on load breaks that contention feedback loop.
 
 should_spawn_daemon() {
+  # ── Load gate: never add daemon load when the box is already saturated ────
+  # 1-min load average via sysctl (no subshell pipeline, instant). Compared
+  # against MAX_LOADAVG using integer floor — bash has no float compare.
+  local load_int
+  load_int=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}')
+  if [[ "$load_int" =~ ^[0-9]+$ ]] && (( load_int > MAX_LOADAVG )); then
+    return 1
+  fi
+
   # If gate file doesn't exist, spawn immediately
   [ ! -f "$DAEMON_SPAWN_GATE" ] && return 0
 
@@ -383,7 +400,7 @@ if should_spawn_daemon && is_keychain_unlocked && [[ "${STATUSLINE_LAZY_MODE:-0}
     find "$HEALTH_DIR" -maxdepth 1 -name '*.debug.json' -mtime +14 -delete 2>/dev/null
     find "$HEALTH_DIR" -maxdepth 1 -name '*.lock' -mtime +14 -delete 2>/dev/null
     find "$HEALTH_DIR" -maxdepth 1 -name '*.tmp.*' -mtime +2 -delete 2>/dev/null
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
 
   # Run data daemon in background with strict limits:
   # - timeout 30s with SIGKILL after 1s grace period
@@ -391,19 +408,28 @@ if should_spawn_daemon && is_keychain_unlocked && [[ "${STATUSLINE_LAZY_MODE:-0}
   # - All output to daemon log for observability
   # - LAYER 3: trap 'kill 0' EXIT kills entire process group on subshell exit
   #   This ensures ALL children (ccusage, quota-broker, git) die with the daemon
+  # - fd detach (</dev/null >/dev/null 2>&1): the subshell must NOT inherit the
+  #   wrapper's stdout. If it does, any reader of the statusline output (the CLI,
+  #   or a $(...) capture) blocks on EOF until the daemon exits — up to its 30s
+  #   timeout — turning a <100ms render into a multi-second hang. This is the
+  #   actual "display blocked by data gathering" violation. Daemon still logs
+  #   via its explicit inner >> daemon.log redirect.
   (
     # Set low priority so it doesn't compete with interactive work
     renice -n 10 $$ >/dev/null 2>&1 || true
 
     # Run daemon with timeout (SIGKILL on timeout - cannot leave orphans)
-    # --no-cache ensures daemon always loads latest code (not cached modules)
+    # Cache enabled: bun invalidates its transpile cache on source mtime, so
+    # edits are still picked up. --no-cache forced a full recompile of the
+    # daemon + its ~40-file lib/ tree on EVERY spawn (~12/min globally) — the
+    # dominant avoidable CPU cost driving statusline timeout/flicker.
     # Layer 3: timeout -k 1 sends SIGKILL after 1s grace — kills daemon AND its children
-    if echo "${JSON_INPUT}" | timeout -k 1 30 bun --no-cache "$DAEMON_SCRIPT" 2>&1 | head -c 10000 >> "${HEALTH_DIR}/daemon.log" 2>/dev/null; then
+    if echo "${JSON_INPUT}" | timeout -k 1 30 bun "$DAEMON_SCRIPT" 2>&1 | head -c 10000 >> "${HEALTH_DIR}/daemon.log" 2>/dev/null; then
       _daemon_respawn_reset 2>/dev/null || true
     else
       _daemon_respawn_increment 2>/dev/null || true
     fi
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
 
   # Disown the background process so it doesn't become a zombie
   disown 2>/dev/null || true
