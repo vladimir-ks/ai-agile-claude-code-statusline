@@ -367,14 +367,34 @@ export class StatuslineFormatter {
 
     // Quota data
     const quotaData = QuotaBrokerClient.read();
-    const slot = quotaData?.slots?.[lock.slotId];
+    const brokerSlot = quotaData?.slots?.[lock.slotId];
+
+    // Native active-slot quota (decision #3): when Claude Code stdin populates
+    // rate_limits, those values are authoritative + always-fresh for the ACTIVE
+    // slot. Overlay them onto the broker slot (which still supplies weekly-hours
+    // remaining + burn/pacing fields native does not provide). Broker cache is
+    // retained for cross-slot visibility elsewhere.
+    const native = (health as any).nativeQuota as {
+      fiveHourPct: number | null; fiveHourResetsAt: string | null;
+      sevenDayPct: number | null; sevenDayResetsAt: string | null;
+    } | undefined;
+    let slot = brokerSlot as MergedQuotaSlot | undefined;
+    if (native && (native.fiveHourPct != null || native.sevenDayPct != null)) {
+      slot = { ...(brokerSlot || ({} as MergedQuotaSlot)) };
+      if (native.fiveHourPct != null) slot.five_hour_util = native.fiveHourPct;
+      if (native.fiveHourResetsAt) slot.five_hour_resets_at = native.fiveHourResetsAt;
+      if (native.sevenDayPct != null) slot.seven_day_util = native.sevenDayPct;
+      if (native.sevenDayResetsAt) slot.seven_day_resets_at = native.sevenDayResetsAt;
+    }
 
     // Ban indicator: derive from rate-limit state file
     const isBanned = this.isSlotBanned(lock.slotId);
 
-    // Staleness tier — computed once, threaded into per-field decorators
+    // Staleness tier — computed once, threaded into per-field decorators.
+    // Native overlay is live → force 'fresh' so the active slot is never
+    // mis-marked stale on a fresh stdin render.
     const mergedAt = quotaData?.ts ? quotaData.ts * 1000 : 0;
-    const tier = this.staleTier(mergedAt);
+    const tier = native ? 'fresh' : this.staleTier(mergedAt);
 
     const segments: string[] = [];
     segments.push(this.fmtSlotBadge(slotNum, email, isBanned));
@@ -409,9 +429,14 @@ export class StatuslineFormatter {
    * Format: 💰:$X.XX|$Y.YY/h
    */
   private static fmtCostInline(health: SessionHealth): string {
-    if (!health.billing) return '';
-    const sessionCost = health.billing.sessionCost || 0;
-    const burnRate = health.billing.sessionBurnRate || health.billing.burnRatePerHour || 0;
+    // Native session cost (decision #3): Claude Code stdin cost.total_cost_usd is
+    // authoritative for THIS session; prefer it over the transcript-derived value.
+    const nativeCost = (health as any).nativeCost as { sessionCost?: number } | undefined;
+    if (!health.billing && !(nativeCost && typeof nativeCost.sessionCost === 'number')) return '';
+    const sessionCost = (nativeCost && typeof nativeCost.sessionCost === 'number')
+      ? nativeCost.sessionCost
+      : (health.billing?.sessionCost || 0);
+    const burnRate = health.billing?.sessionBurnRate || health.billing?.burnRatePerHour || 0;
     if (sessionCost < 0.01) return '';
 
     const costPart = `${c('cost')}${this.formatMoney(sessionCost)}${rst()}`;

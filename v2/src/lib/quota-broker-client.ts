@@ -53,6 +53,27 @@ export class QuotaBrokerClient {
   private static readonly CACHE_PATH = `${QuotaBrokerClient.SESSION_HEALTH_DIR}/merged-quota-cache.json`;
   private static readonly LOCK_PATH = `${QuotaBrokerClient.SESSION_HEALTH_DIR}/.quota-fetch.lock`;
 
+  // Render-path purity gate (locked decision #2): the DISPLAY layer must be a
+  // pure file-read — it may NOT spawn the broker (no external work on the render
+  // path). The data-daemon is the SOLE component allowed to refresh quota; it
+  // opts in via enableBrokerSpawn() at startup. read() therefore defaults to
+  // spawn-DISABLED. Env escape hatch QUOTA_BROKER_ALLOW_SPAWN=1 forces it on
+  // (tests / manual broker priming). display-only.ts never enables it → never
+  // spawns; data-daemon.ts enables it → keeps the cache fresh in the background.
+  private static spawnEnabled = false;
+
+  /**
+   * Allow this process to spawn the broker on stale reads. Called once by the
+   * data-daemon entry point. Never called from the display/render path.
+   */
+  static enableBrokerSpawn(): void {
+    this.spawnEnabled = true;
+  }
+
+  private static canSpawn(): boolean {
+    return this.spawnEnabled || process.env.QUOTA_BROKER_ALLOW_SPAWN === '1';
+  }
+
   // Configurable broker script path for cloud configs migration
   // Priority: ENV var → cloud_configs → legacy _claude-configs
   private static getBrokerScript(): string {
@@ -158,7 +179,9 @@ export class QuotaBrokerClient {
 
       // Layer 3: If merged cache OR any slot is stale, trigger background refresh
       // Skip spawn if all slots are in rate-limit backoff (avoids wasteful subprocesses)
-      if ((!parsed.is_fresh || anySlotStale) && !this.isLockAlive() && !this.allSlotsInBackoff()) {
+      // Render-path purity: spawn ONLY when this process opted in (daemon). The
+      // display layer reads the cache as-is and surfaces staleness — never spawns.
+      if (this.canSpawn() && (!parsed.is_fresh || anySlotStale) && !this.isLockAlive() && !this.allSlotsInBackoff()) {
         const staleSlots = Object.entries(parsed.slots || {})
           .filter(([, s]) => {
             const age = Math.floor(now / 1000) - Math.floor((s.last_fetched || 0) / 1000);

@@ -321,19 +321,36 @@ JSON_INPUT=$(cat)
 # DETECT PANE WIDTH (tmux-aware)
 # ============================================================================
 
-# If running in tmux, get the actual pane width and capture tmux context
-if [ -n "${TMUX:-}" ]; then
+# Width/height: prefer $COLUMNS/$LINES — Claude Code passes them in the render
+# env and they reflect the ACTUAL statusline area (correct even when a tmux pane
+# is split or the CLI runs outside tmux). The tmux pane query is a fallback only
+# when the env vars are unset (older CLI / non-passing host). Final default 120.
+if [ -n "${COLUMNS:-}" ]; then
+  STATUSLINE_WIDTH="${COLUMNS}"
+elif [ -n "${TMUX:-}" ]; then
   STATUSLINE_WIDTH=$(tmux display -p '#{pane_width}' 2>/dev/null || echo "120")
-  # Capture tmux session/window/pane info for session tracking
+else
+  STATUSLINE_WIDTH="120"
+fi
+export STATUSLINE_WIDTH
+
+if [ -n "${LINES:-}" ]; then
+  STATUSLINE_HEIGHT="${LINES}"
+elif [ -n "${TMUX:-}" ]; then
+  STATUSLINE_HEIGHT=$(tmux display-message -p '#{pane_height}' 2>/dev/null || echo "")
+else
+  STATUSLINE_HEIGHT=""
+fi
+export STATUSLINE_HEIGHT
+
+# Capture tmux session/window/pane info for session tracking (independent of the
+# width source above — only available when actually inside tmux).
+if [ -n "${TMUX:-}" ]; then
   export TMUX_SESSION_NAME=$(tmux display-message -p '#{session_name}' 2>/dev/null || echo "")
   export TMUX_WINDOW_INDEX=$(tmux display-message -p '#{window_index}' 2>/dev/null || echo "")
   export TMUX_PANE_INDEX=$(tmux display-message -p '#{pane_index}' 2>/dev/null || echo "")
   export TMUX_PANE_HEIGHT=$(tmux display-message -p '#{pane_height}' 2>/dev/null || echo "")
-else
-  # Fallback: try terminal columns, or default to 120
-  STATUSLINE_WIDTH="${COLUMNS:-120}"
 fi
-export STATUSLINE_WIDTH
 
 # ============================================================================
 # LAZY MODE FAST PATH (explicit disable only)

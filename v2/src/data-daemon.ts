@@ -33,8 +33,14 @@ import DataGatherer from './lib/data-gatherer';
 import ProcessLock from './lib/process-lock';
 import { ClaudeCodeInput } from './types/session-health';
 import { VersionChecker } from './lib/version-checker';
+import { QuotaBrokerClient } from './lib/quota-broker-client';
 import { appendFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir } from 'os';
+
+// Render-path purity (locked decision #2): the daemon is the ONLY component
+// allowed to refresh quota. Opt this process in to broker spawning. The display
+// layer (display-only.ts) never calls this → its reads stay pure file-reads.
+QuotaBrokerClient.enableBrokerSpawn();
 
 // ============================================================================
 // LAZY MODE GATE (Phase 5 — daemon-optional fallback)

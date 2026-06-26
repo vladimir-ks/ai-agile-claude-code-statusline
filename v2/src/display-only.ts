@@ -793,8 +793,32 @@ function display(): void {
     let stdinVersion: string | null = null;
     let stdinContext: { tokensUsed: number; tokensLeft: number; percentUsed: number } | null = null;
     let cacheRatio: number | null = null;  // Cache hit ratio from JSON input
+    // Native active-slot fields from Claude Code stdin (locked decision #3):
+    // prefer these over the broker cache for the ACTIVE slot when populated.
+    let stdinRateLimits: {
+      fiveHourPct: number | null; fiveHourResetsAt: string | null;
+      sevenDayPct: number | null; sevenDayResetsAt: string | null;
+    } | null = null;
+    let stdinSessionCost: number | null = null;
     try {
       const stdin = require('fs').readFileSync(0, 'utf-8');
+
+      // ── Env-gated raw-stdin capture (debug) ────────────────────────────────
+      // Diagnostic for confirming whether Claude Code populates native fields
+      // (rate_limits.*, cost.*) for this plan. Enable by EITHER:
+      //   • export STATUSLINE_CAPTURE_STDIN=1   (env, for manual `bun display-only.ts`)
+      //   • touch ~/.claude/session-health/.capture-stdin   (sentinel; lets a
+      //     LIVE Claude Code session capture without restarting/re-env-ing it)
+      // Writes the raw stdin JSON verbatim to
+      //   ~/.claude/session-health/stdin-capture.json
+      // Read-only side effect, fully guarded — never affects render output.
+      try {
+        const sentinel = `${HEALTH_DIR}/.capture-stdin`;
+        if (process.env.STATUSLINE_CAPTURE_STDIN === '1' || existsSync(sentinel)) {
+          require('fs').writeFileSync(`${HEALTH_DIR}/stdin-capture.json`, stdin, { mode: 0o600 });
+        }
+      } catch { /* capture is best-effort — never break render */ }
+
       const parsed = JSON.parse(stdin);
       sessionId = parsed?.session_id || null;
       // Extract directory from Claude Code input (most reliable source)
@@ -834,6 +858,26 @@ function display(): void {
           tokensLeft: Math.max(0, compactionThreshold - tokensUsed),
           percentUsed: compactionThreshold > 0 ? Math.min(100, Math.floor((tokensUsed / compactionThreshold) * 100)) : 0
         };
+      }
+
+      // Native rate limits — authoritative for the ACTIVE slot (decision #3).
+      // Claude Code emits used_percentage (0-100) + resets_at as a UNIX epoch in
+      // SECONDS; downstream formatters expect ISO strings, so convert here.
+      const rl = parsed?.rate_limits;
+      if (rl && (rl.five_hour || rl.seven_day)) {
+        const toIso = (s: unknown): string | null =>
+          (typeof s === 'number' && s > 0 ? new Date(s * 1000).toISOString() : null);
+        stdinRateLimits = {
+          fiveHourPct: typeof rl.five_hour?.used_percentage === 'number' ? rl.five_hour.used_percentage : null,
+          fiveHourResetsAt: toIso(rl.five_hour?.resets_at),
+          sevenDayPct: typeof rl.seven_day?.used_percentage === 'number' ? rl.seven_day.used_percentage : null,
+          sevenDayResetsAt: toIso(rl.seven_day?.resets_at),
+        };
+      }
+
+      // Native session cost — authoritative for THIS session's 💰 (decision #3).
+      if (typeof parsed?.cost?.total_cost_usd === 'number') {
+        stdinSessionCost = parsed.cost.total_cost_usd;
       }
     } catch {
       // Can't parse stdin - will show fallback
@@ -913,6 +957,11 @@ function display(): void {
       healthWithStdin.context.tokensLeft = stdinContext.tokensLeft;
       healthWithStdin.context.percentUsed = stdinContext.percentUsed;
     }
+    // Native active-slot quota/cost (decision #3): formatter prefers these for
+    // the active slot and falls back to the broker cache when absent. Broker
+    // cache stays the source for cross-slot (multi-account) visibility.
+    if (stdinRateLimits) healthWithStdin.nativeQuota = stdinRateLimits;
+    if (stdinSessionCost != null) healthWithStdin.nativeCost = { sessionCost: stdinSessionCost };
     // CLI version: use session lock's launch-time version (immutable per session)
     // This ensures version stays fixed until session restart — critical for
     // identifying sessions that need restart after CLI updates

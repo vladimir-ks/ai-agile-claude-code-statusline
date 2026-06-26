@@ -32,12 +32,14 @@ V2 uses a **decoupled architecture** for reliability:
 ### Display Layer (`v2/src/display-only.ts`)
 - **Fast** - <50ms, read-only
 - Reads from JSON health files
-- Never makes network calls or spawns processes
+- Never makes network calls or spawns processes (incl. the quota broker — only the daemon may spawn it)
+- Active-slot ⌛/📅/💰 prefer Claude Code's native stdin (`rate_limits.{five_hour,seven_day}`, `cost.total_cost_usd`); the broker cache is the fallback and the source for cross-slot rows
 - Always outputs something (graceful degradation)
 
 ### Data Daemon (`v2/src/data-daemon.ts`)
 - Runs in background AFTER display
 - Updates health files for next invocation
+- Sole component that refreshes quota (spawns the broker)
 - Handles: ccusage, git, transcript monitoring
 
 ### Shared Billing (`~/.claude/session-health/billing-shared.json`)
@@ -133,6 +135,14 @@ cd v2 && bun test
 ```bash
 echo '{"session_id":"test","start_directory":"~/project"}' | bun v2/src/display-only.ts
 ```
+
+### Capture raw stdin (debug)
+Confirm which native fields Claude Code sends (e.g. `rate_limits`, `cost`). Enable by EITHER:
+```bash
+export STATUSLINE_CAPTURE_STDIN=1                 # for manual `bun display-only.ts`
+touch ~/.claude/session-health/.capture-stdin     # sentinel — live session, no restart
+```
+Next render writes the raw stdin JSON to `~/.claude/session-health/stdin-capture.json`. Remove the sentinel to stop. Capture is read-only and never alters render output.
 
 ### Key files
 - `v2/src/display-only.ts` - Display layer
