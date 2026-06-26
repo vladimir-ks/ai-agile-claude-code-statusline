@@ -35,7 +35,8 @@ export const CATEGORIES: Record<string, FreshnessCategory> = {
   model:               { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh
   context:             { freshMs: 5_000,     cooldownMs: 0 },                            // 5s fresh (real-time from stdin)
   weekly_quota:        { freshMs: 300_000,   cooldownMs: 0,       staleMs: 3600_000 },   // 5min fresh, 1h critical (was 24h - too lenient)
-  quota_broker:        { freshMs: 30_000,    cooldownMs: 0,       staleMs: 300_000 },    // 30s fresh, 5min critical
+  quota_broker:        { freshMs: 30_000,    cooldownMs: 0,       staleMs: 300_000 },    // 30s fresh, 5min critical — used when native stdin absent (broker = active slot source)
+  quota_broker_crossslot: { freshMs: 300_000, cooldownMs: 0,      staleMs: 1_800_000 },  // 5min fresh, 30min critical — used when native stdin present (broker = cross-slot rows only)
   version_check:       { freshMs: 14_400_000,cooldownMs: 0 },                            // 4h fresh
   auth_profile:        { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh
   secrets_scan:        { freshMs: 300_000,   cooldownMs: 0 },                            // 5min fresh

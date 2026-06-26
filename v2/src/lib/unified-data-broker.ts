@@ -177,14 +177,27 @@ export class UnifiedDataBroker {
     const tier3Sources = DataSourceRegistry.getByTier(3);
     const globalCache = DataCacheManager.read();
 
+    // Native active-slot stdin (CC 2.1.191+): when rate_limits is populated, the
+    // ACTIVE slot's quota renders straight from stdin in the display layer, so the
+    // broker refresh is needed ONLY to populate OTHER (cross-slot) rows for the
+    // hot-swap multi-account display. In that case the quota source runs on the
+    // relaxed cross-slot cadence (quota_broker_crossslot). When stdin lacks the
+    // fields, the broker is still the active slot's source → keep the tight cadence.
+    const rl = (jsonInput as any)?.rate_limits;
+    const nativeActiveQuota = !!(rl && (rl.five_hour || rl.seven_day));
+
     // Determine which sources need refresh
     const staleCategories: string[] = [];
     const staleSources: DataSourceDescriptor[] = [];
 
     for (const source of tier3Sources) {
       const entry = globalCache.sources[source.id];
+      const freshnessCategory =
+        source.id === 'quota' && nativeActiveQuota
+          ? 'quota_broker_crossslot'
+          : source.freshnessCategory;
       const isFresh = entry
-        ? FreshnessManager.isFresh(entry.fetchedAt, source.freshnessCategory)
+        ? FreshnessManager.isFresh(entry.fetchedAt, freshnessCategory)
         : false;
 
       if (!isFresh) {

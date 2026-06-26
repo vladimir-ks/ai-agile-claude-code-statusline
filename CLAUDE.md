@@ -40,6 +40,7 @@ V2 uses a **decoupled architecture** for reliability:
 - Runs in background AFTER display
 - Updates health files for next invocation
 - Sole component that refreshes quota (spawns the broker)
+- Quota refresh is **cross-slot only** when native stdin (`rate_limits`) is present: the active slot renders from stdin, so the broker just populates OTHER (non-active) slot rows for the hot-swap display — runs on the relaxed `quota_broker_crossslot` cadence (5min fresh). When stdin lacks `rate_limits`, the broker is the active slot's source → tight `quota_broker` cadence (30s fresh)
 - Handles: ccusage, git, transcript monitoring
 
 ### Shared Billing (`~/.claude/session-health/billing-shared.json`)
