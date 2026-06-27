@@ -65,6 +65,45 @@ const rst = () =>
 const STALE_WARN_MIN = 30;
 const STALE_SEVERE_MIN = 120;
 
+/**
+ * Map a quota pipeline_remediation state to a statusline notice (or null).
+ * Pure + exported so the wording/severity contract is unit-tested.
+ *
+ * - blocked_* => quota data genuinely can't refresh -> critical, "data may be stale".
+ * - degraded_scheduler => a background agent is down but quota data may still be
+ *   fresh -> a quiet, accurate note. NOT "frozen/stale" (that lied when the cache
+ *   was current — the misleading wording this replaces).
+ * - ok / refresh_in_progress / unknown / undefined => no notice.
+ *
+ * Messages carry NO leading ⚠ glyph — the render layer adds the glyph + colour, so
+ * embedding one here produced the "⚠ ⚠" double-glyph bug.
+ */
+export interface PipelineNotice {
+  type: 'pipeline_blocked' | 'pipeline_degraded';
+  message: string;
+  priority: number;
+}
+const PIPELINE_BLOCKED_STATES = [
+  'blocked_rate_limited',
+  'blocked_auth_required',
+  'blocked_no_active_slot',
+  'blocked_no_scheduler',
+];
+export function pipelineRemediationNotice(remediation: string | null | undefined): PipelineNotice | null {
+  if (remediation && PIPELINE_BLOCKED_STATES.includes(remediation)) {
+    const why = remediation.replace(/^blocked_/, '').replace(/_/g, ' ');
+    return { type: 'pipeline_blocked', message: `quota refresh blocked (${why}) — data may be stale`, priority: 9 };
+  }
+  if (remediation === 'degraded_scheduler') {
+    return {
+      type: 'pipeline_degraded',
+      message: 'quota: scheduler degraded — a background agent is down (claude-configs verify-scheduler)',
+      priority: 4,
+    };
+  }
+  return null;
+}
+
 export class StatuslineFormatter {
   // Max length for single-line mode (no tmux/unknown width)
   private static readonly SINGLE_LINE_MAX_LENGTH = 240;
@@ -797,26 +836,23 @@ export class StatuslineFormatter {
         // active_slot is now rendered inline on Line 1 — remove from notification cycle
         NotificationManager.remove('active_slot');
 
-        // FIX-3b: pipeline_remediation — surface blocked/degraded pipeline state.
-        // ok / refresh_in_progress → no notification; blocked_* / degraded_scheduler → warn.
+        // pipeline_remediation — distinguish a genuinely-blocked refresh (quota data
+        // really can't update → critical) from a degraded scheduler (a background
+        // agent is down, but quota data may still be fresh → quiet, accurate note).
+        // The old code lumped degraded_scheduler in with blocked_* and rendered
+        // "quota pipeline frozen, data may be stale" — which LIED when the cache was
+        // current. ok / refresh_in_progress → no notification. The render cases add
+        // the ⚠ glyph + colour, so the messages here carry NO leading glyph.
         try {
           const quotaData = QuotaBrokerClient.read();
-          const remediation = quotaData?.pipeline_remediation;
-          const BLOCKED_STATES = [
-            'blocked_rate_limited',
-            'blocked_auth_required',
-            'blocked_no_active_slot',
-            'blocked_no_scheduler',
-            'degraded_scheduler',
-          ] as const;
-          if (remediation && BLOCKED_STATES.includes(remediation as any)) {
-            NotificationManager.register(
-              'pipeline_blocked',
-              `⚠ quota:${remediation.replace(/_/g, '-')} — quota pipeline frozen, data may be stale`,
-              9
-            );
+          const notice = pipelineRemediationNotice(quotaData?.pipeline_remediation);
+          if (notice) {
+            NotificationManager.register(notice.type, notice.message, notice.priority);
+            // clear the sibling state so blocked<->degraded transitions don't linger
+            NotificationManager.remove(notice.type === 'pipeline_blocked' ? 'pipeline_degraded' : 'pipeline_blocked');
           } else {
             NotificationManager.remove('pipeline_blocked');
+            NotificationManager.remove('pipeline_degraded');
           }
         } catch {
           // Pipeline check is best-effort; never interrupt the notification cycle
@@ -932,6 +968,12 @@ export class StatuslineFormatter {
 
           case 'pipeline_blocked':
             line = `${c('critical')}⚠ ${notification.message}${rst()}`;
+            break;
+
+          case 'pipeline_degraded':
+            // Soft warn (not critical red): a background agent is down but quota
+            // data may be fresh — informative, not alarming.
+            line = `${c('stale')}⚠ ${notification.message}${rst()}`;
             break;
 
           case 'weekly_quota_waste_certain':
