@@ -282,16 +282,18 @@ describe('SessionLockManager', () => {
 
       const retrieved = SessionLockManager.getOrCreate(
         'test-session-11',
-        'slot-2', // Different slot — should be ignored
+        'slot-2', // Different slot — session resumed under a new CLAUDE_CONFIG_DIR → REBIND (QR-P1)
         '/different/path',
         'Different-service',
         'different@example.com',
         '/different/transcript.jsonl'
       );
 
-      // Should return original, not create new
-      expect(retrieved.slotId).toBe('slot-1');
-      expect(retrieved.configDir).toBe('/home/user/.claude');
+      // Should rebind slot identity to the live detection, preserving session identity
+      expect(retrieved.slotId).toBe('slot-2');
+      expect(retrieved.configDir).toBe('/different/path');
+      expect(retrieved.email).toBe('different@example.com');
+      expect(retrieved.sessionId).toBe('test-session-11');
       expect(retrieved.launchedAt).toBe(created.launchedAt);
     });
 

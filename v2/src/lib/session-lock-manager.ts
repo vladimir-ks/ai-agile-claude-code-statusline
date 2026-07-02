@@ -5,7 +5,8 @@
  * Written: On first invocation (firstSeen not set)
  * Updated: Mutable fields on subsequent invocations
  *
- * Immutable fields: sessionId, launchedAt, slotId, configDir, keychainService, email, transcriptPath
+ * Immutable fields: sessionId, launchedAt
+ * Rebound on resume-in-different-slot: slotId, configDir, keychainService, email, transcriptPath, tmux
  * Mutable fields: claudeVersion (re-pinned on each process start), lastVersionCheck, lastIdleCheck, updatedAt
  */
 
@@ -193,10 +194,28 @@ export class SessionLockManager {
       // Re-pin version: the current process runs the currently-installed binary.
       // Re-pinning an unchanged version is a no-op (no disk write).
       const currentVersion = this.getClaudeVersion();
-      if (currentVersion !== 'unknown' && currentVersion !== existing.claudeVersion) {
+      const repin = currentVersion !== 'unknown' && currentVersion !== existing.claudeVersion;
+
+      // Rebind slot identity: `claude --resume` in a DIFFERENT slot starts a new OS
+      // process with a different CLAUDE_CONFIG_DIR — the caller's detection IS the
+      // live binding, so the lock must follow it (same argument as the version re-pin).
+      // Guard: only when the incoming detection is non-degraded (both slotId and
+      // configDir present) and actually differs. Truly immutable: sessionId, launchedAt.
+      const rebind = Boolean(slotId) && Boolean(configDir) &&
+        (existing.slotId !== slotId || existing.configDir !== configDir);
+
+      if (repin || rebind) {
         const updated: SessionLock = {
           ...existing,
-          claudeVersion: currentVersion,
+          ...(rebind ? {
+            slotId,
+            configDir,
+            keychainService: keychainService || existing.keychainService,
+            email: email || existing.email,
+            transcriptPath: transcriptPath || existing.transcriptPath,
+            ...(tmux ? { tmux } : {})
+          } : {}),
+          ...(repin ? { claudeVersion: currentVersion } : {}),
           updatedAt: Date.now()
         };
         this.write(updated);
