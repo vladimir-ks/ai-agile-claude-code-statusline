@@ -166,12 +166,32 @@ _fallback_render() {
   # Extract active slot data via python3 (available macOS, no jq dependency required)
   local cache_data
   cache_data=$(python3 -c "
-import json,sys,datetime,math
+import json,sys,datetime,math,os
 try:
     d=json.load(open('${cache_file}'))
-    active=d.get('active_slot','slot-1')
     slots=d.get('slots',{})
-    s=slots.get(active,{})
+    active=None
+    s={}
+    # Session-aware resolution FIRST (mirrors data-gatherer.ts W23 fix): this
+    # process's OWN CLAUDE_CONFIG_DIR (set at launch, inherited from the
+    # running Claude session) identifies which slot is actually self. The
+    # cache's top-level 'active_slot' is a GLOBAL last-launched pointer shared
+    # across every concurrently-running session/slot -- using it here rendered
+    # session A's statusline with session B's account the moment B launched
+    # (or re-launched) more recently, even though A never switched slots.
+    my_config_dir=os.environ.get('CLAUDE_CONFIG_DIR','')
+    if my_config_dir:
+        my_config_dir=os.path.realpath(my_config_dir)
+        for k,v in slots.items():
+            cd=v.get('config_dir')
+            if cd and os.path.realpath(cd)==my_config_dir:
+                s=v; active=k; break
+    if not s:
+        # No CLAUDE_CONFIG_DIR match (bare 'claude', legacy cache without
+        # config_dir, or a slot not yet stamped) -- fall back to the prior
+        # global-pointer behavior, unchanged.
+        active=d.get('active_slot','slot-1')
+        s=slots.get(active,{})
     if not s:
         # pick first active
         for k,v in slots.items():
