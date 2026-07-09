@@ -364,7 +364,10 @@ export class StatuslineFormatter {
 
     const elapsed = health.transcript?.lastMessageAgo || '';
     const warmth = health.transcript?.cacheWarmth ?? 'unknown';
-    const warmthGlyph = warmth === 'warm' ? '🔥' : warmth === 'cold' ? '❄️' : '';
+    // Cache-read counter of the last assistant turn (e.g. 🔥35k = 35k tokens served from cache)
+    const cacheRead = health.transcript?.cacheReadTokens ?? 0;
+    const cacheSuffix = cacheRead >= 1000 ? `${Math.round(cacheRead / 1000)}k` : cacheRead > 0 ? `${cacheRead}` : '';
+    const warmthGlyph = warmth === 'warm' ? `🔥${cacheSuffix}` : warmth === 'cold' ? '❄️' : '';
 
     let idlePart: string;
     if (!elapsed || elapsed.match(/^[A-Z][a-z]+ \d/)) {

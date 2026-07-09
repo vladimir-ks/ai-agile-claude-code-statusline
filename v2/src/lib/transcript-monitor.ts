@@ -37,6 +37,8 @@ class TranscriptMonitor {
       lastMessagePreview: '',
       lastMessageAgo: '',
       cacheWarmth: 'unknown',
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
       isSynced: false
     };
 
@@ -68,6 +70,8 @@ class TranscriptMonitor {
         result.lastMessageTime = lastMsg.timestamp;
         result.lastMessagePreview = lastMsg.preview;
         result.lastMessageAgo = lastMsg.timestamp ? this.formatAgo(lastMsg.timestamp) : '';
+        result.cacheReadTokens = lastMsg.cacheReadTokens;
+        result.cacheCreationTokens = lastMsg.cacheCreationTokens;
       } else {
         // Small file: read and parse fully
         const parsed = this.parseTranscript(transcriptPath);
@@ -75,6 +79,8 @@ class TranscriptMonitor {
         result.lastMessageTime = parsed.lastTimestamp;
         result.lastMessagePreview = parsed.lastUserMessagePreview;
         result.lastMessageAgo = parsed.lastTimestamp ? this.formatAgo(parsed.lastTimestamp) : '';
+        result.cacheReadTokens = parsed.cacheReadTokens;
+        result.cacheCreationTokens = parsed.cacheCreationTokens;
       }
 
       // Cache warmth: warm if idle < CACHE_TTL_SECONDS
@@ -117,7 +123,7 @@ class TranscriptMonitor {
       const content = buffer.toString('utf-8');
       return this.extractLastEntry(content);
     } catch {
-      return { timestamp: 0, preview: '' };
+      return { timestamp: 0, preview: '', cacheReadTokens: 0, cacheCreationTokens: 0 };
     }
   }
 
@@ -128,6 +134,8 @@ class TranscriptMonitor {
     messageCount: number;
     lastTimestamp: number;
     lastUserMessagePreview: string;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
   } {
     try {
       const content = readFileSync(path, 'utf-8');
@@ -135,8 +143,10 @@ class TranscriptMonitor {
 
       let lastTimestamp = 0;
       let lastUserMessagePreview = '';
+      let cacheReadTokens = -1;   // -1 = not yet found
+      let cacheCreationTokens = 0;
 
-      // Find last valid timestamp and last user message
+      // Find last valid timestamp, last user message, and last assistant usage
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
           const obj = JSON.parse(lines[i]);
@@ -144,6 +154,12 @@ class TranscriptMonitor {
           // Get timestamp from any message type
           if (obj.timestamp && !lastTimestamp) {
             lastTimestamp = new Date(obj.timestamp).getTime();
+          }
+
+          // Cache tokens from the LAST assistant turn carrying usage
+          if (cacheReadTokens < 0 && obj.type === 'assistant' && obj.message?.usage) {
+            cacheReadTokens = obj.message.usage.cache_read_input_tokens ?? 0;
+            cacheCreationTokens = obj.message.usage.cache_creation_input_tokens ?? 0;
           }
 
           // Get last user message preview (human-readable text only, skip tool_results)
@@ -156,8 +172,8 @@ class TranscriptMonitor {
             // Continue searching if this was a tool_result-only message
           }
 
-          // Once we have both, stop searching
-          if (lastTimestamp && lastUserMessagePreview) {
+          // Once we have all three, stop searching
+          if (lastTimestamp && lastUserMessagePreview && cacheReadTokens >= 0) {
             break;
           }
         } catch {
@@ -168,10 +184,12 @@ class TranscriptMonitor {
       return {
         messageCount: lines.length,
         lastTimestamp,
-        lastUserMessagePreview
+        lastUserMessagePreview,
+        cacheReadTokens: Math.max(0, cacheReadTokens),
+        cacheCreationTokens
       };
     } catch {
-      return { messageCount: 0, lastTimestamp: 0, lastUserMessagePreview: '' };
+      return { messageCount: 0, lastTimestamp: 0, lastUserMessagePreview: '', cacheReadTokens: 0, cacheCreationTokens: 0 };
     }
   }
 
@@ -181,24 +199,32 @@ class TranscriptMonitor {
    * Returns timestamp of the most recent entry regardless of role.
    * preview field kept for backward compat but always empty (no longer rendered).
    */
-  private extractLastEntry(chunk: string): { timestamp: number; preview: string } {
+  private extractLastEntry(chunk: string): { timestamp: number; preview: string; cacheReadTokens: number; cacheCreationTokens: number } {
     const lines = chunk.split('\n').filter(line => line.trim() !== '');
     let timestamp = 0;
+    let cacheReadTokens = -1;   // -1 = not yet found
+    let cacheCreationTokens = 0;
 
-    // Search from end for ANY entry with a timestamp
+    // Search from end for ANY entry with a timestamp + last assistant usage
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
-        if (obj.timestamp) {
+        if (obj.timestamp && !timestamp) {
           timestamp = new Date(obj.timestamp).getTime();
-          break;  // First (most recent) timestamped entry found — stop
+        }
+        if (cacheReadTokens < 0 && obj.type === 'assistant' && obj.message?.usage) {
+          cacheReadTokens = obj.message.usage.cache_read_input_tokens ?? 0;
+          cacheCreationTokens = obj.message.usage.cache_creation_input_tokens ?? 0;
+        }
+        if (timestamp && cacheReadTokens >= 0) {
+          break;
         }
       } catch {
         // Not valid JSON or partial line, continue
       }
     }
 
-    return { timestamp, preview: '' };
+    return { timestamp, preview: '', cacheReadTokens: Math.max(0, cacheReadTokens), cacheCreationTokens };
   }
 
   /**

@@ -18,6 +18,8 @@ export interface TranscriptHealth {
   lastMessagePreview: string;  // Kept for backward-compat; no longer rendered in statusline
   lastMessageAgo: string;      // "2m", "1h", etc. since last transcript entry (any role)
   cacheWarmth: 'warm' | 'cold' | 'unknown';  // Anthropic prompt-cache warmth (CACHE_TTL_SECONDS threshold)
+  cacheReadTokens: number;     // cache_read_input_tokens of the LAST assistant turn (0 = miss/unknown)
+  cacheCreationTokens: number; // cache_creation_input_tokens of the LAST assistant turn
   isSynced: boolean;           // mtime < 60s = synced
 }
 

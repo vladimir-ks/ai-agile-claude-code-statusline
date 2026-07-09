@@ -56,6 +56,8 @@ interface SessionHealth {
     lastMessagePreview?: string; // Kept for backward-compat; no longer rendered
     lastMessageAgo?: string;
     cacheWarmth?: 'warm' | 'cold' | 'unknown';  // Anthropic prompt-cache warmth
+    cacheReadTokens?: number;    // cache_read_input_tokens of the last assistant turn
+    cacheCreationTokens?: number;
   };
   model: { value: string };
   context: { tokensLeft: number; percentUsed: number; tokensUsed?: number; windowSize?: number };
@@ -429,7 +431,10 @@ function fmtLastMessage(h: SessionHealth): string {
   if (!lastTime) return '';
   const elapsed = h.transcript?.lastMessageAgo || '';
   const warmth = h.transcript?.cacheWarmth;
-  const warmthGlyph = warmth === 'warm' ? '🔥' : warmth === 'cold' ? '❄️' : '';
+  // Cache-read counter of the last assistant turn (e.g. 🔥35k = 35k tokens served from cache)
+  const cacheRead = h.transcript?.cacheReadTokens ?? 0;
+  const cacheSuffix = cacheRead >= 1000 ? `${Math.round(cacheRead / 1000)}k` : cacheRead > 0 ? `${cacheRead}` : '';
+  const warmthGlyph = warmth === 'warm' ? `🔥${cacheSuffix}` : warmth === 'cold' ? '❄️' : '';
 
   // >= 24h: elapsed is a date string like "May 19 14:30" → render without clock dupe
   if (!elapsed || elapsed.match(/^[A-Z][a-z]+ \d/)) {
