@@ -57,7 +57,7 @@ V2 uses a **decoupled architecture** for reliability:
 | 📁 | ~/project | Current directory |
 | 🌿 | main+12*3 | Git branch, ahead, dirty files |
 | 🤖 | Opus4.5 | Active model (no spaces) |
-| 🧠 | 154kleft | Tokens until auto-compact |
+| 🧠 | 154kleft | Context window remaining (native % — see v2/docs/DATA-TRUTH.md) |
 | [---\|--] | Progress bar | Context usage (\| at 78% threshold) |
 | 🕐 | 12:06 | Current time |
 | ⌛ | 1h53m(62%)14:00 | Budget remaining, %, reset time |
