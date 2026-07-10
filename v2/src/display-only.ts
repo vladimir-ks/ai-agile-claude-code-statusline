@@ -62,8 +62,9 @@ interface SessionHealth {
   model: { value: string };
   context: { tokensLeft: number; percentUsed: number; tokensUsed?: number; windowSize?: number };
   git: { branch: string; ahead: number; behind: number; dirty: number };
-  billing: { costToday: number; burnRatePerHour: number; budgetRemaining: number; budgetPercentUsed: number; resetTime: string; totalTokens?: number; tokensPerMinute?: number | null; isFresh: boolean; lastFetched?: number };
+  billing: { costToday: number; burnRatePerHour: number; budgetRemaining: number; budgetPercentUsed: number; resetTime: string; totalTokens?: number; tokensPerMinute?: number | null; isFresh: boolean; lastFetched?: number; weeklyBudgetRemaining?: number; weeklyBudgetPercentUsed?: number; weeklyResetDay?: string };
   alerts: { secretsDetected: boolean; secretTypes: string[]; transcriptStale: boolean; dataLossRisk: boolean };
+  transcriptPath?: string;
 }
 
 interface ComponentsConfig {
@@ -124,6 +125,7 @@ const COLORS = {
   time: '\x1b[38;5;249m',         // light gray
   transcript: '\x1b[38;5;156m',   // light green
   budget: '\x1b[38;5;189m',       // lavender
+  weeklyBudget: '',               // no color assigned — preserves prior uncolored fallback
   cost: '\x1b[38;5;222m',         // light gold
   burnRate: '\x1b[38;5;220m',     // bright gold
   usage: '\x1b[38;5;222m',        // light gold (same as cost)

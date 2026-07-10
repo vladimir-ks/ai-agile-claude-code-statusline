@@ -15,7 +15,7 @@
 import { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import type { SessionHealth } from '../types/session-health';
 
 // Structured logging for observability
@@ -38,7 +38,7 @@ function logError(message: string, context: LogContext): void {
     message,
     ...(operation && { operation }),
     ...(sessionId && { sessionId }),
-    ...(error && { error: error instanceof Error ? error.message : String(error) }),
+    ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
     ...(metadata && { metadata }),
   };
 
@@ -96,7 +96,11 @@ export interface TelemetryEntry {
 
 export class TelemetryDatabase {
   private static instance: Database | null = null;
-  private static readonly DB_PATH = join(homedir(), '.claude/session-health/telemetry.db');
+  // Env override (TELEMETRY_DB_PATH) exists for test isolation — unset in
+  // production, where the live path is used unchanged.
+  private static get DB_PATH(): string {
+    return process.env.TELEMETRY_DB_PATH || join(homedir(), '.claude/session-health/telemetry.db');
+  }
   private static readonly RETENTION_DAYS = 30;
   private static readonly SCHEMA_VERSION = 1;
 
@@ -109,7 +113,7 @@ export class TelemetryDatabase {
     }
 
     // Ensure directory exists
-    const dir = join(homedir(), '.claude/session-health');
+    const dir = dirname(this.DB_PATH);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
@@ -321,7 +325,11 @@ export class TelemetryDatabase {
       billingStale: !health.billing.isFresh,
 
       // Metadata
-      version: health.status.claudeVersion || 'unknown',
+      // LIVE-CONTRACT: `health.status` never existed on SessionHealth — this read
+      // throws, and the caller's catch (data-gatherer step 11d2) silently skips
+      // recording. Kept as-is via cast: "fixing" it to health.cliVersion would
+      // activate live telemetry.db writes from every running statusline session.
+      version: (health as unknown as { status: { claudeVersion?: string } }).status.claudeVersion || 'unknown',
       slotId,
     };
 

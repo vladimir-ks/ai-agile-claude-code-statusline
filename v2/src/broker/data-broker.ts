@@ -10,6 +10,9 @@ import { EventEmitter } from 'events';
 interface DataModuleConfig {
   timeout: number;
   cacheTTL: number;
+  id?: string;       // Module identifier passed by consumers (data-gatherer, sources)
+  name?: string;     // Human-readable module name
+  enabled?: boolean; // Whether the module is active
 }
 
 interface DataModule<T> {
@@ -18,8 +21,9 @@ interface DataModule<T> {
   fetch(sessionId: string): Promise<T>;
   validate(data: T): {
     valid: boolean;
-    warnings: string[];
-    errors: string[];
+    confidence?: number;   // 0-100 (modules return ValidationResult which includes this)
+    warnings?: string[];
+    errors?: string[];
     sanitized?: T;
   };
 }
@@ -137,10 +141,10 @@ class DataBroker extends EventEmitter {
       if (!validation.valid) {
         this.emit('validation:failed', { moduleId, sessionId, errors: validation.errors });
         if (validation.sanitized) return validation.sanitized;
-        throw new Error('Validation failed: ' + validation.errors.join(', '));
+        throw new Error('Validation failed: ' + (validation.errors || []).join(', '));
       }
 
-      if (validation.warnings.length > 0) {
+      if ((validation.warnings || []).length > 0) {
         this.emit('validation:warnings', { moduleId, sessionId, warnings: validation.warnings });
       }
 
@@ -291,4 +295,4 @@ class DataBroker extends EventEmitter {
 }
 
 export default DataBroker;
-export { DataModule, DataModuleConfig, CacheEntry, SessionMeta, BrokerConfig };
+export type { DataModule, DataModuleConfig, CacheEntry, SessionMeta, BrokerConfig };

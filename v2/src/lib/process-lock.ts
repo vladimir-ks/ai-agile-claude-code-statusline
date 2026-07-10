@@ -20,7 +20,7 @@ interface LockOptions {
 interface LockResult {
   acquired: boolean;
   reason?: string;
-  lockHolder?: number;  // PID of process holding lock
+  lockHolder?: number | null;  // PID of process holding lock (null = unreadable lock file)
 }
 
 class ProcessLock {
@@ -201,4 +201,4 @@ class ProcessLock {
 }
 
 export default ProcessLock;
-export { LockOptions, LockResult };
+export type { LockOptions, LockResult };

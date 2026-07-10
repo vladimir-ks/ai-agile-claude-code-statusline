@@ -101,4 +101,5 @@ class ValidationLogger {
 const logger = new ValidationLogger();
 
 export default logger;
-export { ValidationLogger, ValidationEntry, SourceData };
+export { ValidationLogger };
+export type { ValidationEntry, SourceData };

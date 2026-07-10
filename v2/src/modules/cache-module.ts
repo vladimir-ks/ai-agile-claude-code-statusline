@@ -99,4 +99,4 @@ class CacheModule implements DataModule<CacheData> {
 }
 
 export default CacheModule;
-export { CacheData };
+export type { CacheData };

@@ -29,7 +29,6 @@ const COLORS = {
   budget: '\x1b[38;5;189m',
   weeklyBudget: '\x1b[38;5;183m',
   resetTime: '\x1b[38;5;249m',
-  cost: '\x1b[38;5;228m',
   burnRate: '\x1b[38;5;245m',       // neutral mid-gray (was orange — too loud for passive cost info)
   usage: '\x1b[38;5;117m',
   cache: '\x1b[38;5;120m',
@@ -51,6 +50,7 @@ const COLORS = {
   pacingBlue:   '\x1b[38;5;33m',   // bright blue   — much too fast
   pacingViolet: '\x1b[38;5;201m',  // bright violet — way too fast
   neutralLight: '\x1b[38;5;245m', // muted grey — low-confidence / stale
+  stale: '\x1b[38;5;208m',        // orange — stale/degraded markers (matches display-only palette)
   bold: '\x1b[1m',
   reset: '\x1b[0m'
 };
@@ -1043,11 +1043,12 @@ export class StatuslineFormatter {
     // slot reactivation before the next API fetch lands data) from "valid 0%
     // utilization with known reset". Rendering `(0%)` for both was misleading
     // the user. (W23 pipeline bug.)
-    const hasReset = typeof slot.five_hour_resets_at === 'string' && slot.five_hour_resets_at.trim() !== '';
+    const resetsAt = slot.five_hour_resets_at;
+    const hasReset = typeof resetsAt === 'string' && resetsAt.trim() !== '';
     let text: string;
 
     if (hasReset) {
-      const resetMs = new Date(slot.five_hour_resets_at).getTime();
+      const resetMs = new Date(resetsAt as string).getTime();
       if (!isNaN(resetMs)) {
         const diffSec = Math.max(0, Math.floor((resetMs - Date.now()) / 1000));
         if (diffSec <= 0) { text = `reset(${pct}%)`; }

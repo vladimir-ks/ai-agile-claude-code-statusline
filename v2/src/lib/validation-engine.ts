@@ -159,6 +159,7 @@ class ValidationEngine extends EventEmitter {
       // Calculate metadata
       const latency = performance.now() - startTime;
       result.metadata = {
+        sourceAgreement: result.metadata?.sourceAgreement ?? 0,
         ...result.metadata,
         validationLatency: latency,
         sourcesChecked: secondary.length + 1,

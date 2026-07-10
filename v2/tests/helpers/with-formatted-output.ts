@@ -6,6 +6,7 @@
  */
 
 import { StatuslineFormatter } from '../../src/lib/statusline-formatter';
+import type { SessionHealth } from '../../src/types/session-health';
 
 /**
  * Add formattedOutput to SessionHealth object
@@ -20,7 +21,7 @@ export function withFormattedOutput(health: any): any {
 
   try {
   // Ensure health has all required fields (fill with defaults if missing, merge with provided)
-  const complete = {
+  const complete: SessionHealth = {
     sessionId: health.sessionId || 'test',
     projectPath: health.projectPath || '',
     transcriptPath: health.transcriptPath || '',
@@ -35,6 +36,9 @@ export function withFormattedOutput(health: any): any {
       lastMessageTime: 0,
       lastMessagePreview: '',
       lastMessageAgo: '',
+      cacheWarmth: 'unknown',
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
       isSynced: false,
       ...health.transcript
     },

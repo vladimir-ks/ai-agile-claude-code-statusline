@@ -88,7 +88,7 @@ describe('UnifiedDataBroker', () => {
         null,
       );
       expect(health.sessionId).toBe('test-session');
-    });
+    }, 30_000); // full source pipeline (git/billing tiers) — 5s default too tight under suite load
 
     test('returns health with gatheredAt timestamp', async () => {
       const before = Date.now();

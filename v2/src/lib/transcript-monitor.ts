@@ -110,7 +110,7 @@ class TranscriptMonitor {
    * (Large size needed for sessions with heavy tool activity)
    * Uses seeked read to avoid loading entire file into memory.
    */
-  private getLastEntryFromTail(path: string): { timestamp: number; preview: string } {
+  private getLastEntryFromTail(path: string): { timestamp: number; preview: string; cacheReadTokens: number; cacheCreationTokens: number } {
     try {
       const fd = openSync(path, 'r');
       const stats = fstatSync(fd);

@@ -126,7 +126,7 @@ class ContextModule implements DataModule<ContextData> {
       }
 
       // Validate token counts are non-negative
-      const fields = ['currentInputTokens', 'currentOutputTokens', 'cacheReadTokens', 'cacheCreationTokens'];
+      const fields = ['currentInputTokens', 'currentOutputTokens', 'cacheReadTokens', 'cacheCreationTokens'] as const;
       for (const field of fields) {
         if (typeof data[field] !== 'number' || data[field] < 0 || !isFinite(data[field])) {
           errors.push(`${field} must be non-negative number`);
@@ -255,4 +255,4 @@ class ContextModule implements DataModule<ContextData> {
 }
 
 export default ContextModule;
-export { ContextData };
+export type { ContextData };

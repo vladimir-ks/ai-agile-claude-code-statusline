@@ -124,4 +124,4 @@ class UsageModule implements DataModule<UsageData> {
 }
 
 export default UsageModule;
-export { UsageData };
+export type { UsageData };

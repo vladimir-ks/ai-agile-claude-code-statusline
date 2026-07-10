@@ -79,4 +79,4 @@ class VersionModule implements DataModule<VersionData> {
 }
 
 export default VersionModule;
-export { VersionData };
+export type { VersionData };

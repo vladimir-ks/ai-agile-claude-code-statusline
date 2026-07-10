@@ -48,6 +48,7 @@ export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
  * Complete scan result (returned by UnifiedTranscriptScanner.scan())
  */
 export interface ScanResult {
+  sessionId: string;
   lastMessage: MessageInfo;
   secrets: Secret[];
   commands: Command[];
@@ -99,22 +100,21 @@ export interface AuthChange {
  * Transcript health metrics
  */
 export interface TranscriptHealth {
-  exists: boolean;
-  lastModified: number;                  // File mtime (ms)
-  sizeBytes: number;
-  messageCount: number;                  // From extractors
-  lastModifiedAgo: string;               // Human-readable ("5m", "2h")
+  hasSecrets: boolean;                   // Any secrets detected in transcript
+  hasAuthChanges: boolean;               // Any auth changes detected
+  messageCount: number;                  // Turn number of last message
+  commandCount: number;                  // Commands detected
+  lastActivityTimestamp: number;         // Timestamp of last message (ms)
 }
 
 /**
  * Scan performance metrics
  */
 export interface ScanMetrics {
-  scanDuration: number;                  // Total ms
-  linesScanned: number;                  // Lines processed
-  bytesRead: number;                     // Bytes read from disk
+  scanTimeMs: number;                    // Total ms
+  linesProcessed: number;                // Lines processed
+  bytesProcessed: number;                // Bytes read from disk
   cacheHit: boolean;                     // Was result cached?
-  extractorDurations: Record<string, number>; // Per-extractor timing
 }
 
 // ============================================================================

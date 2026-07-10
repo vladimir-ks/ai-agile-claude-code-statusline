@@ -35,9 +35,9 @@ function logError(message: string, context: LogContext): void {
     level: 'ERROR',
     ...context,
     message,
-    ...(context.error && {
-      error: context.error instanceof Error ? context.error.message : String(context.error),
-    }),
+    ...(context.error
+      ? { error: context.error instanceof Error ? context.error.message : String(context.error) }
+      : {}),
   };
   console.error(JSON.stringify(logEntry));
 }

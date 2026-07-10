@@ -89,7 +89,7 @@ export interface HealthStatus {
 
 export interface LaunchContext {
   authProfile: string;         // Auth profile ID (from env var, path mapping, or fingerprint)
-  detectionMethod: 'env' | 'path' | 'fingerprint' | 'default';
+  detectionMethod: string;     // 'env' | 'path' | 'fingerprint' | 'default' | 'keychain_identity' | 'claude_json_fallback' | 'api_fingerprint'
   launchAlias?: string;        // Original alias used (claude1, claude2, etc.)
   shellCommand?: string;       // Full command if detectable
   configDir?: string;          // Derived CLAUDE_CONFIG_DIR from transcript path
@@ -424,8 +424,15 @@ export interface ClaudeCodeInput {
     // Total tokens (cumulative, for reference)
     total_input_tokens?: number;
     total_output_tokens?: number;
+    // Flat legacy variants (older Claude Code builds) — read by statusline-thin
+    current_input_tokens?: number;
+    current_output_tokens?: number;
+    cache_read_input_tokens?: number;
   };
   start_directory?: string;
+  // Session activity fields (read by unified-data-broker for active-session detection)
+  turns_count?: number;
+  trajectory?: unknown[];
 }
 
 // ============================================================================
@@ -456,6 +463,8 @@ export function createDefaultHealth(sessionId: string): SessionHealth {
       lastMessagePreview: '',
       lastMessageAgo: '',
       cacheWarmth: 'unknown',
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
       isSynced: false
     },
     model: {

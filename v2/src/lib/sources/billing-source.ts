@@ -183,7 +183,7 @@ export const billingSource: DataSourceDescriptor<BillingSourceData> = {
     }
 
     // Final fallback: stale existing health
-    if (ctx.existingHealth?.billing?.costToday > 0) {
+    if (ctx.existingHealth?.billing && (ctx.existingHealth.billing.costToday ?? 0) > 0) {
       return {
         billing: { ...ctx.existingHealth.billing, isFresh: false },
         source: 'stale',

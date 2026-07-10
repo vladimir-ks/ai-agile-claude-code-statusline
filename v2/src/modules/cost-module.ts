@@ -268,4 +268,4 @@ class CostModule implements DataModule<CostData> {
 }
 
 export default CostModule;
-export { CostData };
+export type { CostData };

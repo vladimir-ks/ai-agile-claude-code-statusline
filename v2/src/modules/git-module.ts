@@ -143,4 +143,4 @@ class GitModule implements DataModule<GitData> {
 }
 
 export default GitModule;
-export { GitData };
+export type { GitData };

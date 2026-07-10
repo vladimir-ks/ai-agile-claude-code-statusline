@@ -97,7 +97,7 @@ class RuntimeStateStore {
     const yamlContent = YAML.stringify(stateWithoutQuickLookup, {
       indent: 2,
       lineWidth: 120,
-      sortKeys: false,  // Preserve order
+      // Insertion order is preserved by default (yaml lib has no `sortKeys` option)
       nullStr: 'null'
     });
 

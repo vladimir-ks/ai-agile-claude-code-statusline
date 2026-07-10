@@ -54,4 +54,4 @@ class TimeModule implements DataModule<TimeData> {
 }
 
 export default TimeModule;
-export { TimeData };
+export type { TimeData };

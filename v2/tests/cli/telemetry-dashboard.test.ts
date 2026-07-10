@@ -9,14 +9,19 @@ import { TelemetryDatabase } from '../../src/lib/telemetry-database';
 import type { TelemetryEntry } from '../../src/lib/telemetry-database';
 import { unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
 
 describe('TelemetryDashboard CLI', () => {
-  const dbPath = join(homedir(), '.claude/session-health/telemetry.db');
+  // Isolated DB path (TELEMETRY_DB_PATH override) — the live path is shared with
+  // other test files and the running statusline, which polluted aggregates.
+  const dbPath = join(tmpdir(), `telemetry-test-${process.pid}-dash.db`);
+  let savedDbPathEnv: string | undefined;
 
   beforeEach(() => {
     // Close and remove database
     TelemetryDatabase.close();
+    savedDbPathEnv = process.env.TELEMETRY_DB_PATH;
+    process.env.TELEMETRY_DB_PATH = dbPath;
 
     try {
       if (existsSync(dbPath)) unlinkSync(dbPath);
@@ -53,6 +58,9 @@ describe('TelemetryDashboard CLI', () => {
 
   afterEach(() => {
     TelemetryDatabase.close();
+    try { if (existsSync(dbPath)) unlinkSync(dbPath); } catch { /* ignore */ }
+    if (savedDbPathEnv !== undefined) process.env.TELEMETRY_DB_PATH = savedDbPathEnv;
+    else delete process.env.TELEMETRY_DB_PATH;
   });
 
   test('getSessionStats returns correct aggregates', () => {

@@ -279,7 +279,7 @@ export class AnthropicOAuthAPI {
         this.clearRateLimitBackoff(slotId);
       }
 
-      const data: AnthropicOAuthUsageResponse = await response.json();
+      const data = await response.json() as AnthropicOAuthUsageResponse;
 
       // Convert to BillingInfo format
       return this.convertToBillingInfo(data);
@@ -634,7 +634,14 @@ export class AnthropicOAuthAPI {
         return null;
       }
 
-      const data = await response.json();
+      const data = await response.json() as {
+        access_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+        scopes?: string[];
+        subscription_type?: string;
+        rate_limit_tier?: string;
+      };
 
       if (!data.access_token) {
         console.error('[AnthropicOAuthAPI] No access_token in refresh response');

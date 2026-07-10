@@ -28,6 +28,8 @@ interface LastMessageData {
   elapsed: string;
   /** 'warm' = cache likely still hot; 'cold' = cache evicted */
   cacheWarmth: 'warm' | 'cold' | 'unknown';
+  /** cache_read_input_tokens of the last assistant turn (parity with formatter/display paths) */
+  cacheReadTokens: number;
   color: string;
 }
 
@@ -57,18 +59,26 @@ class LastMessageModule implements DataModule<LastMessageData> {
       const last50 = lines.slice(-50);
 
       // Find last timestamped entry of any role (user, assistant, tool_result, …)
+      // and the last assistant usage (cache-read counter — parity with other render paths)
       let lastEntry: any = null;
+      let cacheReadTokens = -1;  // -1 = not yet found
       for (let i = last50.length - 1; i >= 0; i--) {
         try {
           const parsed = JSON.parse(last50[i]);
-          if (parsed.timestamp) {
+          if (!lastEntry && parsed.timestamp) {
             lastEntry = parsed;
+          }
+          if (cacheReadTokens < 0 && parsed.type === 'assistant' && parsed.message?.usage) {
+            cacheReadTokens = parsed.message.usage.cache_read_input_tokens ?? 0;
+          }
+          if (lastEntry && cacheReadTokens >= 0) {
             break;
           }
         } catch {
           continue;
         }
       }
+      const cacheRead = Math.max(0, cacheReadTokens);
 
       if (!lastEntry) {
         return this.getDefaultData();
@@ -121,6 +131,7 @@ class LastMessageModule implements DataModule<LastMessageData> {
         displayTime,
         elapsed,
         cacheWarmth,
+        cacheReadTokens: cacheRead,
         color
       };
     } catch (error) {
@@ -134,6 +145,7 @@ class LastMessageModule implements DataModule<LastMessageData> {
       displayTime: '',
       elapsed: '',
       cacheWarmth: 'unknown',
+      cacheReadTokens: 0,
       color: '245'
     };
   }
@@ -152,7 +164,10 @@ class LastMessageModule implements DataModule<LastMessageData> {
       return '';  // Don't show if no timestamp available
     }
 
-    const warmthGlyph = data.cacheWarmth === 'warm' ? '🔥' : data.cacheWarmth === 'cold' ? '❄️' : '';
+    // Cache-read counter on the warm glyph (e.g. 🔥35k) — identical to formatter/display paths
+    const cacheRead = data.cacheReadTokens ?? 0;
+    const cacheSuffix = cacheRead >= 1000 ? `${Math.round(cacheRead / 1000)}k` : cacheRead > 0 ? `${cacheRead}` : '';
+    const warmthGlyph = data.cacheWarmth === 'warm' ? `🔥${cacheSuffix}` : data.cacheWarmth === 'cold' ? '❄️' : '';
 
     // >= 24h: render "Mon DD HH:MM ❄️Xh" (date replaces elapsed)
     if (data.timestamp && data.elapsed === '') {
@@ -165,4 +180,4 @@ class LastMessageModule implements DataModule<LastMessageData> {
 }
 
 export default LastMessageModule;
-export { LastMessageData };
+export type { LastMessageData };

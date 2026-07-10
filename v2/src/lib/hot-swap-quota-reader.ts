@@ -122,7 +122,14 @@ export class HotSwapQuotaReader {
       }
 
       const content = readFileSync(this.CACHE_PATH, 'utf-8');
-      cachedData = JSON.parse(content);
+      const parsed = JSON.parse(content);
+      // Strip non-slot metadata keys (e.g. top-level schema_version written by
+      // fetch-quotas.sh) so every entry honors the HotSwapSlotData contract —
+      // iterators downstream (getSlotByEmail, getFreshestSlot, ...) assume it.
+      cachedData = {};
+      for (const [key, value] of Object.entries(parsed || {})) {
+        if (key.startsWith('slot-')) cachedData[key] = value as HotSwapSlotData;
+      }
       cacheTimestamp = now;
 
       return cachedData;

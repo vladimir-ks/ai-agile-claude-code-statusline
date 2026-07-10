@@ -310,7 +310,10 @@ export class UnifiedDataBroker {
       health.alerts.transcriptStale && this.isSessionActive(jsonInput);
 
     // 8. Calculate overall health status
-    health.health = this.calculateOverallHealth(health, config);
+    // LIVE-CONTRACT: production health files carry a bare status string in `health`
+    // (verified in ~/.claude/session-health/*.json; Observatory consumes that shape).
+    // Cast preserves the wire format instead of "fixing" it to a HealthStatus object.
+    health.health = this.calculateOverallHealth(health, config) as unknown as SessionHealth['health'];
 
     // 9. Add project metadata
     health.project = {

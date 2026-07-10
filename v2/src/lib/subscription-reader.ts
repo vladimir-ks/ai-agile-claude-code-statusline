@@ -179,9 +179,10 @@ export class SubscriptionReader {
     try {
       const { statSync } = require('fs');
       const stats = statSync(this.CONFIG_PATH);
-      lastModified = stats.mtimeMs;
+      const mtimeMs: number = stats.mtimeMs;
+      lastModified = mtimeMs;
       // Consider stale if >4 hours old (user should update every few hours)
-      isStale = (Date.now() - lastModified) > 4 * 60 * 60 * 1000;
+      isStale = (Date.now() - mtimeMs) > 4 * 60 * 60 * 1000;
     } catch {
       isStale = true; // File doesn't exist or can't be read
     }

@@ -92,4 +92,4 @@ class StatuslineRenderer {
 }
 
 export default StatuslineRenderer;
-export { RendererOptions, StatuslineComponents };
+export type { RendererOptions, StatuslineComponents };

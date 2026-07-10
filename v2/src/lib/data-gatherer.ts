@@ -173,7 +173,8 @@ class DataGatherer {
     // 11e. Create or update session lock file (non-critical — Phase 1)
     try {
       // Match slot by configDir path OR by auth profile email
-      let matchedSlot = configDir ? HotSwapQuotaReader.getSlotByConfigDir(configDir) : null;
+      let matchedSlot: { slotId: string; email: string; configDir?: string } | null =
+        configDir ? HotSwapQuotaReader.getSlotByConfigDir(configDir) : null;
 
       // Fallback: match by auth email (for default ~/.claude sessions)
       if (!matchedSlot && health.launch?.authProfile && health.launch.authProfile !== 'default') {

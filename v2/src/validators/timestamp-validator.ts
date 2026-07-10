@@ -129,7 +129,7 @@ class TimestampValidator implements Validator<TimestampData> {
   } {
     // Determine which timestamp to compare
     let compareTime: number | undefined;
-    let compareLabel: string;
+    let compareLabel = '';
 
     if (data.fileTime) {
       compareTime = data.fileTime;
@@ -236,7 +236,7 @@ class TimestampValidator implements Validator<TimestampData> {
    */
   validateTimezone(
     primary: TimestampData,
-    secondary: TimestampData[]
+    secondary: DataPoint<TimestampData>[]
   ): {
     consistent: boolean;
     timezones: string[];

@@ -128,4 +128,4 @@ class BudgetModule implements DataModule<BudgetData> {
 }
 
 export default BudgetModule;
-export { BudgetData };
+export type { BudgetData };

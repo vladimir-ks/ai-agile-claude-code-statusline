@@ -9,9 +9,19 @@
 import type { DataSourceDescriptor, GatherContext } from './types';
 import type { SessionHealth, TranscriptHealth } from '../../types/session-health';
 import { UnifiedTranscriptScanner } from '../transcript-scanner/unified-transcript-scanner';
+import TranscriptMonitor from '../transcript-monitor';
 import { existsSync, statSync } from 'fs';
 
 const scanner = new UnifiedTranscriptScanner();
+// The unified scanner does not extract assistant usage; TranscriptMonitor owns the
+// cache-warmth + cache-token extraction (tail read). Used for those fields only.
+const monitor = new TranscriptMonitor();
+
+const EMPTY_CACHE_FIELDS = {
+  cacheWarmth: 'unknown' as const,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+};
 
 /**
  * Convert UnifiedTranscriptScanner.scan() result to TranscriptHealth format
@@ -44,8 +54,12 @@ function convertScanResultToTranscriptHealth(
       lastMessagePreview: '',
       lastMessageAgo: '',
       isSynced: false,
+      ...EMPTY_CACHE_FIELDS,
     };
   }
+
+  // Cache warmth + cache-read/creation tokens (parity with all render paths)
+  const cacheHealth = monitor.checkHealth(transcriptPath);
 
   // Calculate lastMessageAgo
   const lastMessageAgo = lastMessage.timestamp > 0
@@ -71,6 +85,9 @@ function convertScanResultToTranscriptHealth(
     lastMessagePreview: lastMessage.preview,
     lastMessageAgo,
     isSynced,
+    cacheWarmth: cacheHealth.cacheWarmth,
+    cacheReadTokens: cacheHealth.cacheReadTokens,
+    cacheCreationTokens: cacheHealth.cacheCreationTokens,
   };
 }
 
@@ -115,6 +132,7 @@ export const transcriptSource: DataSourceDescriptor<TranscriptHealth> = {
         lastMessagePreview: '',
         lastMessageAgo: '',
         isSynced: false,
+        ...EMPTY_CACHE_FIELDS,
       };
     }
 
@@ -130,6 +148,7 @@ export const transcriptSource: DataSourceDescriptor<TranscriptHealth> = {
         lastMessagePreview: '',
         lastMessageAgo: '',
         isSynced: false,
+        ...EMPTY_CACHE_FIELDS,
       };
     }
 

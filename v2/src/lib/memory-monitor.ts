@@ -655,4 +655,4 @@ class MemoryMonitor extends EventEmitter {
 }
 
 export default MemoryMonitor;
-export { MemoryStats, SessionMemory, MemoryBudget, MemoryAlert };
+export type { MemoryStats, SessionMemory, MemoryBudget, MemoryAlert };

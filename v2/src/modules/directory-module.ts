@@ -117,4 +117,4 @@ class DirectoryModule implements DataModule<DirectoryData> {
 }
 
 export default DirectoryModule;
-export { DirectoryData };
+export type { DirectoryData };

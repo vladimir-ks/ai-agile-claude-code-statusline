@@ -58,4 +58,4 @@ class ModelModule implements DataModule<ModelData> {
 }
 
 export default ModelModule;
-export { ModelData };
+export type { ModelData };

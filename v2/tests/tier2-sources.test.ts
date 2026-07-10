@@ -154,11 +154,19 @@ describe('authSource', () => {
 
   describe('fetch with no transcript', () => {
     test('returns default detection', async () => {
-      const result = await authSource.fetch(makeCtx({ transcriptPath: null }));
-      expect(result).toHaveProperty('authProfile');
-      expect(result).toHaveProperty('detectionMethod');
-      expect(result.configDir).toBeNull();
-      expect(result.keychainService).toBeNull();
+      // CLAUDE_CONFIG_DIR is the runtime authority for configDir detection —
+      // clear it so the live session's env doesn't leak into the assertion.
+      const savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+      delete process.env.CLAUDE_CONFIG_DIR;
+      try {
+        const result = await authSource.fetch(makeCtx({ transcriptPath: null }));
+        expect(result).toHaveProperty('authProfile');
+        expect(result).toHaveProperty('detectionMethod');
+        expect(result.configDir).toBeNull();
+        expect(result.keychainService).toBeNull();
+      } finally {
+        if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+      }
     });
   });
 

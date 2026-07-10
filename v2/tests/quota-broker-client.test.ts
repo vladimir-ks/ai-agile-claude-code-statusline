@@ -533,7 +533,7 @@ describe('QuotaBrokerClient', () => {
       expect(result!.slots['slot-1'].is_fresh).toBe(true);
     });
 
-    test('T12e: missing five_hour_resets_at → no boundary crossing (preserves is_fresh)', () => {
+    test('T12e: missing five_hour_resets_at on active fetched slot → boundary-stale (W23: F-W23-9 uninitialized window)', () => {
       const data = makeCache({
         slots: {
           'slot-1': makeSlot({
@@ -548,7 +548,9 @@ describe('QuotaBrokerClient', () => {
 
       const result = QuotaBrokerClient.read();
       expect(result).not.toBeNull();
-      expect(result!.slots['slot-1'].is_fresh).toBe(true);
+      // Empty resets_at on an active previously-fetched slot = uninitialized
+      // window (post-reactivation) → boundary-stale so a fresh fetch is scheduled.
+      expect(result!.slots['slot-1'].is_fresh).toBe(false);
     });
 
     test('T12f: ms-epoch last_fetched (>1e12) handled correctly across boundary', () => {
@@ -571,7 +573,7 @@ describe('QuotaBrokerClient', () => {
       expect(result!.slots['slot-1'].is_fresh).toBe(false);
     });
 
-    test('T12g: invalid ISO in five_hour_resets_at → ignored, no false-positive', () => {
+    test('T12g: invalid ISO in five_hour_resets_at on active fetched slot → boundary-stale (unanchorable window)', () => {
       const data = makeCache({
         slots: {
           'slot-1': makeSlot({
@@ -586,7 +588,9 @@ describe('QuotaBrokerClient', () => {
 
       const result = QuotaBrokerClient.read();
       expect(result).not.toBeNull();
-      expect(result!.slots['slot-1'].is_fresh).toBe(true);
+      // Unparseable resets_at is treated like a missing one: window can't be
+      // anchored → boundary-stale, force a refresh (resetBoundaryPassed doc).
+      expect(result!.slots['slot-1'].is_fresh).toBe(false);
     });
   });
 

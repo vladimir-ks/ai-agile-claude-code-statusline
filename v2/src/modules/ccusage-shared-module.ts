@@ -97,7 +97,7 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
     // STEP 1: Check shared cache via FreshnessManager (replaces manual CACHE_FRESH_MS check)
     const cache = this.readSharedCache();
     const cacheAgeMs = FreshnessManager.getAge(cache?.lastFetched);
-    const cacheIsFresh = FreshnessManager.isFresh(cache?.lastFetched, 'billing_ccusage') && cache?.costToday >= 0;
+    const cacheIsFresh = FreshnessManager.isFresh(cache?.lastFetched, 'billing_ccusage') && (cache?.costToday ?? -1) >= 0;
 
     if (cacheIsFresh) {
       // Cache is fresh - return it without fetching
@@ -422,4 +422,4 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
 }
 
 export default CCUsageSharedModule;
-export { CCUsageData };
+export type { CCUsageData };

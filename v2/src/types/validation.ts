@@ -31,11 +31,11 @@ export interface DataSource<T> {
 export interface ValidationResult {
   valid: boolean;
   confidence: number;      // 0-100
-  warnings: string[];
-  errors: string[];
-  recommendedSource: string;
+  warnings?: string[];
+  errors?: string[];
+  recommendedSource?: string;
   showStaleIndicator?: boolean;  // Show 🔴 in UI
-  metadata: {
+  metadata?: {
     sourceAgreement: number;     // % of sources that agree (0-100)
     validationLatency: number;   // Time to validate (ms)
     staleness: number;           // Age of oldest source (ms)
@@ -87,10 +87,10 @@ export interface ValidationAlert {
  * Validation configuration
  */
 export interface ValidationConfig {
-  enabled: boolean;
+  enabled?: boolean;
   confidenceThreshold: number;   // Minimum confidence to accept primary (0-100)
-  stalenessThreshold: number;    // Max staleness before showing 🔴 (ms)
-  timeoutMs: number;            // Max time to wait for secondary sources (ms)
+  stalenessThreshold?: number;   // Max staleness before showing 🔴 (ms)
+  timeoutMs?: number;           // Max time to wait for secondary sources (ms)
   throttleInterval: number;     // Only validate every N ms (0 = always)
   alerts: ValidationAlert[];
 }
