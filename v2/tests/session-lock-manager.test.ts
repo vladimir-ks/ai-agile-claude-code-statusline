@@ -312,8 +312,8 @@ describe('SessionLockManager', () => {
       expect(SessionLockManager.exists('test-session-12')).toBe(true);
     });
 
-    test('re-pins claudeVersion on resume when binary version changed', () => {
-      // Simulate a lock written by an older binary
+    test('re-pins claudeVersion ONLY from stdin runningVersion (resume with new binary)', () => {
+      // Simulate a lock pinned by the original (older) session process
       const lockPath = require('path').join(LOCK_DIR, 'test-resume-repin.lock');
       const oldLock = {
         sessionId: 'test-resume-repin',
@@ -323,40 +323,65 @@ describe('SessionLockManager', () => {
         keychainService: 'Claude Code-credentials',
         email: 'user@example.com',
         transcriptPath: '/home/user/.claude/projects/-test/session.jsonl',
-        claudeVersion: '0.0.0-old', // intentionally outdated
+        claudeVersion: '2.1.100', // pinned by the old running process
         lockFileVersion: 1,
         updatedAt: Date.now() - 60000
       };
       require('fs').writeFileSync(lockPath, JSON.stringify(oldLock, null, 2), { mode: 0o600 });
 
+      // Resume: the NEW process reports its own version via stdin → re-pin
       const retrieved = SessionLockManager.getOrCreate(
         'test-resume-repin',
         'slot-1',
         '/home/user/.claude',
         'Claude Code-credentials',
         'user@example.com',
-        '/home/user/.claude/projects/-test/session.jsonl'
+        '/home/user/.claude/projects/-test/session.jsonl',
+        undefined,
+        '2.1.200'
       );
 
-      // claudeVersion must be refreshed to the current binary version (not '0.0.0-old')
-      // The current binary may return 'unknown' in test env (no claude CLI); either way
-      // it must not remain '0.0.0-old'.
-      const currentVersion = (SessionLockManager as any).getClaudeVersion();
-      if (currentVersion !== 'unknown') {
-        expect(retrieved.claudeVersion).toBe(currentVersion);
-        expect(retrieved.claudeVersion).not.toBe('0.0.0-old');
-        // Lock file on disk must also be updated
-        const onDisk = SessionLockManager.read('test-resume-repin');
-        expect(onDisk?.claudeVersion).toBe(currentVersion);
-      } else {
-        // getClaudeVersion() returned 'unknown' → no re-pin → old version preserved
-        expect(retrieved.claudeVersion).toBe('0.0.0-old');
-      }
+      expect(retrieved.claudeVersion).toBe('2.1.200');
+      const onDisk = SessionLockManager.read('test-resume-repin');
+      expect(onDisk?.claudeVersion).toBe('2.1.200');
     });
 
-    test('no disk write when claudeVersion is unchanged on resume', () => {
-      // Write a lock with the exact current version so no update is needed
-      const currentVersion = (SessionLockManager as any).getClaudeVersion();
+    test('NEVER re-pins from the installed binary: no runningVersion → pinned version preserved', () => {
+      // THE operator bug: upgrading the CLI in another pane must not rewrite a
+      // live session's pinned version. Without a stdin runningVersion there is
+      // no valid re-pin source — `claude --version` (installed binary) is not one.
+      const lockPath = require('path').join(LOCK_DIR, 'test-no-exec-repin.lock');
+      const now = Date.now() - 60000;
+      const oldLock = {
+        sessionId: 'test-no-exec-repin',
+        launchedAt: now,
+        slotId: 'slot-1',
+        configDir: '/home/user/.claude',
+        keychainService: 'Claude Code-credentials',
+        email: 'user@example.com',
+        transcriptPath: '/home/user/.claude/projects/-test/session.jsonl',
+        claudeVersion: '2.1.100', // running session's true version
+        lockFileVersion: 1,
+        updatedAt: now
+      };
+      require('fs').writeFileSync(lockPath, JSON.stringify(oldLock, null, 2), { mode: 0o600 });
+
+      const retrieved = SessionLockManager.getOrCreate(
+        'test-no-exec-repin',
+        'slot-1',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+        // no runningVersion — daemon ran while stdin lacked `version`
+      );
+
+      // Pinned version survives even though the installed binary may be newer
+      expect(retrieved.claudeVersion).toBe('2.1.100');
+      expect(retrieved.updatedAt).toBe(now); // no disk write
+    });
+
+    test('no disk write when stdin runningVersion is unchanged', () => {
       const lockPath = require('path').join(LOCK_DIR, 'test-resume-noop.lock');
       const now = Date.now() - 60000;
       const existingLock = {
@@ -367,7 +392,7 @@ describe('SessionLockManager', () => {
         keychainService: 'Claude Code-credentials',
         email: 'user@example.com',
         transcriptPath: '/home/user/.claude/projects/-test/session.jsonl',
-        claudeVersion: currentVersion,
+        claudeVersion: '2.1.150',
         lockFileVersion: 1,
         updatedAt: now
       };
@@ -379,12 +404,29 @@ describe('SessionLockManager', () => {
         '/home/user/.claude',
         'Claude Code-credentials',
         'user@example.com',
-        '/home/user/.claude/projects/-test/session.jsonl'
+        '/home/user/.claude/projects/-test/session.jsonl',
+        undefined,
+        '2.1.150'
       );
 
       // No re-pin needed — version identical → updatedAt unchanged
-      expect(retrieved.claudeVersion).toBe(currentVersion);
+      expect(retrieved.claudeVersion).toBe('2.1.150');
       expect(retrieved.updatedAt).toBe(now);
+    });
+
+    test('create() pins from runningVersion when provided', () => {
+      const lock = SessionLockManager.getOrCreate(
+        'test-create-running-version',
+        'slot-3',
+        '/home/user/.claude',
+        'Claude Code-credentials',
+        'user@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl',
+        undefined,
+        '2.1.205'
+      );
+
+      expect(lock.claudeVersion).toBe('2.1.205');
     });
   });
 

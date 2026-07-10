@@ -327,8 +327,12 @@ export class StatuslineFormatter {
     const model = this.fmtModel(health, false);
     if (model) parts.push(model);
 
-    // 4. CLI version — if available
-    if (health.cliVersion) {
+    // 4. CLI version. Mismatch → highlighted 📟:vRUN→vINST! (restart-to-upgrade signal)
+    if (health.versionMismatch) {
+      parts.push(
+        `📟:${c('bold')}${c('stale')}v${health.versionMismatch.running}→v${health.versionMismatch.installed}!${rst()}`
+      );
+    } else if (health.cliVersion) {
       parts.push(`📟:${c('version')}v${health.cliVersion}${rst()}`);
     }
 

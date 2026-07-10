@@ -1392,6 +1392,42 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
       expect(l1).toContain('📟:v2.1.50');
     });
 
+    test('version mismatch renders highlighted 📟:vRUN→vINST! marker on L1 (operator P1)', () => {
+      const health = createDefaultHealth('l1-version-mismatch');
+      health.model = { value: 'Opus4.6', confidence: 100 };
+      health.context = { tokensLeft: 68000, percentUsed: 56 };
+      health.projectPath = '~/project';
+      health.cliVersion = '2.1.205';
+      health.versionMismatch = { running: '2.1.205', installed: '2.1.210' };
+
+      const result = StatuslineFormatter.formatAllVariants(health, 0);
+      const l1raw = result.width200[0];
+      const l1 = l1raw.replace(/\x1b\[[0-9;]*m/g, '');
+
+      // Marker shape: running → installed with trailing !
+      expect(l1).toContain('📟:v2.1.205→v2.1.210!');
+      // Plain version must NOT also render
+      expect(l1).not.toContain('📟:v2.1.205 ');
+      // Highlighted: bold + orange escape present around the marker (NO_COLOR unset)
+      if (process.env.NO_COLOR !== '1' && process.env.NO_COLOR !== 'true') {
+        expect(l1raw).toContain('\x1b[1m\x1b[38;5;208mv2.1.205→v2.1.210!');
+      }
+    });
+
+    test('no mismatch → plain dim version, no arrow marker', () => {
+      const health = createDefaultHealth('l1-version-no-mismatch');
+      health.model = { value: 'Opus4.6', confidence: 100 };
+      health.context = { tokensLeft: 68000, percentUsed: 56 };
+      health.projectPath = '~/project';
+      health.cliVersion = '2.1.205';
+
+      const result = StatuslineFormatter.formatAllVariants(health, 0);
+      const l1 = result.width200[0].replace(/\x1b\[[0-9;]*m/g, '');
+
+      expect(l1).toContain('📟:v2.1.205');
+      expect(l1).not.toContain('→');
+    });
+
     test('session and notification lines (L2+) do not exceed effective width', () => {
       const health = createDefaultHealth('l2-width-check');
       health.model = { value: 'Opus4.6', confidence: 100 };

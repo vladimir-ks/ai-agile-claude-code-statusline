@@ -126,7 +126,7 @@ export interface SessionLock {
   transcriptPath: string;      // Path to session transcript file
 
   // Mutable - Updated on daemon runs
-  claudeVersion: string;       // From `claude --version`
+  claudeVersion: string;       // RUNNING session version (stdin `version`, not `claude --version`)
   lastVersionCheck?: number;   // Unix timestamp ms of last version poll
   lastIdleCheck?: number;      // Unix timestamp ms of last idle detection
 
@@ -406,6 +406,7 @@ export interface StatuslineConfig {
 export interface ClaudeCodeInput {
   session_id?: string;
   transcript_path?: string;
+  version?: string;  // RUNNING CLI version — emitted by the live session process itself
   model?: {
     display_name?: string;
     id?: string;

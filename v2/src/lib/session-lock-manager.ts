@@ -7,7 +7,10 @@
  *
  * Immutable fields: sessionId, launchedAt
  * Rebound on resume-in-different-slot: slotId, configDir, keychainService, email, transcriptPath, tmux
- * Mutable fields: claudeVersion (re-pinned on each process start), lastVersionCheck, lastIdleCheck, updatedAt
+ * Mutable fields: claudeVersion (re-pinned ONLY from stdin `version`), lastVersionCheck, lastIdleCheck, updatedAt
+ *
+ * why: `claude --version` = installed binary, NOT the running session's binary —
+ * contract: "NEVER re-pins from the installed binary" (session-lock-manager.test.ts)
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
@@ -120,6 +123,7 @@ export class SessionLockManager {
    * @param email - Account email
    * @param transcriptPath - Transcript file path
    * @param tmux - Tmux context (optional)
+   * @param runningVersion - stdin `version` (running process); `claude --version` fallback only when absent
    */
   static create(
     sessionId: string,
@@ -128,10 +132,11 @@ export class SessionLockManager {
     keychainService: string,
     email: string,
     transcriptPath: string,
-    tmux?: { session: string; window: string; pane: string }
+    tmux?: { session: string; window: string; pane: string },
+    runningVersion?: string
   ): SessionLock {
     const now = Date.now();
-    const version = this.getClaudeVersion();
+    const version = runningVersion || this.getClaudeVersion();
 
     const lock: SessionLock = {
       sessionId,
@@ -170,15 +175,9 @@ export class SessionLockManager {
   }
 
   /**
-   * Get or create session lock
-   * Creates if doesn't exist; on resume, re-pins claudeVersion to the current binary.
-   *
-   * Re-pin policy: the process that called getOrCreate() IS the current binary.
-   * A resumed session (claude --resume) starts a new OS process running the
-   * currently-installed binary, so we must refresh claudeVersion here rather than
-   * keeping the value frozen from the original create() call.  This eliminates the
-   * false "restart to upgrade" badge that fires when the lock carries an old version
-   * but the daemon's installed-version.json already shows the new one.
+   * Get or create session lock. Re-pins claudeVersion ONLY from `runningVersion`
+   * (stdin `version` = the live process's own report; handles --resume naturally).
+   * contract: session-lock-manager.test.ts "NEVER re-pins from the installed binary"
    */
   static getOrCreate(
     sessionId: string,
@@ -187,14 +186,12 @@ export class SessionLockManager {
     keychainService: string,
     email: string,
     transcriptPath: string,
-    tmux?: { session: string; window: string; pane: string }
+    tmux?: { session: string; window: string; pane: string },
+    runningVersion?: string
   ): SessionLock {
     const existing = this.read(sessionId);
     if (existing) {
-      // Re-pin version: the current process runs the currently-installed binary.
-      // Re-pinning an unchanged version is a no-op (no disk write).
-      const currentVersion = this.getClaudeVersion();
-      const repin = currentVersion !== 'unknown' && currentVersion !== existing.claudeVersion;
+      const repin = Boolean(runningVersion) && runningVersion !== existing.claudeVersion;
 
       // Rebind slot identity: `claude --resume` in a DIFFERENT slot starts a new OS
       // process with a different CLAUDE_CONFIG_DIR — the caller's detection IS the
@@ -215,7 +212,7 @@ export class SessionLockManager {
             transcriptPath: transcriptPath || existing.transcriptPath,
             ...(tmux ? { tmux } : {})
           } : {}),
-          ...(repin ? { claudeVersion: currentVersion } : {}),
+          ...(repin ? { claudeVersion: runningVersion as string } : {}),
           updatedAt: Date.now()
         };
         this.write(updated);
@@ -224,11 +221,12 @@ export class SessionLockManager {
       return existing;
     }
 
-    return this.create(sessionId, slotId, configDir, keychainService, email, transcriptPath, tmux);
+    return this.create(sessionId, slotId, configDir, keychainService, email, transcriptPath, tmux, runningVersion);
   }
 
   /**
-   * Get Claude Code version
+   * Get INSTALLED Claude Code version (`claude --version` = binary on disk).
+   * NOT the running session's version — create-time fallback only.
    * Returns "unknown" if detection fails
    */
   private static getClaudeVersion(): string {

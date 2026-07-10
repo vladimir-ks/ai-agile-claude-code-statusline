@@ -969,23 +969,18 @@ function display(): void {
     // cache stays the source for cross-slot (multi-account) visibility.
     if (stdinRateLimits) healthWithStdin.nativeQuota = stdinRateLimits;
     if (stdinSessionCost != null) healthWithStdin.nativeCost = { sessionCost: stdinSessionCost };
-    // CLI version: use session lock's launch-time version (immutable per session)
-    // This ensures version stays fixed until session restart — critical for
-    // identifying sessions that need restart after CLI updates
-    if (sessionId) {
+    // why: stdin `version` = the running process's own report (ground truth); lock
+    // is fallback only — contract: session-lock-manager.test.ts version-truth tests
+    if (stdinVersion) {
+      healthWithStdin.cliVersion = stdinVersion;
+    } else if (sessionId) {
       try {
         const lockPath = `${HEALTH_DIR}/${sessionId}.lock`;
         const lockData = safeReadJson<{ claudeVersion?: string }>(lockPath);
-        if (lockData?.claudeVersion) {
+        if (lockData?.claudeVersion && lockData.claudeVersion !== 'unknown') {
           healthWithStdin.cliVersion = lockData.claudeVersion;
-        } else if (stdinVersion) {
-          healthWithStdin.cliVersion = stdinVersion; // Fallback before lock exists
         }
-      } catch {
-        if (stdinVersion) healthWithStdin.cliVersion = stdinVersion;
-      }
-    } else if (stdinVersion) {
-      healthWithStdin.cliVersion = stdinVersion;
+      } catch { /* no version available */ }
     }
 
     // Version mismatch detection: compare running vs installed (read-only, zero cost)

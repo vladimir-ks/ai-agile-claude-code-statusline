@@ -203,7 +203,8 @@ class DataGatherer {
           keychainService || '',
           matchedSlot.email,
           health.transcriptPath,
-          tmuxContext
+          tmuxContext,
+          jsonInput?.version  // running-version truth — see session-lock-manager.ts
         );
       }
     } catch {
