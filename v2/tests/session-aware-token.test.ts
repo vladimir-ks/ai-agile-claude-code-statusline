@@ -57,12 +57,31 @@ const getMockQuotaCache = (): HotSwapQuotaCache => ({
   },
 });
 
+// Hermetic env: CLAUDE_HS_HOME + STATUSLINE_SESSIONS_FILE redirect ALL
+// HotSwapQuotaReader I/O into TEST_DIR — no live file is read or written.
+const TEST_HS_HOME = `${TEST_DIR}/hs-home`;
+const HERMETIC_CACHE = `${TEST_HS_HOME}/session-health/hot-swap-quota.json`;
+const HERMETIC_SESSIONS = `${TEST_DIR}/claude-sessions.yaml`;
+let savedHsHome: string | undefined;
+let savedSessionsFile: string | undefined;
+
 describe('Session-Aware Token Resolution', () => {
   beforeAll(() => {
+    savedHsHome = process.env.CLAUDE_HS_HOME;
+    savedSessionsFile = process.env.STATUSLINE_SESSIONS_FILE;
+    process.env.CLAUDE_HS_HOME = TEST_HS_HOME;
+    process.env.STATUSLINE_SESSIONS_FILE = HERMETIC_SESSIONS;
     mkdirSync(TEST_HEALTH_DIR, { recursive: true });
+    mkdirSync(`${TEST_HS_HOME}/session-health`, { recursive: true });
+    HotSwapQuotaReader.clearCache();
   });
 
   afterAll(() => {
+    if (savedHsHome === undefined) delete process.env.CLAUDE_HS_HOME;
+    else process.env.CLAUDE_HS_HOME = savedHsHome;
+    if (savedSessionsFile === undefined) delete process.env.STATUSLINE_SESSIONS_FILE;
+    else process.env.STATUSLINE_SESSIONS_FILE = savedSessionsFile;
+    HotSwapQuotaReader.clearCache();
     if (existsSync(TEST_DIR)) {
       rmSync(TEST_DIR, { recursive: true, force: true });
     }
@@ -194,8 +213,8 @@ describe('Session-Aware Token Resolution', () => {
   // ==========================================================================
 
   describe('HotSwapQuotaReader configDir matching', () => {
-    const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
-    const SESSIONS_PATH = `${HOME}/_claude-configs/hot-swap/claude-sessions.yaml`;
+    const QUOTA_CACHE_PATH = HERMETIC_CACHE;
+    const SESSIONS_PATH = HERMETIC_SESSIONS;
     let originalCache: string | null = null;
     let originalSessions: string | null = null;
 
@@ -223,8 +242,7 @@ describe('Session-Aware Token Resolution', () => {
       }
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('matches slot by config_dir when provided', () => {
+    test('matches slot by config_dir when provided', () => {
       // Write mock cache with config_dir fields
       writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
@@ -238,8 +256,7 @@ describe('Session-Aware Token Resolution', () => {
       expect(result!.dailyPercentUsed).toBe(30);
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('matches slot-2 by config_dir', () => {
+    test('matches slot-2 by config_dir', () => {
       writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(getMockQuotaCache()), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
@@ -364,10 +381,9 @@ describe('Session-Aware Token Resolution', () => {
       }
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('configDir matches quota cache slot correctly', () => {
+    test('configDir matches quota cache slot correctly', () => {
       // Write mock cache
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -425,9 +441,8 @@ describe('Session-Aware Token Resolution', () => {
       expect(result.configDir).toBe(resolve(`${HOME}/.claude`));
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('HotSwapQuotaReader returns null when cache file missing', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    test('HotSwapQuotaReader returns null when cache file missing', () => {
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -452,9 +467,8 @@ describe('Session-Aware Token Resolution', () => {
       }
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('HotSwapQuotaReader handles corrupted cache file', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    test('HotSwapQuotaReader handles corrupted cache file', () => {
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -503,9 +517,8 @@ describe('Session-Aware Token Resolution', () => {
 
   describe('Bug 3 regression: auth profile from configDir', () => {
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('getSlotByConfigDir returns slot data with slotId', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    test('getSlotByConfigDir returns slot data with slotId', () => {
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -530,7 +543,7 @@ describe('Session-Aware Token Resolution', () => {
     });
 
     test('getSlotByConfigDir returns null for nonexistent configDir', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -553,9 +566,8 @@ describe('Session-Aware Token Resolution', () => {
       }
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('getSlotByConfigDir matches slot-2 correctly', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    test('getSlotByConfigDir matches slot-2 correctly', () => {
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -579,9 +591,8 @@ describe('Session-Aware Token Resolution', () => {
       }
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('auth profile derivation produces email from configDir', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    test('auth profile derivation produces email from configDir', () => {
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -616,9 +627,8 @@ describe('Session-Aware Token Resolution', () => {
 
   describe('Bug 4 regression: slot fallback without config_dir in cache', () => {
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('getSlotByConfigDir falls back to sessions.yaml', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    test('getSlotByConfigDir falls back to sessions.yaml', () => {
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -641,18 +651,16 @@ describe('Session-Aware Token Resolution', () => {
         };
 
         writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(cacheWithoutConfigDir), 'utf-8');
+        // Hermetic sessions.yaml carries the config_dir the cache lacks
+        const realSlot1Dir = `${HOME}/_claude-configs/hot-swap/registration/slot-1`;
+        writeFileSync(HERMETIC_SESSIONS, `accounts:\n  slot-1:\n    email: user-a@example.com\n    config_dir: ${realSlot1Dir}\n    status: active\nactive_account: slot-1\n`, 'utf-8');
         HotSwapQuotaReader.clearCache();
 
-        // Try to find slot by configDir — cache won't match, but sessions.yaml fallback might
-        const realSlot1Dir = `${HOME}/_claude-configs/hot-swap/registration/slot-1`;
+        // Cache won't match (no config_dir field) → sessions.yaml fallback must find it
         const result = HotSwapQuotaReader.getSlotByConfigDir(realSlot1Dir);
-
-        // If sessions.yaml exists with matching config_dir, should find it
-        if (existsSync(`${HOME}/_claude-configs/hot-swap/claude-sessions.yaml`)) {
-          expect(result).not.toBeNull();
-          expect(result!.slotId).toBe('slot-1');
-        }
-        // If sessions.yaml doesn't exist, result may be null — that's fine
+        expect(result).not.toBeNull();
+        expect(result!.slotId).toBe('slot-1');
+        expect(result!.email).toBe('user-a@example.com');
       } finally {
         HotSwapQuotaReader.clearCache();
         if (originalCache) {
@@ -661,9 +669,8 @@ describe('Session-Aware Token Resolution', () => {
       }
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('getActiveQuota with configDir uses getSlotByConfigDir internally', () => {
-      const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    test('getActiveQuota with configDir uses getSlotByConfigDir internally', () => {
+      const QUOTA_CACHE_PATH = HERMETIC_CACHE;
       let originalCache: string | null = null;
       if (existsSync(QUOTA_CACHE_PATH)) {
         originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
@@ -696,13 +703,13 @@ describe('Session-Aware Token Resolution', () => {
   describe('Account Lifecycle (slot status awareness)', () => {
     const TEST_SESSIONS_DIR = '/tmp/slot-status-test';
     const TEST_SESSIONS_FILE = `${TEST_SESSIONS_DIR}/claude-sessions.yaml`;
-    const QUOTA_CACHE_PATH = `${HOME}/.claude/session-health/hot-swap-quota.json`;
+    const QUOTA_CACHE_PATH = HERMETIC_CACHE;
 
     let originalQuotaCache: string | null = null;
     let originalSessionsFile: string | null = null;
 
     // Save and restore production files
-    const PROD_SESSIONS = `${HOME}/_claude-configs/hot-swap/claude-sessions.yaml`;
+    const PROD_SESSIONS = HERMETIC_SESSIONS;
 
     beforeEach(() => {
       mkdirSync(TEST_SESSIONS_DIR, { recursive: true });
@@ -842,8 +849,7 @@ active_account: slot-1
       expect(quota2!.slotStatus).toBe('inactive');
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) + live claude-sessions.yaml at hardcoded paths; mocks at legacy ~/.claude path are never read — depends on live hot-swap session files
-    test.skip('getActiveQuota Strategy 4 (freshest slot) skips inactive slots', () => {
+    test('getActiveQuota Strategy 4 (freshest slot) skips inactive slots', () => {
       // Both slots in quota cache, but slot-1 is inactive and freshest
       const cacheWithFreshInactive: HotSwapQuotaCache = {
         'slot-1': {

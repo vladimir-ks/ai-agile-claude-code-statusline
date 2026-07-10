@@ -168,21 +168,29 @@ describe('HotSwapQuotaReader', () => {
   // --- configDir matching (session-aware token resolution) ---
 
   describe('getActiveQuota with configDir', () => {
-    let originalCache: string | null = null;
+    // Hermetic: CLAUDE_HS_HOME + STATUSLINE_SESSIONS_FILE redirect all reader I/O
+    // into a tmp dir — no live file is read or written.
+    const TMP = '/tmp/hsqr-configdir-test';
+    const TMP_CACHE = `${TMP}/session-health/hot-swap-quota.json`;
+    let savedHsHome: string | undefined;
+    let savedSessionsFile: string | undefined;
 
     beforeEach(() => {
+      savedHsHome = process.env.CLAUDE_HS_HOME;
+      savedSessionsFile = process.env.STATUSLINE_SESSIONS_FILE;
+      process.env.CLAUDE_HS_HOME = TMP;
+      process.env.STATUSLINE_SESSIONS_FILE = `${TMP}/claude-sessions.yaml`;
+      mkdirSync(`${TMP}/session-health`, { recursive: true });
       HotSwapQuotaReader.clearCache();
-      if (existsSync(QUOTA_CACHE_PATH)) {
-        originalCache = readFileSync(QUOTA_CACHE_PATH, 'utf-8');
-      }
     });
 
     afterEach(() => {
+      if (savedHsHome === undefined) delete process.env.CLAUDE_HS_HOME;
+      else process.env.CLAUDE_HS_HOME = savedHsHome;
+      if (savedSessionsFile === undefined) delete process.env.STATUSLINE_SESSIONS_FILE;
+      else process.env.STATUSLINE_SESSIONS_FILE = savedSessionsFile;
+      rmSync(TMP, { recursive: true, force: true });
       HotSwapQuotaReader.clearCache();
-      if (originalCache) {
-        writeFileSync(QUOTA_CACHE_PATH, originalCache, 'utf-8');
-        originalCache = null;
-      }
     });
 
     const mockCache = {
@@ -212,9 +220,8 @@ describe('HotSwapQuotaReader', () => {
       },
     };
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) at module load; mock written to legacy ~/.claude path is never read — test depends on live hot-swap session files
-    test.skip('selects slot-1 when configDir matches slot-1', () => {
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(mockCache), 'utf-8');
+    test('selects slot-1 when configDir matches slot-1', () => {
+      writeFileSync(TMP_CACHE, JSON.stringify(mockCache), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const result = HotSwapQuotaReader.getActiveQuota('/custom/path/slot-1');
@@ -224,9 +231,8 @@ describe('HotSwapQuotaReader', () => {
       expect(result!.dailyPercentUsed).toBe(20);
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) at module load; mock written to legacy ~/.claude path is never read — test depends on live hot-swap session files
-    test.skip('selects slot-2 when configDir matches slot-2', () => {
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(mockCache), 'utf-8');
+    test('selects slot-2 when configDir matches slot-2', () => {
+      writeFileSync(TMP_CACHE, JSON.stringify(mockCache), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const result = HotSwapQuotaReader.getActiveQuota('/custom/path/slot-2');
@@ -237,7 +243,7 @@ describe('HotSwapQuotaReader', () => {
     });
 
     test('does not match when configDir is slightly different', () => {
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(mockCache), 'utf-8');
+      writeFileSync(TMP_CACHE, JSON.stringify(mockCache), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       // Close but not exact match
@@ -251,9 +257,8 @@ describe('HotSwapQuotaReader', () => {
       }
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) at module load; mock written to legacy ~/.claude path is never read — test depends on live hot-swap session files
-    test.skip('returns null when cache is empty and configDir specified', () => {
-      writeFileSync(QUOTA_CACHE_PATH, '{}', 'utf-8');
+    test('returns null when cache is empty and configDir specified', () => {
+      writeFileSync(TMP_CACHE, '{}', 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const result = HotSwapQuotaReader.getActiveQuota('/custom/path/slot-1');
@@ -275,7 +280,7 @@ describe('HotSwapQuotaReader', () => {
         },
       };
 
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(cacheWithoutConfigDir), 'utf-8');
+      writeFileSync(TMP_CACHE, JSON.stringify(cacheWithoutConfigDir), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       // configDir provided but no slot has config_dir → falls to other strategies
@@ -285,9 +290,8 @@ describe('HotSwapQuotaReader', () => {
       expect(result!.slotId).toBe('slot-1');
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) at module load; mock written to legacy ~/.claude path is never read — test depends on live hot-swap session files
-    test.skip('configDir match preserves all quota data fields', () => {
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(mockCache), 'utf-8');
+    test('configDir match preserves all quota data fields', () => {
+      writeFileSync(TMP_CACHE, JSON.stringify(mockCache), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const result = HotSwapQuotaReader.getActiveQuota('/custom/path/slot-1');
@@ -314,7 +318,7 @@ describe('HotSwapQuotaReader', () => {
         },
       };
 
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(staleCache), 'utf-8');
+      writeFileSync(TMP_CACHE, JSON.stringify(staleCache), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const result = HotSwapQuotaReader.getActiveQuota('/custom/path/slot-1');
@@ -322,8 +326,7 @@ describe('HotSwapQuotaReader', () => {
       expect(result!.isStale).toBe(true);
     });
 
-    // SKIP: reader resolves live CLAUDE_HS_HOME cache (~/.claude-hs) at module load; mock written to legacy ~/.claude path is never read — test depends on live hot-swap session files
-    test.skip('fresh data is correctly identified for configDir-matched slot', () => {
+    test('fresh data is correctly identified for configDir-matched slot', () => {
       const freshCache = {
         'slot-1': {
           ...mockCache['slot-1'],
@@ -332,7 +335,7 @@ describe('HotSwapQuotaReader', () => {
         },
       };
 
-      writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(freshCache), 'utf-8');
+      writeFileSync(TMP_CACHE, JSON.stringify(freshCache), 'utf-8');
       HotSwapQuotaReader.clearCache();
 
       const result = HotSwapQuotaReader.getActiveQuota('/custom/path/slot-1');

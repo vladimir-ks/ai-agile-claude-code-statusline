@@ -71,38 +71,37 @@ let cachedSlotStatuses: Map<string, SlotStatus> | null = null;
 let slotStatusesCacheTimestamp = 0;
 const SLOT_STATUSES_CACHE_TTL = 60000; // 60 seconds
 
-// Discoverable paths for claude-sessions.yaml
-// The hot-swap system stores its registry here
-// Priority: cloud_configs (new standard) → _claude-configs (legacy) → .claude
-const HOT_SWAP_SESSIONS_PATHS = [
-  `${homedir()}/cloud_configs/hot-swap/claude-sessions.yaml`,  // New standard (post-migration)
-  `${homedir()}/_claude-configs/hot-swap/claude-sessions.yaml`, // Legacy (backward compat)
-  `${homedir()}/.claude/hot-swap/claude-sessions.yaml`,
-  `${homedir()}/.claude/config/claude-sessions.yaml`,
-];
+// Registry paths for claude-sessions.yaml, resolved per call so env overrides
+// (tests, contract changes) take effect without module reload.
+// STATUSLINE_SESSIONS_FILE set → it is the ONLY path consulted (hermetic).
+function sessionsPaths(): string[] {
+  const override = process.env.STATUSLINE_SESSIONS_FILE;
+  if (override && override.length > 0) return [override];
+  return [
+    `${homedir()}/cloud_configs/hot-swap/claude-sessions.yaml`,
+    `${homedir()}/_claude-configs/hot-swap/claude-sessions.yaml`,
+    `${homedir()}/.claude/hot-swap/claude-sessions.yaml`,
+    `${homedir()}/.claude/config/claude-sessions.yaml`,
+  ];
+}
 
-// Resolve hot-swap-owned cache dir per CLAUDE_HS_HOME contract (statusline-contract.md v1.2,
-// Apr 2026). Priority: CLAUDE_HS_HOME env → ~/.claude-hs/ (current default) → ~/.claude/
-// (legacy fallback for pre-split installs). Mirrors the resolver in statusline-bulletproof.sh
-// and quota-broker-client.ts. Without this, the reader hits an Apr 2026 stale-fixture path
-// owned by no live writer, returning fictional emails (user-a/b@example.com).
+// why: CLAUDE_HS_HOME set = authoritative, NO exists-check fallthrough — see
+// _claude-configs/tests/contracts/statusline-contract.md (matches quota-broker-client.ts
+// + statusline-bulletproof.sh resolvers) — contract: hot-swap-quota-reader.test.ts "CLAUDE_HS_HOME"
 function resolveHotSwapCachePath(): string {
   const fromEnv = process.env.CLAUDE_HS_HOME;
-  const candidates = [
-    fromEnv ? `${fromEnv.replace(/\/$/, '')}/session-health/hot-swap-quota.json` : null,
-    `${homedir()}/.claude-hs/session-health/hot-swap-quota.json`,
-    `${homedir()}/.claude/session-health/hot-swap-quota.json`,
-  ].filter((p): p is string => Boolean(p));
-  for (const p of candidates) {
-    try { if (existsSync(p)) return p; } catch { /* fall through */ }
+  if (fromEnv && fromEnv.length > 0) {
+    return `${fromEnv.replace(/\/+$/, '')}/session-health/hot-swap-quota.json`;
   }
-  // Last-resort default (legacy path) so callers that read the constant
-  // before the file lands still get a deterministic location.
-  return candidates[candidates.length - 1];
+  const modern = `${homedir()}/.claude-hs/session-health/hot-swap-quota.json`;
+  try { if (existsSync(modern)) return modern; } catch { /* fall through */ }
+  return `${homedir()}/.claude/session-health/hot-swap-quota.json`;
 }
 
 export class HotSwapQuotaReader {
-  private static readonly CACHE_PATH = resolveHotSwapCachePath();
+  private static get CACHE_PATH(): string {
+    return resolveHotSwapCachePath();
+  }
 
   /**
    * Read hot-swap quota cache (with memory caching)
@@ -180,7 +179,7 @@ export class HotSwapQuotaReader {
     }
 
     // Fallback: check claude-sessions.yaml accounts for config_dir match
-    for (const sessionsPath of HOT_SWAP_SESSIONS_PATHS) {
+    for (const sessionsPath of sessionsPaths()) {
       try {
         if (!existsSync(sessionsPath)) continue;
         const content = readFileSync(sessionsPath, 'utf-8');
@@ -253,7 +252,7 @@ export class HotSwapQuotaReader {
 
     const statuses = new Map<string, SlotStatus>();
 
-    for (const sessionsPath of HOT_SWAP_SESSIONS_PATHS) {
+    for (const sessionsPath of sessionsPaths()) {
       try {
         if (!existsSync(sessionsPath)) continue;
         const content = readFileSync(sessionsPath, 'utf-8');
@@ -423,7 +422,7 @@ export class HotSwapQuotaReader {
     }
 
     // Try each known path for claude-sessions.yaml
-    for (const sessionsPath of HOT_SWAP_SESSIONS_PATHS) {
+    for (const sessionsPath of sessionsPaths()) {
       try {
         if (!existsSync(sessionsPath)) continue;
 

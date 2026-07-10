@@ -161,15 +161,6 @@ class DataGatherer {
       // Telemetry update failed - not critical
     }
 
-    // 11d2. Record telemetry to SQLite database (non-critical)
-    try {
-      const { TelemetryDatabase } = require('./telemetry-database');
-      const displayTimeMs = Date.now() - startTime;
-      TelemetryDatabase.recordFromHealth(health, displayTimeMs);
-    } catch {
-      // Telemetry recording failed - not critical
-    }
-
     // 11e. Create or update session lock file (non-critical — Phase 1)
     try {
       // Match slot by configDir path OR by auth profile email

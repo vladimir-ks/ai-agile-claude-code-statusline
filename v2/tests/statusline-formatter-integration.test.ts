@@ -871,14 +871,27 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         '/home/user/.claude/projects/-test/session.jsonl'
       );
 
-      // Live process env points at a DIFFERENT slot's config dir
+      // Live process env points at a DIFFERENT slot's config dir; a hermetic
+      // hot-swap cache (CLAUDE_HS_HOME injection) carries that slot's identity
       process.env.CLAUDE_CONFIG_DIR = '/live/slot2-config';
       const { HotSwapQuotaReader } = require('../src/lib/hot-swap-quota-reader');
-      const origFn = HotSwapQuotaReader.getSlotByConfigDir;
-      HotSwapQuotaReader.getSlotByConfigDir = (dir: string) =>
-        dir === '/live/slot2-config'
-          ? { slotId: 'slot-2', email: 'second-account@example.com', config_dir: dir }
-          : null;
+      const { mkdirSync: mkd, writeFileSync: wf, rmSync: rms } = require('fs');
+      const TMP_HS = '/tmp/formatter-env-override-test';
+      const savedHsHome = process.env.CLAUDE_HS_HOME;
+      const savedSessionsFile = process.env.STATUSLINE_SESSIONS_FILE;
+      process.env.CLAUDE_HS_HOME = TMP_HS;
+      process.env.STATUSLINE_SESSIONS_FILE = `${TMP_HS}/claude-sessions.yaml`;
+      mkd(`${TMP_HS}/session-health`, { recursive: true });
+      wf(`${TMP_HS}/session-health/hot-swap-quota.json`, JSON.stringify({
+        'slot-2': {
+          email: 'second-account@example.com',
+          five_hour_util: 10, seven_day_util: 20,
+          weekly_budget_remaining_hours: 100, weekly_reset_day: 'Thu',
+          daily_reset_time: '17:00', last_fetched: Date.now(), is_fresh: true,
+          config_dir: '/live/slot2-config',
+        },
+      }), 'utf-8');
+      HotSwapQuotaReader.clearCache();
 
       try {
         const variants = StatuslineFormatter.formatAllVariants(health);
@@ -888,8 +901,13 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
         expect(stripped).toContain('second-account@example.com');
         expect(stripped).not.toContain('first-account@example.com');
       } finally {
-        HotSwapQuotaReader.getSlotByConfigDir = origFn;
         delete process.env.CLAUDE_CONFIG_DIR;
+        if (savedHsHome === undefined) delete process.env.CLAUDE_HS_HOME;
+        else process.env.CLAUDE_HS_HOME = savedHsHome;
+        if (savedSessionsFile === undefined) delete process.env.STATUSLINE_SESSIONS_FILE;
+        else process.env.STATUSLINE_SESSIONS_FILE = savedSessionsFile;
+        rms(TMP_HS, { recursive: true, force: true });
+        HotSwapQuotaReader.clearCache();
       }
     });
 
