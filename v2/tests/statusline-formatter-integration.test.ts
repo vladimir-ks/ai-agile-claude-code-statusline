@@ -802,6 +802,8 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
   const TEST_DIR = join(tmpdir(), `phase12-integration-test-${Date.now()}`);
   const LOCK_DIR = join(TEST_DIR, 'session-health');
 
+  let savedConfigDir: string | undefined;
+
   beforeEach(() => {
     mkdirSync(LOCK_DIR, { recursive: true });
     // Override paths for testing
@@ -809,11 +811,15 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
     (NotificationManager as any).STATE_PATH = join(LOCK_DIR, 'notifications.json');
     SessionLockManager.clearCache?.();
     NotificationManager.clearCache();
+    // Neutralize env slot-override (fmtAccountInline env config-dir cross-check)
+    savedConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CLAUDE_CONFIG_DIR;
   });
 
   afterEach(() => {
     SessionLockManager.clearCache?.();
     NotificationManager.clearCache();
+    if (savedConfigDir !== undefined) process.env.CLAUDE_CONFIG_DIR = savedConfigDir;
     try { rmSync(TEST_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
@@ -850,6 +856,41 @@ describe('Phase 1+2: Slot Indicator + Notifications Integration', () => {
 
       expect(stripped).toContain('S1');
       expect(stripped).toContain('user@example.com');
+    });
+
+    test('env config-dir overrides stale lock (relaunch-into-different-slot)', () => {
+      const health = makeIdleHealth('slot-test-env-override');
+
+      // Lock still carries the FIRST launch's identity (slot-1)
+      SessionLockManager.create(
+        'slot-test-env-override',
+        'slot-1',
+        '/stale/slot1-config',
+        'Claude Code-credentials',
+        'first-account@example.com',
+        '/home/user/.claude/projects/-test/session.jsonl'
+      );
+
+      // Live process env points at a DIFFERENT slot's config dir
+      process.env.CLAUDE_CONFIG_DIR = '/live/slot2-config';
+      const { HotSwapQuotaReader } = require('../src/lib/hot-swap-quota-reader');
+      const origFn = HotSwapQuotaReader.getSlotByConfigDir;
+      HotSwapQuotaReader.getSlotByConfigDir = (dir: string) =>
+        dir === '/live/slot2-config'
+          ? { slotId: 'slot-2', email: 'second-account@example.com', config_dir: dir }
+          : null;
+
+      try {
+        const variants = StatuslineFormatter.formatAllVariants(health);
+        const stripped = variants.width200.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+        expect(stripped).toContain('S2');
+        expect(stripped).toContain('second-account@example.com');
+        expect(stripped).not.toContain('first-account@example.com');
+      } finally {
+        HotSwapQuotaReader.getSlotByConfigDir = origFn;
+        delete process.env.CLAUDE_CONFIG_DIR;
+      }
     });
 
     test('shows S2 on account line when session lock exists with slot-2', () => {

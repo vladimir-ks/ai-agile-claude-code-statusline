@@ -401,10 +401,26 @@ export class StatuslineFormatter {
    */
   private static fmtAccountInline(health: SessionHealth, readOnlyNotifications: boolean = false): string {
     const lock = SessionLockManager.read(health.sessionId);
-    if (!lock?.slotId) return '';
 
-    const slotNum = this.parseSlotNumber(lock.slotId);
-    const email = lock.email || health.launch?.authProfile || '';
+    // why: env CLAUDE_CONFIG_DIR (inherited from the live session process) is the
+    // per-render slot truth; the lock lags after relaunch-into-different-slot —
+    // contract: statusline-formatter-integration.test.ts "env config-dir overrides stale lock"
+    let slotId = lock?.slotId || '';
+    let email = lock?.email || health.launch?.authProfile || '';
+    const envDir = process.env.CLAUDE_CONFIG_DIR;
+    if (envDir && lock?.slotId && lock.configDir !== envDir) {
+      try {
+        const { HotSwapQuotaReader } = require('./hot-swap-quota-reader');
+        const envSlot = HotSwapQuotaReader.getSlotByConfigDir(envDir);
+        if (envSlot?.slotId) {
+          slotId = envSlot.slotId;
+          email = envSlot.email || email;
+        }
+      } catch { /* fall back to lock identity */ }
+    }
+    if (!slotId) return '';
+
+    const slotNum = this.parseSlotNumber(slotId);
 
     // Time
     const now = new Date();
@@ -413,7 +429,7 @@ export class StatuslineFormatter {
 
     // Quota data
     const quotaData = QuotaBrokerClient.read();
-    const brokerSlot = quotaData?.slots?.[lock.slotId];
+    const brokerSlot = quotaData?.slots?.[slotId];
 
     // Native active-slot quota (decision #3): when Claude Code stdin populates
     // rate_limits, those values are authoritative + always-fresh for the ACTIVE
@@ -434,7 +450,7 @@ export class StatuslineFormatter {
     }
 
     // Ban indicator: derive from rate-limit state file
-    const isBanned = this.isSlotBanned(lock.slotId);
+    const isBanned = this.isSlotBanned(slotId);
 
     // Staleness tier — computed once, threaded into per-field decorators.
     // Native overlay is live → force 'fresh' so the active slot is never
@@ -453,7 +469,7 @@ export class StatuslineFormatter {
       segments.push(`📅:${weeklyColor}${weeklyText}${rst()}`);
 
       // Read live burn estimate (5s sampler) for the active slot
-      const liveRead = this.readLiveBurn(lock.slotId);
+      const liveRead = this.readLiveBurn(slotId);
       const burn = this.fmtBurnRate(slot, liveRead?.estimate, liveRead?.ageS, readOnlyNotifications, tier);
       if (burn) segments.push(burn);
 
@@ -461,7 +477,7 @@ export class StatuslineFormatter {
       if (liveRead && (liveRead.fromLkg || (liveRead.estimate && liveRead.isStale))) {
         writeHeartbeat('statusline-formatter', 'live_burn_read', {
           status: liveRead.fromLkg ? 'warn' : 'info',
-          extra: { ageS: liveRead.ageS, fromLkg: liveRead.fromLkg, slot: lock.slotId },
+          extra: { ageS: liveRead.ageS, fromLkg: liveRead.fromLkg, slot: slotId },
         });
       }
     }
