@@ -37,6 +37,7 @@ import { existsSync, readFileSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { StatuslineFormatter } from './lib/statusline-formatter';
 import { writeHeartbeat } from './lib/heartbeat';
+import { calculateContext } from './lib/sources/context-source';
 
 // ============================================================================
 // Types (inline to avoid import failures)
@@ -852,18 +853,13 @@ function display(): void {
         }
       }
 
-      // Extract context window data for accurate display (CRITICAL for fresh data)
-      // context_window_size comes from Claude Code's stdin JSON — dynamic per model/session
-      // 83% = Claude's auto-compaction trigger (tokens used / window size)
-      // Default 200000 if Claude Code doesn't send the field (conservative estimate)
-      const windowSize = parsed?.context_window?.context_window_size || 200000;
-      const tokensUsed = currentInput + outputTokens + cacheRead;
-      if (tokensUsed > 0) {
-        const compactionThreshold = Math.floor(windowSize * 0.83);
+      // Context — full-window truth, single shared calculation (context-source.ts)
+      const ctxInfo = calculateContext(parsed, rawModelId || undefined);
+      if (ctxInfo.tokensUsed > 0) {
         stdinContext = {
-          tokensUsed,
-          tokensLeft: Math.max(0, compactionThreshold - tokensUsed),
-          percentUsed: compactionThreshold > 0 ? Math.min(100, Math.floor((tokensUsed / compactionThreshold) * 100)) : 0
+          tokensUsed: ctxInfo.tokensUsed,
+          tokensLeft: ctxInfo.tokensLeft,
+          percentUsed: ctxInfo.percentUsed
         };
       }
 

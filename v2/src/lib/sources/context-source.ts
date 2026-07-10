@@ -4,9 +4,12 @@
  * Extracts context window usage from JSON input.
  * Pure computation, no I/O, no caching needed.
  *
- * Compaction threshold: 83% of window size.
- * tokensLeft = tokens until compaction triggers (not until window full).
- * percentUsed = percentage of compaction threshold (not total window).
+ * Semantics: FULL-WINDOW truth, matching Claude Code's own /context math.
+ * percentUsed = native stdin used_percentage when present, else used/window.
+ * tokensLeft = window − used. tokensUsed includes cache_creation_input_tokens.
+ * why: a hardcoded 83%-compact-threshold basis showed "0 left/100%" while the
+ * session kept working, and never matched CC's displayed % — contract:
+ * context-source.test.ts full-window-truth tests
  */
 
 import type { DataSourceDescriptor, GatherContext } from './types';
@@ -53,17 +56,10 @@ export function detectWindowFromModel(modelId?: string): number | null {
 }
 
 /**
- * Calculate context window usage from JSON input.
- *
- * Claude Code provides nested structure:
- *   context_window.current_usage.input_tokens
- *   context_window.current_usage.output_tokens
- *   context_window.current_usage.cache_read_input_tokens
- *   context_window.current_usage.cache_creation_input_tokens
- *
- * NOTE: cache_creation_input_tokens is intentionally excluded from tokensUsed.
- * It represents tokens charged for writing to the cache, not the context
- * footprint of the current turn.
+ * Calculate context window usage from stdin JSON — full-window semantics
+ * (matches Claude Code's own /context: percent of window, tokens left in window).
+ * tokensUsed includes cache_creation_input_tokens (cache-written tokens ARE in
+ * the prompt/context — excluding them showed ~0 used on cache-heavy first turns).
  */
 function calculateContext(jsonInput: any, modelId?: string): ContextInfo {
   const result: ContextInfo = {
@@ -82,40 +78,33 @@ function calculateContext(jsonInput: any, modelId?: string): ContextInfo {
   // Prefer explicit JSON field; fall back to model-ID suffix; then hard default.
   result.windowSize = ctx.context_window_size || detectWindowFromModel(modelId) || 200000;
 
-  // Validate window size (10k - 2M tokens).
-  // Upper bound raised to 2M to accommodate 1M-context models (e.g. claude-opus-4-7[1m]).
+  // Validate window size (10k - 2M tokens)
   if (result.windowSize < 10000 || result.windowSize > 2_000_000) {
     result.windowSize = 200000;
   }
 
   const currentUsage = ctx.current_usage;
-
-  // Extract and validate token counts (must be non-negative).
-  // Aggregates current-turn footprint: input + output + cache reads.
-  // cache_creation_input_tokens is deliberately excluded (cache-write cost, not window usage).
   const inputTokens = Math.max(0, Number(currentUsage?.input_tokens) || 0);
   const outputTokens = Math.max(0, Number(currentUsage?.output_tokens) || 0);
   const cacheReadTokens = Math.max(0, Number(currentUsage?.cache_read_input_tokens) || 0);
+  const cacheCreationTokens = Math.max(0, Number(currentUsage?.cache_creation_input_tokens) || 0);
 
-  // Total tokens = input + output + cache reads (current turn only)
-  result.tokensUsed = inputTokens + outputTokens + cacheReadTokens;
+  result.tokensUsed = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
 
-  // Cap at 1.5x window size (bad data guard)
+  // Cap at window size (bad data guard)
   if (result.tokensUsed > result.windowSize * 1.5) {
     result.tokensUsed = result.windowSize;
   }
 
-  // Calculate tokens until 83% compaction threshold
-  const compactionThreshold = Math.floor(result.windowSize * 0.83);
-  result.tokensLeft = Math.max(0, compactionThreshold - result.tokensUsed);
+  result.tokensLeft = Math.max(0, result.windowSize - result.tokensUsed);
 
-  // Percentage used (of compaction threshold, not total window)
-  result.percentUsed = compactionThreshold > 0
-    ? Math.min(100, Math.floor((result.tokensUsed / compactionThreshold) * 100))
-    : 0;
+  // Native percentage is CC's own number — authoritative when present
+  const nativePct = Number(ctx.used_percentage);
+  result.percentUsed = Number.isFinite(nativePct) && nativePct >= 0
+    ? Math.min(100, Math.round(nativePct))
+    : Math.min(100, Math.floor((result.tokensUsed / result.windowSize) * 100));
 
-  // Near compaction warning
-  result.nearCompaction = result.percentUsed >= 70;
+  result.nearCompaction = result.percentUsed >= 80;
 
   return result;
 }

@@ -119,55 +119,74 @@ describe('contextSource', () => {
         },
       });
       expect(result.windowSize).toBe(1_000_000);
-      // 517.5k / (1M * 0.83) ≈ 62%
-      expect(result.percentUsed).toBeGreaterThan(60);
-      expect(result.percentUsed).toBeLessThan(65);
+      // Full-window truth: 517.5k / 1M = 51%
+      expect(result.percentUsed).toBe(51);
     });
 
-    test('calculates percentUsed relative to 83% compaction threshold', () => {
-      // Window: 200k, threshold: 166k, used: 83k → 50%
+    test('percentUsed = used/window (full-window truth, matches CC /context)', () => {
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
           current_usage: { input_tokens: 83000 },
         },
       });
-      expect(result.percentUsed).toBe(50);
+      expect(result.percentUsed).toBe(41); // floor(83k/200k)
     });
 
-    test('calculates tokensLeft until compaction', () => {
-      // Window: 200k, threshold: 166k, used: 50k → left: 116k
+    test('native used_percentage from stdin is authoritative when present', () => {
+      const result = calculateContext({
+        context_window: {
+          context_window_size: 200000,
+          used_percentage: 37.6,
+          remaining_percentage: 62.4,
+          current_usage: { input_tokens: 83000 },
+        },
+      });
+      expect(result.percentUsed).toBe(38); // round(native), not computed 41
+    });
+
+    test('tokensLeft = window remaining (never 0 while CC still has room)', () => {
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
           current_usage: { input_tokens: 50000 },
         },
       });
-      expect(result.tokensLeft).toBe(116000);
+      expect(result.tokensLeft).toBe(150000);
     });
 
-    test('tokensLeft is 0 when above compaction threshold', () => {
+    test('above the old 83% threshold still shows real tokens left (operator "0-left" lie)', () => {
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
           current_usage: { input_tokens: 170000 },
         },
       });
-      expect(result.tokensLeft).toBe(0);
+      expect(result.tokensLeft).toBe(30000); // was 0 under threshold math
+      expect(result.percentUsed).toBe(85);
     });
 
-    test('nearCompaction is true at >=70%', () => {
-      // Window: 200k, threshold: 166k, 70% of threshold = 116.2k
+    test('cache_creation_input_tokens counts toward context (fresh-session first turn)', () => {
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
-          current_usage: { input_tokens: 117000 },
+          current_usage: { input_tokens: 2, output_tokens: 3, cache_creation_input_tokens: 50000 },
+        },
+      });
+      expect(result.tokensUsed).toBe(50005); // was ~5 with creation excluded
+    });
+
+    test('nearCompaction is true at >=80% of window', () => {
+      const result = calculateContext({
+        context_window: {
+          context_window_size: 200000,
+          current_usage: { input_tokens: 161000 },
         },
       });
       expect(result.nearCompaction).toBe(true);
     });
 
-    test('nearCompaction is false below 70%', () => {
+    test('nearCompaction is false below 80%', () => {
       const result = calculateContext({
         context_window: {
           context_window_size: 200000,
