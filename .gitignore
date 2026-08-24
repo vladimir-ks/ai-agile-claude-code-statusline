@@ -8,6 +8,7 @@
 
 # macOS
 .DS_Store
+.metadata_never_index
 .AppleDouble
 .LSOverride
 *.swp
@@ -25,6 +26,8 @@ node_modules/
 npm-debug.log
 package-lock.json
 yarn.lock
+v2/.npmrc
+v2/pnpm-lock.yaml
 
 # Build output
 dist/
