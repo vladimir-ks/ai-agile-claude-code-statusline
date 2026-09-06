@@ -57,6 +57,7 @@ else
     HS_HEALTH_DIR="${HEALTH_DIR}"
 fi
 LAZY_MODE_FORCED_FILE="${HEALTH_DIR}/.statusline-lazy-mode-forced"
+LAZY_MODE_FORCED_TTL_S=600  # forced lazy mode self-clears after this many seconds
 SESSION_FILE_STALE_TTL=30   # seconds — if session file older than this, fallback
 DAEMON_RESPAWN_LIMIT=3      # consecutive failures before writing forced-file
 DAEMON_RESPAWN_COUNT_FILE="${HEALTH_DIR}/.daemon-respawn-count"
@@ -109,11 +110,24 @@ mark_daemon_spawn() {
 # a stale/missing session file is a RECOVERY path, not a reason to skip
 # daemon spawn — otherwise we deadlock (file missing → lazy → no spawn →
 # file stays missing forever).
+# why: a permanent forced file left the statusline in fallback forever once the
+# daemon timed out 3× under load — contract: tests/test-spawn-gate.sh
+_forced_lazy_active() {
+  [[ -f "$LAZY_MODE_FORCED_FILE" ]] || return 1
+  local now mtime
+  now=$(date +%s)
+  mtime=$(stat -f %m "$LAZY_MODE_FORCED_FILE" 2>/dev/null || echo 0)
+  if (( now - mtime > LAZY_MODE_FORCED_TTL_S )); then
+    rm -f "$LAZY_MODE_FORCED_FILE" 2>/dev/null || true
+    echo "0" > "$DAEMON_RESPAWN_COUNT_FILE" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
 _lazy_mode_active() {
-  # Explicit env override
   [[ "${STATUSLINE_LAZY_MODE:-0}" == "1" ]] && return 0
-  # Watchdog forced file (set after N consecutive daemon respawn failures)
-  [[ -f "$LAZY_MODE_FORCED_FILE" ]] && return 0
+  _forced_lazy_active && return 0
   return 1
 }
 
@@ -427,7 +441,7 @@ is_keychain_unlocked() {
 
 # Only spawn daemon if rate gate allows (Layer 1) + keychain unlocked + daemon has singleton lock (Layer 2 in TS)
 # Also skip if lazy mode is forced (daemon intentionally disabled)
-if should_spawn_daemon && is_keychain_unlocked && [[ "${STATUSLINE_LAZY_MODE:-0}" != "1" ]] && [[ ! -f "$LAZY_MODE_FORCED_FILE" ]]; then
+if should_spawn_daemon && is_keychain_unlocked && [[ "${STATUSLINE_LAZY_MODE:-0}" != "1" ]] && ! _forced_lazy_active; then
   mark_daemon_spawn
 
   # ── Litter retention (r49) ─────────────────────────────────────────────

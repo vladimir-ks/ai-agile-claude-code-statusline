@@ -250,6 +250,46 @@ else
 fi
 rm -f "${GATE_HEALTH_DIR}/pipeline-heartbeat.jsonl"
 
+# --- forced lazy mode self-heals after LAZY_MODE_FORCED_TTL_S ---
+FL_SNIPPET="${TMPROOT}/forced-lazy.sh"
+{
+  grep -E '^(LAZY_MODE_FORCED_FILE|LAZY_MODE_FORCED_TTL_S|DAEMON_RESPAWN_COUNT_FILE)=' "$WRAPPER"
+  awk '/^_forced_lazy_active\(\)/{f=1} f{print} f && /^}$/{exit}' "$WRAPPER"
+} > "$FL_SNIPPET"
+grep -q '_forced_lazy_active()' "$FL_SNIPPET" || { echo "forced-lazy extraction failed"; exit 1; }
+
+# $1=forced file age in seconds ("none" for no file). Echoes lazy|spawn + file-present flag.
+run_forced_lazy() {
+  local age="$1" forced="${GATE_HEALTH_DIR}/.statusline-lazy-mode-forced"
+  rm -f "$forced"
+  if [[ "$age" != "none" ]]; then
+    touch "$forced"
+    touch -t "$(date -v-"${age}"S +%Y%m%d%H%M.%S)" "$forced"
+  fi
+  (
+    HEALTH_DIR="$GATE_HEALTH_DIR"
+    # shellcheck disable=SC1090
+    source "$FL_SNIPPET"
+    if _forced_lazy_active; then echo -n lazy; else echo -n spawn; fi
+    [[ -f "$forced" ]] && echo "|present" || echo "|absent"
+  )
+}
+
+log_test "no forced file → daemon may spawn"
+assert_gate "forced none" "spawn|absent" "$(run_forced_lazy none)"
+
+log_test "fresh forced file → lazy"
+assert_gate "forced 30s" "lazy|present" "$(run_forced_lazy 30)"
+
+log_test "forced file past TTL → cleared, daemon may spawn"
+assert_gate "forced 700s" "spawn|absent" "$(run_forced_lazy 700)"
+if [[ "$(cat "${GATE_HEALTH_DIR}/.daemon-respawn-count" 2>/dev/null)" == "0" ]]; then
+  log_pass "respawn counter reset on expiry"
+else
+  log_fail "respawn counter not reset"
+fi
+rm -f "${GATE_HEALTH_DIR}/.daemon-respawn-count"
+
 echo ""
 echo "=========================================="
 echo -e "${GREEN}Spawn Gate Tests Complete${NC}"
