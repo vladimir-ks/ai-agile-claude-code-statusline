@@ -28,10 +28,10 @@ const ccusageModule = new CCUsageSharedModule({
   name: 'CCUsage Module',
   enabled: true,
   cacheTTL: 120000,
-  // ccusage consistently runs ~23-24s; 25s left only a 1-2s margin → intermittent
-  // timeouts. 28s gives ~4s headroom while staying under the daemon's 30s hard-kill
-  // (bulletproof.sh `timeout -k 1 30`) so the daemon still finishes in budget.
-  timeout: 28000,
+  // Fallback only: the effective budget is derived per-call from ctx.deadline
+  // (deriveCcusageTimeoutSec) and the default path refreshes in a detached
+  // background process, so this value never governs the gather path.
+  timeout: 15000,
 });
 
 export interface BillingSourceData {
@@ -94,7 +94,9 @@ export const billingSource: DataSourceDescriptor<BillingSourceData> = {
     // Attempt 2: ccusage CLI
     const ccusageStart = Date.now();
     try {
-      const billingData = await ccusageModule.fetch(ctx.sessionId || '');
+      const billingData = await ccusageModule.fetch(ctx.sessionId || '', {
+        deadline: ctx.deadline,
+      });
 
       if (billingData && billingData.isFresh) {
         DebugStateWriter.recordFetch({

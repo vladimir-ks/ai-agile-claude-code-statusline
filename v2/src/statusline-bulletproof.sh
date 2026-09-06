@@ -44,7 +44,7 @@ DAEMON_SCRIPT="$SCRIPT_DIR/data-daemon.ts"
 # OWNS that directory (session files, daemon logs, lockfiles, watchdog state).
 # Hot-swap-produced files (merged-quota-cache.json, .fetch-rate-limit-state.*)
 # live under HS_HEALTH_DIR per the CLAUDE_HS_HOME contract.
-HEALTH_DIR="${HOME}/.claude/session-health"
+HEALTH_DIR="${STATUSLINE_HEALTH_DIR:-${HOME}/.claude/session-health}"
 
 # Hot-swap add-on state dir (per CLAUDE_HS_HOME contract, Apr 2026).
 # Precedence: $CLAUDE_HS_HOME env var → ~/.claude-hs/ (current default) →
@@ -72,20 +72,14 @@ DAEMON_SPAWN_GATE="${HEALTH_DIR}/.daemon-spawn.gate"
 MIN_DAEMON_INTERVAL=15  # seconds — gate must exceed daemon runtime (p90 ~3.8s,
                         # max ~22s) so heavy instances don't stack. Quota/cost
                         # do not need 5s freshness; 15s cuts global spawns ~3x.
-MAX_LOADAVG=8           # skip daemon spawn when 1-min load exceeds this. The
-                        # display layer runs synchronously and shares CPU with
-                        # the daemons it spawns; under 40+ concurrent sessions
-                        # load climbs past 10 and the foreground bun cold-start
-                        # blows its 3.0s budget → SIGKILL → degraded fallback.
-                        # Gating on load breaks that contention feedback loop.
+MIN_MEMSTATUS_LEVEL=10  # free-memory %; below this the box is memory-critical
 
 should_spawn_daemon() {
-  # ── Load gate: never add daemon load when the box is already saturated ────
-  # 1-min load average via sysctl (no subshell pipeline, instant). Compared
-  # against MAX_LOADAVG using integer floor — bash has no float compare.
-  local load_int
-  load_int=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}')
-  if [[ "$load_int" =~ ^[0-9]+$ ]] && (( load_int > MAX_LOADAVG )); then
+  # why: macOS loadavg counts uninterruptible threads and is not an admission
+  # signal; memory pressure is — contract: tests/test-spawn-gate.sh
+  local mem_level
+  mem_level=$(sysctl -n kern.memorystatus_level 2>/dev/null)
+  if [[ "$mem_level" =~ ^[0-9]+$ ]] && (( mem_level < MIN_MEMSTATUS_LEVEL )); then
     return 1
   fi
 
@@ -408,14 +402,23 @@ printf '%s' "$DISPLAY_OUTPUT"
 # ============================================================================
 # KEYCHAIN LOCK GUARD
 # ============================================================================
-# When login keychain is locked (sleep/screensaver), `security find-generic-password`
-# triggers interactive SecurityAgent dialogs. The daemon calls security commands in a
-# loop across sessions — locked keychain = dialog flood that freezes all tmux panes.
-# Check once here (non-interactive, instant) and skip daemon spawn if locked.
+KEYCHAIN_PROBE_TIMEOUT_S=2
 
+# why: a pending SecurityAgent dialog makes `security` block indefinitely; a locked
+# keychain makes the daemon flood dialogs — contract: tests/test-spawn-gate.sh
 is_keychain_unlocked() {
-  security show-keychain-info login.keychain-db 2>/dev/null ||
-  security show-keychain-info login.keychain 2>/dev/null
+  local rc=1 kc reason
+  for kc in login.keychain-db login.keychain; do
+    timeout "$KEYCHAIN_PROBE_TIMEOUT_S" security show-keychain-info "$kc" >/dev/null 2>&1
+    rc=$?
+    [[ $rc -eq 0 ]] && return 0
+    [[ $rc -eq 124 ]] && break
+  done
+  reason=keychain_locked
+  [[ $rc -eq 124 ]] && reason=keychain_probe_hung
+  printf '{"ts":"%s","component":"statusline-hook","event":"daemon_skip","status":"skipped","reason":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" >> "${HEALTH_DIR}/pipeline-heartbeat.jsonl" 2>/dev/null
+  return 1
 }
 
 # ============================================================================
@@ -461,7 +464,11 @@ if should_spawn_daemon && is_keychain_unlocked && [[ "${STATUSLINE_LAZY_MODE:-0}
     # daemon + its ~40-file lib/ tree on EVERY spawn (~12/min globally) — the
     # dominant avoidable CPU cost driving statusline timeout/flicker.
     # Layer 3: timeout -k 1 sends SIGKILL after 1s grace — kills daemon AND its children
-    if echo "${JSON_INPUT}" | timeout -k 1 30 bun "$DAEMON_SCRIPT" 2>&1 | head -c 10000 >> "${HEALTH_DIR}/daemon.log" 2>/dev/null; then
+    # why: $? on a pipeline is the LAST stage, so a daemon SIGKILL/timeout read
+    # as success — contract: tests/test-spawn-gate.sh
+    echo "${JSON_INPUT}" | timeout -k 1 30 bun "$DAEMON_SCRIPT" >> "${HEALTH_DIR}/daemon.log" 2>&1
+    _daemon_status=${PIPESTATUS[1]}
+    if [[ "$_daemon_status" -eq 0 ]]; then
       _daemon_respawn_reset 2>/dev/null || true
     else
       _daemon_respawn_increment 2>/dev/null || true

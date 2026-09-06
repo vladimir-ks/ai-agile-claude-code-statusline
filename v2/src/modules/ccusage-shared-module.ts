@@ -8,18 +8,24 @@
  *
  * ARCHITECTURE:
  * 1. Check shared cache - if fresh (<2min), return it
- * 2. If stale, acquire lock and fetch from ccusage
- * 3. Write to shared cache for other sessions
+ * 2. If stale, hand the refresh to a DETACHED background process (`bun <this
+ *    file>`) and return the cache. The gather path never waits on ccusage.
+ * 3. The background process writes the shared cache for every session.
  *
- * NO COOLDOWN GATE - freshness is determined by cache timestamp only!
+ * why: measured ccusage wall time on this host exceeds 300s, so no in-deadline
+ * foreground budget can succeed — contract: tests/ccusage-budget.test.ts
+ *
+ * STATUSLINE_CCUSAGE_FOREGROUND=1 restores in-band execution, bounded by
+ * deriveCcusageTimeoutSec() against the caller's gather deadline.
  */
 
 import type { DataModule, DataModuleConfig } from '../broker/data-broker';
 import type { ValidationResult } from '../types/validation';
 import { promisify } from 'util';
-import { exec } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
+import { exec, spawn } from 'child_process';
+import { existsSync, readFileSync, writeFileSync, renameSync, statSync, openSync, closeSync } from 'fs';
 import { homedir } from 'os';
+import { fileURLToPath } from 'url';
 import ProcessLock from '../lib/process-lock';
 import { FreshnessManager } from '../lib/freshness-manager';
 
@@ -34,6 +40,57 @@ const ccusageLock = new ProcessLock({
   timeout: 15000,         // 15s stale lock timeout (was 60s — daemon killed at 30s)
   retryInterval: 2000,    // Wait 2s between retries
   maxRetries: 5           // Total ~10s (was 20×2s=40s — exceeded daemon budget)
+});
+
+// ---------------------------------------------------------------------------
+// Time budget
+// ---------------------------------------------------------------------------
+
+/** Reserved for parse + cache write + daemon teardown after ccusage returns. */
+export const CCUSAGE_DEADLINE_RESERVE_MS = 2000;
+/** Below this remaining budget ccusage is skipped entirely. */
+export const CCUSAGE_MIN_REMAINING_MS = 8000;
+export const CCUSAGE_MIN_TIMEOUT_SEC = 5;
+export const CCUSAGE_MAX_TIMEOUT_SEC = 25;
+/** Used when the caller supplies no deadline (no budget to derive from). */
+export const CCUSAGE_DEFAULT_TIMEOUT_SEC = 15;
+
+/**
+ * Derive the ccusage timeout from the caller's remaining gather budget.
+ *
+ * @param deadline absolute epoch-ms deadline (GatherContext.deadline), or null
+ * @returns timeout in seconds, or null when ccusage must be skipped
+ */
+export function deriveCcusageTimeoutSec(
+  deadline?: number | null,
+  now: number = Date.now()
+): number | null {
+  if (deadline == null || !Number.isFinite(deadline)) {
+    return CCUSAGE_DEFAULT_TIMEOUT_SEC;
+  }
+  const remainingMs = deadline - now;
+  if (remainingMs < CCUSAGE_MIN_REMAINING_MS) return null;
+  const sec = Math.floor((remainingMs - CCUSAGE_DEADLINE_RESERVE_MS) / 1000);
+  return Math.min(CCUSAGE_MAX_TIMEOUT_SEC, Math.max(CCUSAGE_MIN_TIMEOUT_SEC, sec));
+}
+
+// ---------------------------------------------------------------------------
+// Background refresh
+// ---------------------------------------------------------------------------
+
+const BG_TIMEOUT_SEC = Math.max(
+  30,
+  Number(process.env.STATUSLINE_CCUSAGE_BG_TIMEOUT_SEC) || 600
+);
+const BG_LOCK_PATH = `${process.env.HOME}/.claude/.ccusage-bg.lock`;
+const BG_LOCK_STALE_MS = (BG_TIMEOUT_SEC + 60) * 1000;
+const SELF_PATH = fileURLToPath(import.meta.url);
+
+const ccusageBgLock = new ProcessLock({
+  lockPath: BG_LOCK_PATH,
+  timeout: BG_LOCK_STALE_MS,
+  retryInterval: 100,
+  maxRetries: 1
 });
 
 interface CCUsageData {
@@ -93,7 +150,10 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
    *
    * IMPORTANT: No cooldown gate! Freshness is determined by cache timestamp.
    */
-  async fetch(sessionId: string): Promise<CCUsageData> {
+  async fetch(
+    sessionId: string,
+    opts?: { deadline?: number | null }
+  ): Promise<CCUsageData> {
     // STEP 1: Check shared cache via FreshnessManager (replaces manual CACHE_FRESH_MS check)
     const cache = this.readSharedCache();
     const cacheAgeMs = FreshnessManager.getAge(cache?.lastFetched);
@@ -112,9 +172,23 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       return cache ? this.cacheToData(cache) : this.getDefaultData();
     }
 
-    console.error(`[CCUsage] Cache stale (age: ${Math.floor(cacheAgeMs/1000)}s), fetching from ccusage...`);
+    // STEP 3: Derive the ccusage budget from the caller's remaining deadline
+    const budgetSec = deriveCcusageTimeoutSec(opts?.deadline);
+    if (budgetSec === null) {
+      console.error('[CCUsage] Insufficient gather budget (<8s remaining), skipping ccusage');
+      return cache ? this.cacheToData(cache) : this.getDefaultData();
+    }
 
-    // STEP 3: Try to acquire lock
+    // STEP 4: Default path — detached background refresh, return cache now
+    if (process.env.STATUSLINE_CCUSAGE_FOREGROUND !== '1') {
+      console.error(`[CCUsage] Cache stale (age: ${Math.floor(cacheAgeMs/1000)}s), triggering background refresh`);
+      CCUsageSharedModule.triggerBackgroundRefresh();
+      return cache ? this.cacheToData(cache) : this.getDefaultData();
+    }
+
+    console.error(`[CCUsage] Cache stale (age: ${Math.floor(cacheAgeMs/1000)}s), fetching from ccusage (budget ${budgetSec}s)...`);
+
+    // STEP 5: Foreground (opt-in) — try to acquire lock
     const lockResult = await ccusageLock.acquire();
 
     if (!lockResult.acquired) {
@@ -137,9 +211,9 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       return cache ? this.cacheToData(cache) : this.getDefaultData();
     }
 
-    // STEP 4: We have the lock - fetch from ccusage
+    // STEP 6: We have the lock - fetch from ccusage
     try {
-      const freshData = await this.runCcusage();
+      const freshData = await this.runCcusage(budgetSec);
 
       if (freshData.isFresh) {
         // Write to shared cache for other sessions
@@ -240,12 +314,12 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
    * - --offline: Use cached pricing data (avoids network delay)
    * - --since: Limit to today only (avoids parsing hundreds of old transcript files)
    */
-  private async runCcusage(): Promise<CCUsageData> {
+  private async runCcusage(timeoutSecArg?: number): Promise<CCUsageData> {
     try {
       // Build command with timeout wrapper and performance flags
       // The `timeout` command reliably kills the process on macOS
       const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const timeoutSec = Math.floor(this.config.timeout / 1000);
+      const timeoutSec = timeoutSecArg ?? Math.floor(this.config.timeout / 1000);
       // Layer 4: ulimit -v caps virtual memory at 512MB to prevent ccusage memory bombs (seen 3GB+)
       // Graceful fallback: ulimit may silently fail on some macOS configs, timeout provides backup protection
       const memLimitKB = 512 * 1024; // 512MB in KB
@@ -255,7 +329,7 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
       const startTime = Date.now();
 
       const { stdout, stderr } = await execAsync(cmd, {
-        timeout: this.config.timeout + 5000, // Extra buffer for timeout command
+        timeout: timeoutSec * 1000 + 1000, // 1s buffer over the `timeout` wrapper
         maxBuffer: 1024 * 1024,
         env: { ...process.env, NO_COLOR: '1' } // Disable color codes in output
       });
@@ -285,7 +359,7 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
 
       // Detect timeout (exit code 124 from `timeout` command)
       if (msg.includes('124') || msg.includes('SIGTERM') || msg.includes('killed')) {
-        console.error(`[CCUsage] ccusage TIMED OUT after ${this.config.timeout}ms`);
+        console.error(`[CCUsage] ccusage TIMED OUT (budget was ${timeoutSecArg ?? Math.floor(this.config.timeout / 1000)}s)`);
       } else {
         console.error(`[CCUsage] ccusage failed: ${msg}`);
       }
@@ -381,6 +455,53 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  /**
+   * Run ccusage under the long background budget and publish the shared cache.
+   * Executed only by the detached child process.
+   */
+  async refreshSharedCache(timeoutSec: number = BG_TIMEOUT_SEC): Promise<boolean> {
+    const data = await this.runCcusage(timeoutSec);
+    if (data.isFresh) {
+      this.writeSharedCache(data);
+      FreshnessManager.recordFetch('billing_ccusage', true);
+      return true;
+    }
+    FreshnessManager.recordFetch('billing_ccusage', false);
+    return false;
+  }
+
+  /**
+   * Spawn a detached `bun <this file>` that refreshes the shared cache.
+   * No-op while a background refresh is already in flight.
+   */
+  static triggerBackgroundRefresh(): void {
+    try {
+      if (existsSync(BG_LOCK_PATH)) {
+        const ageMs = Date.now() - statSync(BG_LOCK_PATH).mtimeMs;
+        if (ageMs < BG_LOCK_STALE_MS) {
+          console.error(`[CCUsage] Background refresh already in flight (age: ${Math.floor(ageMs / 1000)}s)`);
+          return;
+        }
+      }
+
+      let logFd: number | undefined;
+      try {
+        logFd = openSync(`${homedir()}/.claude/session-health/daemon.log`, 'a');
+      } catch { /* fall back to discarding output */ }
+
+      const child = spawn(process.execPath, [SELF_PATH], {
+        detached: true,
+        stdio: ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
+        env: { ...process.env, NO_COLOR: '1' }
+      });
+      child.unref();
+      if (logFd !== undefined) closeSync(logFd);
+      console.error(`[CCUsage] Spawned detached background refresh (pid: ${child.pid}, budget: ${BG_TIMEOUT_SEC}s)`);
+    } catch (error) {
+      console.error('[CCUsage] Failed to spawn background refresh:', error);
+    }
+  }
+
   validate(data: CCUsageData): ValidationResult {
     if (!data || !data.isFresh) {
       return {
@@ -419,6 +540,31 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
     }
     return String(tokens);
   }
+}
+
+/**
+ * Background-refresh entry point. Runs when this file is executed directly
+ * (`bun src/modules/ccusage-shared-module.ts`), never on import.
+ */
+async function runBackgroundRefresh(): Promise<void> {
+  const lockResult = await ccusageBgLock.acquire();
+  if (!lockResult.acquired) {
+    console.error(`[CCUsage/bg] Lock not acquired (${lockResult.reason}), exiting`);
+    return;
+  }
+  try {
+    const module = new CCUsageSharedModule({ timeout: BG_TIMEOUT_SEC * 1000 });
+    const ok = await module.refreshSharedCache(BG_TIMEOUT_SEC);
+    console.error(`[CCUsage/bg] Refresh ${ok ? 'succeeded' : 'failed'}`);
+  } finally {
+    ccusageBgLock.release();
+  }
+}
+
+if (import.meta.main) {
+  runBackgroundRefresh()
+    .catch((error) => console.error('[CCUsage/bg] Fatal:', error))
+    .finally(() => process.exit(0));
 }
 
 export default CCUsageSharedModule;
