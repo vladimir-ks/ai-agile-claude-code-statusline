@@ -22,6 +22,8 @@
  * - Written by: separate data-daemon (async, background)
  */
 
+const PROC_T0 = Date.now();
+
 // Process-level safety nets — register BEFORE imports to catch import failures
 process.on('uncaughtException', () => {
   try { process.stdout.write('⚠:ERR'); } catch { /* last resort */ }
@@ -33,11 +35,14 @@ process.on('unhandledRejection', () => {
 });
 process.stdout.on('error', () => { process.exit(0); });
 
-import { existsSync, readFileSync, statSync } from 'fs';
+import { existsSync, readFileSync, statSync, realpathSync } from 'fs';
 import { homedir } from 'os';
 import { StatuslineFormatter } from './lib/statusline-formatter';
 import { writeHeartbeat } from './lib/heartbeat';
 import { calculateContext } from './lib/sources/context-source';
+
+let renderLatencyMs: number | null = null;
+let renderExtra: Record<string, unknown> = {};
 
 // ============================================================================
 // Types (inline to avoid import failures)
@@ -641,6 +646,27 @@ interface CachedQuota {
   ageSec: number;     // age of the cache file (mtime)
 }
 
+const HEALTH_STALE_SEC = 300;
+
+// contract: display-only.test.ts — gatheredAt, else file mtime, else null
+function healthFileAgeSec(health: { gatheredAt?: number }, path: string): number | null {
+  const gatheredAt = health?.gatheredAt;
+  if (typeof gatheredAt === 'number' && gatheredAt > 0) {
+    return Math.max(0, Math.floor((Date.now() - gatheredAt) / 1000));
+  }
+  try {
+    return Math.max(0, Math.floor((Date.now() - statSync(path).mtimeMs) / 1000));
+  } catch {
+    return null;
+  }
+}
+
+function resolveRealPath(p: string): string {
+  if (!p) return '';
+  const trimmed = p.replace(/\/+$/, '');
+  try { return realpathSync(trimmed); } catch { return trimmed; }
+}
+
 function humanAge(sec: number): string {
   if (!isFinite(sec) || sec < 0) return '';
   if (sec < 90) return `${Math.floor(sec)}s`;
@@ -659,8 +685,23 @@ function readCachedQuota(): CachedQuota | null {
     if (!raw || raw.trim() === '') return null;
     const d = JSON.parse(raw) as { active_slot?: string; slots?: Record<string, any> };
     const slots = d.slots || {};
-    let active = d.active_slot || '';
-    let s: any = active ? slots[active] : null;
+    let active = '';
+    let s: any = null;
+
+    // why: `active_slot` is a global last-launched pointer shared by every session
+    // contract: display-only.test.ts "degraded quota slot resolution"
+    const myConfigDir = resolveRealPath(process.env.CLAUDE_CONFIG_DIR || '');
+    if (myConfigDir) {
+      for (const [k, v] of Object.entries(slots)) {
+        const cd = (v as any)?.config_dir;
+        if (cd && resolveRealPath(cd) === myConfigDir) { s = v; active = k; break; }
+      }
+    }
+
+    if (!s) {
+      active = d.active_slot || '';
+      s = active ? slots[active] : null;
+    }
     if (!s) {
       for (const [k, v] of Object.entries(slots)) {
         if (v && (v as any).status === 'active') { s = v; active = k; break; }
@@ -914,6 +955,11 @@ function display(): void {
       return;
     }
 
+    // contract: display-only.test.ts "health-file staleness"
+    // contract: display-only.test.ts — STATUSLINE_SPEC.md stale marker ⚠Xm past 5 min
+    const healthAgeSec = healthFileAgeSec(health, healthPath);
+    const healthStale = healthAgeSec !== null && healthAgeSec > HEALTH_STALE_SEC;
+
     // 5. Read config (safe, use defaults on error)
     const configPath = `${HEALTH_DIR}/config.json`;
     const configRaw = safeReadJson<{ components?: Partial<ComponentsConfig>; display?: Partial<DisplayConfig> }>(configPath);
@@ -1021,12 +1067,13 @@ function display(): void {
     );
     // Hot-path self-timing: complements the formatter's own heartbeat so we can
     // attribute any regression to display-only wiring vs. formatter internals.
-    try {
-      writeHeartbeat('display-only', 'render', {
-        latencyMs: Date.now() - renderT0,
-        extra: { paneWidth, singleLine: useSingleLine, variantLines: variant.length },
-      });
-    } catch { /* heartbeat is best-effort */ }
+    renderLatencyMs = Date.now() - renderT0;
+    renderExtra = { paneWidth, singleLine: useSingleLine, variantLines: variant.length };
+
+    if (healthStale && variant.length > 0) {
+      const marker = `${c('stale')}⚠${humanAge(healthAgeSec!)}${rst()}`;
+      variant[variant.length - 1] = `${variant[variant.length - 1]} ${marker}`;
+    }
 
     // === ANTI-WRAPPING GUARDS ===
     // Guard 1: Max lines (configurable, default 6)
@@ -1076,5 +1123,17 @@ function display(): void {
 // ============================================================================
 // Entry Point
 // ============================================================================
+
+// contract: display-only.test.ts "performance" — `totalMs` is this process's own
+// work (file reads + format + guards); it excludes the bun runtime boot the wrapper
+// pays, which no code here can influence. Emitted on EVERY exit path.
+process.on('exit', () => {
+  try {
+    writeHeartbeat('display-only', 'render', {
+      latencyMs: renderLatencyMs ?? undefined,
+      extra: { ...renderExtra, totalMs: Date.now() - PROC_T0 },
+    });
+  } catch { /* heartbeat is best-effort */ }
+});
 
 display();

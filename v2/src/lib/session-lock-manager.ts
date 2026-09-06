@@ -18,6 +18,7 @@ import { homedir } from 'os';
 import { dirname } from 'path';
 import { execSync } from 'child_process';
 import type { SessionLock } from '../types/session-health';
+import { atomicTempPath } from './atomic-temp-path';
 
 export class SessionLockManager {
   private static readonly LOCK_DIR = `${homedir()}/.claude/session-health`;
@@ -97,7 +98,7 @@ export class SessionLockManager {
       }
 
       // Atomic write: temp file + rename
-      const tmpPath = `${path}.${process.pid}.tmp`;
+      const tmpPath = atomicTempPath(path);
       writeFileSync(tmpPath, JSON.stringify(lock, null, 2), { mode: 0o600 });
       try {
         renameSync(tmpPath, path);

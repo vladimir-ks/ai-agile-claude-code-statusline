@@ -18,6 +18,7 @@ import {
   sessionHealthToRuntimeSession
 } from '../types/runtime-state';
 import { SessionHealth, BillingInfo } from '../types/session-health';
+import { atomicTempPath } from './atomic-temp-path';
 
 class RuntimeStateStore {
   private basePath: string;
@@ -214,7 +215,7 @@ class RuntimeStateStore {
    */
   private atomicWrite(filePath: string, content: string): void {
     this.ensureDirectory();
-    const tempPath = `${filePath}.tmp`;
+    const tempPath = atomicTempPath(filePath);
     try {
       writeFileSync(tempPath, content, { encoding: 'utf-8', mode: 0o600 });
       renameSync(tempPath, filePath);

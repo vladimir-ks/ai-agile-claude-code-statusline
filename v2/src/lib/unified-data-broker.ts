@@ -24,6 +24,7 @@ import { AuthProfileDetector } from '../modules/auth-profile-detector';
 import TranscriptMonitor from './transcript-monitor';
 import HealthStore from './health-store';
 import type { DataSourceDescriptor, GatherContext, GlobalDataCacheEntry } from './sources/types';
+import { cacheKeyFor, resolveContextKey } from './sources/types';
 import type { SessionHealth, ClaudeCodeInput } from '../types/session-health';
 import { createDefaultHealth } from '../types/session-health';
 
@@ -186,22 +187,39 @@ export class UnifiedDataBroker {
     const rl = (jsonInput as any)?.rate_limits;
     const nativeActiveQuota = !!(rl && (rl.five_hour || rl.seven_day));
 
+    // why: a git entry belongs to ONE project path, a quota/billing entry to ONE
+    // config dir — see tests/sources-types.test.ts "context scoping".
+    const cacheKeys = new Map<string, string>();
+    const contextKeys = new Map<string, string | undefined>();
+    const categoryFor = (source: DataSourceDescriptor): string =>
+      source.id === 'quota' && nativeActiveQuota
+        ? 'quota_broker_crossslot'
+        : source.freshnessCategory;
+
+    for (const source of tier3Sources) {
+      const contextKey = resolveContextKey(source, ctx);
+      contextKeys.set(source.id, contextKey);
+      cacheKeys.set(source.id, cacheKeyFor(source.id, contextKey));
+    }
+
+    const entryMatchesContext = (
+      entry: GlobalDataCacheEntry | undefined,
+      contextKey: string | undefined,
+    ): boolean => !!entry && (entry.contextKey ?? undefined) === contextKey;
+
     // Determine which sources need refresh
     const staleCategories: string[] = [];
     const staleSources: DataSourceDescriptor[] = [];
 
     for (const source of tier3Sources) {
-      const entry = globalCache.sources[source.id];
-      const freshnessCategory =
-        source.id === 'quota' && nativeActiveQuota
-          ? 'quota_broker_crossslot'
-          : source.freshnessCategory;
-      const isFresh = entry
-        ? FreshnessManager.isFresh(entry.fetchedAt, freshnessCategory)
+      const contextKey = contextKeys.get(source.id);
+      const entry = globalCache.sources[cacheKeys.get(source.id)!];
+      const isFresh = entryMatchesContext(entry, contextKey)
+        ? FreshnessManager.isFresh(entry!.fetchedAt, categoryFor(source))
         : false;
 
       if (!isFresh) {
-        staleCategories.push(source.id);
+        staleCategories.push(cacheKeys.get(source.id)!);
         staleSources.push(source);
       }
     }
@@ -214,7 +232,7 @@ export class UnifiedDataBroker {
 
       // Fetch only the sources we acquired locks for
       const acquiredSources = staleSources.filter(
-        s => acquiredCategories.includes(s.id)
+        s => acquiredCategories.includes(cacheKeys.get(s.id)!)
       );
 
       if (acquiredSources.length > 0) {
@@ -242,19 +260,21 @@ export class UnifiedDataBroker {
         const successfulIds: string[] = [];
         const failedIds: string[] = [];
 
-        for (const result of refreshResults) {
+        for (let i = 0; i < refreshResults.length; i++) {
+          const result = refreshResults[i];
+          // why: a rejected promise carries no source — recover it positionally.
+          const key = cacheKeys.get(acquiredSources[i].id)!;
           if (result.status === 'fulfilled' && result.value.data !== null) {
             const { source, data } = result.value;
-            cacheUpdates[source.id] = {
+            cacheUpdates[key] = {
               data,
               fetchedAt: Date.now(),
               fetchedBy: process.pid,
+              contextKey: contextKeys.get(source.id),
             };
-            successfulIds.push(source.id);
-          } else if (result.status === 'fulfilled') {
-            failedIds.push(result.value.source.id);
+            successfulIds.push(key);
           } else {
-            failedIds.push('unknown');
+            failedIds.push(key);
           }
         }
 
@@ -276,15 +296,21 @@ export class UnifiedDataBroker {
     // Merge all Tier 3 data into health (from cache or fresh)
     const updatedCache = DataCacheManager.read();
     for (const source of tier3Sources) {
-      const entry = updatedCache.sources[source.id];
-      if (entry) {
+      const contextKey = contextKeys.get(source.id);
+      const entry = updatedCache.sources[cacheKeys.get(source.id)!];
+      if (entryMatchesContext(entry, contextKey)) {
+        // contract: unified-data-broker.test.ts "a critically stale entry is NOT merged"
+        if (FreshnessManager.getStatus(entry!.fetchedAt, categoryFor(source)) === 'critical') {
+          continue;
+        }
         try {
-          source.merge(health, entry.data);
+          source.merge(health, entry!.data);
+          UnifiedDataBroker.stampMergedTimestamp(health, source.id, entry!.fetchedAt);
         } catch (err) {
           console.error(`[UDB] Tier 3 merge ${source.id} failed:`, err);
         }
       } else {
-        // No cached data — try fetching directly (for sources not using cache)
+        // No usable cached data — try fetching directly (for sources not using cache)
         try {
           const data = await source.fetch(ctx);
           source.merge(health, data);
@@ -343,6 +369,33 @@ export class UnifiedDataBroker {
     };
 
     return health;
+  }
+
+  /**
+   * Clamp a merged section's timestamp to the cache entry's fetch time.
+   * contract: unified-data-broker.test.ts "stampMergedTimestamp"
+   */
+  private static stampMergedTimestamp(
+    health: SessionHealth,
+    sourceId: string,
+    fetchedAt: number,
+  ): void {
+    if (!fetchedAt || fetchedAt <= 0) return;
+    const clamp = (v: number | undefined): number =>
+      !v || v > fetchedAt ? fetchedAt : v;
+    switch (sourceId) {
+      case 'git_status':
+        if (health.git) health.git.lastChecked = clamp(health.git.lastChecked);
+        break;
+      case 'billing':
+        if (health.billing) health.billing.lastFetched = clamp(health.billing.lastFetched);
+        break;
+      case 'quota':
+        if (health.billing) {
+          health.billing.weeklyLastModified = clamp(health.billing.weeklyLastModified);
+        }
+        break;
+    }
   }
 
   /**

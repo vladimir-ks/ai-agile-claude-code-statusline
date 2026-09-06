@@ -15,6 +15,7 @@ interface LockOptions {
   timeout: number;      // Max age of lock before considering it stale
   retryInterval: number; // How often to check if lock is released
   maxRetries: number;   // Max attempts to acquire lock
+  hardTimeout: number;  // Age past which even a LIVE holder is reaped (wedged process)
 }
 
 interface LockResult {
@@ -31,7 +32,8 @@ class ProcessLock {
       lockPath: options.lockPath || `${process.env.HOME}/.claude/.ccusage.lock`,
       timeout: options.timeout || 15000,  // 15s stale lock timeout (was 60s — too long, daemons killed at 30s)
       retryInterval: options.retryInterval || 2000,  // 2s between retries
-      maxRetries: options.maxRetries || 5  // Total ~10s of attempts (was 15×5s=75s — far exceeds daemon budget)
+      maxRetries: options.maxRetries || 5,  // Total ~10s of attempts (was 15×5s=75s — far exceeds daemon budget)
+      hardTimeout: options.hardTimeout || Math.max(600_000, (options.timeout || 15000) * 10)
     };
   }
 
@@ -72,13 +74,17 @@ class ProcessLock {
           console.warn(`[ProcessLock] Lock held by dead process ${lockPid}, releasing`);
           this.forceRelease();
         } else if (lockAge > this.options.timeout) {
-          // Lock is stale by time, check if process still exists
-          if (lockPid && this.isProcessAlive(lockPid)) {
-            // Process exists but lock is old - force release
-            console.warn(`[ProcessLock] Stale lock detected (${lockAge}ms old), PID ${lockPid} still alive, forcing release`);
+          // contract: process-lock.test.ts "alive holder is not force-released before the hard cap"
+          // contract: process-lock.test.ts — alive holder kept until hardTimeout
+          if (lockPid && this.isProcessAlive(lockPid) && lockAge <= this.options.hardTimeout) {
+            console.warn(`[ProcessLock] Stale-by-time lock (${lockAge}ms old) held by LIVE PID ${lockPid} — not acquiring`);
+            return {
+              acquired: false,
+              reason: `Lock held by live PID ${lockPid} (age: ${lockAge}ms)`,
+              lockHolder: lockPid
+            };
           }
 
-          // Remove stale lock
           this.forceRelease();
         } else {
           // Lock is fresh AND process is alive - someone else is using it

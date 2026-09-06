@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { homedir } from 'os';
+import { atomicTempPath } from './atomic-temp-path';
 
 export const QUOTA_SCHEMA_VERSION = 1;
 
@@ -52,9 +53,31 @@ function _loadBadCounts(): BadReadCounts {
   }
 }
 
+// why: keys are absolute paths and a deleted path's entry would live forever —
+// contract: quota-schema-bad-counts.test.ts "dead keys are pruned"
+const PRUNE_THRESHOLD = 16;
+const PRUNE_MIN_AGE_MS = 3600_000;
+let prunedThisProcess = false;
+
+function _pruneDeadKeys(counts: BadReadCounts, keepKey?: string): void {
+  if (prunedThisProcess) return;
+  const keys = Object.keys(counts);
+  if (keys.length <= PRUNE_THRESHOLD) return;
+  prunedThisProcess = true;
+  const now = Date.now();
+  for (const key of keys) {
+    if (key === keepKey) continue;
+    const age = now - (counts[key]?.last_bad_at ?? 0);
+    if (age < PRUNE_MIN_AGE_MS) continue;
+    try {
+      if (!existsSync(key)) delete counts[key];
+    } catch { /* unreadable path — leave the entry alone */ }
+  }
+}
+
 function _saveBadCounts(counts: BadReadCounts): void {
   const p = _badCountsPath();
-  const tmp = `${p}.tmp.${process.pid}`;
+  const tmp = atomicTempPath(p);
   try {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(tmp, JSON.stringify(counts));
@@ -81,6 +104,7 @@ function _incrementBadCount(key: string): number {
     last_bad_at: now,
   };
   counts[key] = entry;
+  _pruneDeadKeys(counts, key);
   _saveBadCounts(counts);
   BAD_READ_COUNTS.set(key, entry.count);
   return entry.count;
@@ -90,6 +114,7 @@ function _clearBadCount(key: string): void {
   const counts = _loadBadCounts();
   if (key in counts) {
     delete counts[key];
+    _pruneDeadKeys(counts);
     _saveBadCounts(counts);
   }
   BAD_READ_COUNTS.delete(key);
@@ -350,7 +375,7 @@ export function readWithLkg<T>(
       mkdirSync(dirname(lkgPath), { recursive: true });
       // PID-qualified tmp path: concurrent bun processes must not race on the
       // same `.tmp` file, which truncates in-flight writes from another process.
-      const tmpPath = `${lkgPath}.tmp.${process.pid}`;
+      const tmpPath = atomicTempPath(lkgPath);
       writeFileSync(tmpPath, JSON.stringify(parsed));
       renameSync(tmpPath, lkgPath);
     } catch { /* best-effort lkg update */ }
@@ -360,9 +385,12 @@ export function readWithLkg<T>(
   // Bad read — file-backed counter (P1-h)
   const newCount = _incrementBadCount(path);
 
-  if (newCount >= 3 && existsSync(path)) {
-    const quarantine = `${path}.corrupt-${Math.floor(Date.now() / 1000)}`;
-    try { renameSync(path, quarantine); } catch { /* best-effort */ }
+  // contract: quota-schema-bad-counts.test.ts "a path that never resolves has its counter cleared at 3 strikes"
+  if (newCount >= 3) {
+    if (existsSync(path)) {
+      const quarantine = `${path}.corrupt-${Math.floor(Date.now() / 1000)}`;
+      try { renameSync(path, quarantine); } catch { /* best-effort */ }
+    }
     _clearBadCount(path);
   }
 

@@ -14,6 +14,7 @@ import { homedir } from 'os';
 import { SessionHealth } from '../types/session-health';
 import { FreshnessManager, FreshnessReport, StalenessStatus } from './freshness-manager';
 import { sanitizeSessionId } from './sanitize';
+import { atomicTempPath } from './atomic-temp-path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -147,7 +148,7 @@ export class DebugStateWriter {
 
       const debugState = this.buildDebugState(sessionId, health);
       const filePath = join(dir, `${sanitizeSessionId(sessionId)}.debug.json`);
-      const tempPath = `${filePath}.tmp`;
+      const tempPath = atomicTempPath(filePath);
 
       writeFileSync(tempPath, JSON.stringify(debugState, null, 2), { encoding: 'utf-8', mode: 0o600 });
       renameSync(tempPath, filePath);

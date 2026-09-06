@@ -16,6 +16,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { SessionHealth } from '../types/session-health';
 import { UrgencyCalculator, UrgencyResult } from './urgency-calculator';
+import { atomicTempPath } from './atomic-temp-path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,7 +138,7 @@ export class HealthPublisher {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
-    const tempPath = `${path}.tmp`;
+    const tempPath = atomicTempPath(path);
     try {
       writeFileSync(tempPath, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 });
       renameSync(tempPath, path);

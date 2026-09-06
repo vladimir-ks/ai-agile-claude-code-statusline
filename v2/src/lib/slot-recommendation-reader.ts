@@ -118,7 +118,8 @@ export class SlotRecommendationReader {
       }
 
       const stats = statSync(this.RECOMMENDATION_PATH);
-      return Date.now() - stats.mtimeMs;
+      // contract: slot-recommendation-reader.test.ts "getAge returns age in ms for existing file"
+      return Math.max(0, Date.now() - stats.mtimeMs);
     } catch {
       return null;
     }

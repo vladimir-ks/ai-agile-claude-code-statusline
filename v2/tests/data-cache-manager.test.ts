@@ -70,34 +70,34 @@ describe('DataCacheManager', () => {
   describe('read()', () => {
     test('returns empty cache when file does not exist', () => {
       const cache = DataCacheManager.read();
-      expect(cache.version).toBe(2);
+      expect(cache.version).toBe(3);
       expect(cache.sources).toEqual({});
     });
 
     test('returns empty cache for corrupted JSON', () => {
       writeFileSync(tempCachePath, 'NOT JSON{{{');
       const cache = DataCacheManager.read();
-      expect(cache.version).toBe(2);
+      expect(cache.version).toBe(3);
       expect(cache.sources).toEqual({});
     });
 
     test('returns empty cache for wrong version', () => {
       writeFileSync(tempCachePath, JSON.stringify({ version: 1, sources: {} }));
       const cache = DataCacheManager.read();
-      expect(cache.version).toBe(2);
+      expect(cache.version).toBe(3);
       expect(cache.sources).toEqual({});
     });
 
     test('returns empty cache for missing sources key', () => {
-      writeFileSync(tempCachePath, JSON.stringify({ version: 2 }));
+      writeFileSync(tempCachePath, JSON.stringify({ version: 3 }));
       const cache = DataCacheManager.read();
-      expect(cache.version).toBe(2);
+      expect(cache.version).toBe(3);
       expect(cache.sources).toEqual({});
     });
 
     test('reads valid cache from file', () => {
       const validCache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing_oauth: {
@@ -109,13 +109,13 @@ describe('DataCacheManager', () => {
       };
       writeFileSync(tempCachePath, JSON.stringify(validCache));
       const cache = DataCacheManager.read();
-      expect(cache.version).toBe(2);
+      expect(cache.version).toBe(3);
       expect(cache.sources.billing_oauth.data.daily_cost).toBe(40.3);
     });
 
     test('uses memory cache within TTL', () => {
       const validCache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing: { data: { v: 1 }, fetchedAt: Date.now(), fetchedBy: 1 },
@@ -138,7 +138,7 @@ describe('DataCacheManager', () => {
 
     test('refreshes from file after cache clear', () => {
       const cache1 = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing: { data: { v: 1 }, fetchedAt: Date.now(), fetchedBy: 1 },
@@ -171,7 +171,7 @@ describe('DataCacheManager', () => {
 
     test('returns entry for existing source', () => {
       const validCache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           git_status: {
@@ -202,7 +202,7 @@ describe('DataCacheManager', () => {
 
     test('returns true for recently fetched data', () => {
       const cache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing_oauth: {
@@ -219,7 +219,7 @@ describe('DataCacheManager', () => {
 
     test('returns false for stale data', () => {
       const cache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing_oauth: {
@@ -252,14 +252,14 @@ describe('DataCacheManager', () => {
       expect(existsSync(tempCachePath)).toBe(true);
 
       const content = JSON.parse(readFileSync(tempCachePath, 'utf-8'));
-      expect(content.version).toBe(2);
+      expect(content.version).toBe(3);
       expect(content.sources.billing_oauth.data.cost).toBe(10);
     });
 
     test('merges into existing cache', () => {
       // Write initial cache
       const initial = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now() - 60_000,
         sources: {
           billing_oauth: {
@@ -291,7 +291,7 @@ describe('DataCacheManager', () => {
 
     test('overwrites existing source entry', () => {
       const initial = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing_oauth: {
@@ -435,7 +435,7 @@ describe('DataCacheManager', () => {
     test('returns age in ms for existing source', () => {
       const fetchedAt = Date.now() - 5000;
       const cache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing: {
@@ -462,7 +462,7 @@ describe('DataCacheManager', () => {
   describe('clearCache()', () => {
     test('forces next read() to go to file', () => {
       const cache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing: { data: { v: 1 }, fetchedAt: Date.now(), fetchedBy: 1 },
@@ -500,7 +500,7 @@ describe('DataCacheManager', () => {
 
       const content = readFileSync(tempCachePath, 'utf-8');
       const parsed = JSON.parse(content);
-      expect(parsed.version).toBe(2);
+      expect(parsed.version).toBe(3);
       expect(parsed.sources.billing).toBeDefined();
     });
 
@@ -512,7 +512,7 @@ describe('DataCacheManager', () => {
       // Check no .tmp files in the directory
       const { readdirSync } = require('fs');
       const files = readdirSync(tempDir);
-      const tmpFiles = files.filter((f: string) => f.endsWith('.tmp'));
+      const tmpFiles = files.filter((f: string) => f.includes('.tmp'));
       expect(tmpFiles).toHaveLength(0);
     });
   });

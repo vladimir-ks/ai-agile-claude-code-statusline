@@ -183,15 +183,15 @@ describe('StateManager', () => {
 
       // Spy on file writes to verify temp file usage
       const statePath = join(tempStateDir, `${sessionId}.state`);
-      const tempPath = `${statePath}.tmp`;
 
       StateManager.save(sessionId, state);
 
       // Final file should exist
       expect(existsSync(statePath)).toBe(true);
 
-      // Temp file should be cleaned up
-      expect(existsSync(tempPath)).toBe(false);
+      // Temp files (`<file>.tmp.<pid>.<rand>`) are cleaned up
+      const { readdirSync } = require('fs');
+      expect(readdirSync(tempStateDir).filter((f: string) => f.includes('.tmp'))).toEqual([]);
     });
 
     test('cleans up temp file on rename failure', () => {
@@ -202,8 +202,8 @@ describe('StateManager', () => {
       // (Note: hard to test without mocking, this is a behavioral spec)
       StateManager.save(sessionId, state);
 
-      const tempPath = join(tempStateDir, `${sessionId}.state.tmp`);
-      expect(existsSync(tempPath)).toBe(false);
+      const { readdirSync } = require('fs');
+      expect(readdirSync(tempStateDir).filter((f: string) => f.includes('.tmp'))).toEqual([]);
     });
 
     test('state file is valid JSON after save', () => {

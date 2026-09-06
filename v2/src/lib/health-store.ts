@@ -28,6 +28,9 @@ import {
 } from '../types/session-health';
 import { sanitizeSessionId } from './sanitize';
 
+import { atomicTempPath } from './atomic-temp-path';
+export { atomicTempPath };
+
 class HealthStore {
   private basePath: string;
 
@@ -56,7 +59,7 @@ class HealthStore {
    * Atomic write: write to temp file, then rename
    */
   private atomicWrite(filePath: string, data: string): void {
-    const tempPath = `${filePath}.tmp`;
+    const tempPath = atomicTempPath(filePath);
     try {
       writeFileSync(tempPath, data, { encoding: 'utf-8', mode: 0o600 });
       renameSync(tempPath, filePath);

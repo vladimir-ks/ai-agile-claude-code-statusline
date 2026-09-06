@@ -12,6 +12,7 @@ import { existsSync, statSync, writeFileSync, unlinkSync, mkdirSync, readFileSyn
 import { homedir } from 'os';
 import { createHash } from 'crypto';
 import { isKeychainUnlocked } from '../lib/keychain-guard';
+import { atomicTempPath } from '../lib/atomic-temp-path';
 
 const COOLDOWN_DIR = `${homedir()}/.claude/session-health/cooldowns`;
 
@@ -140,7 +141,7 @@ export class AnthropicOAuthAPI {
       };
 
       // Atomic write: write to tmp then rename
-      const tmpPath = `${statePath}.tmp.${process.pid}`;
+      const tmpPath = atomicTempPath(statePath);
       writeFileSync(tmpPath, JSON.stringify(state) + '\n', { mode: 0o600 });
       const { renameSync } = require('fs');
       renameSync(tmpPath, statePath);

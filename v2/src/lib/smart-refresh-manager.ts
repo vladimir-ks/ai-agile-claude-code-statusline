@@ -17,6 +17,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { homedir } from 'os';
 import { BillingInfo, GitInfo, SessionHealth } from '../types/session-health';
 import { SubscriptionReader } from './subscription-reader';
+import { atomicTempPath } from './atomic-temp-path';
 
 // ============================================================================
 // Types
@@ -131,7 +132,7 @@ export class SmartRefreshManager {
 
         // Write to shared file (atomic)
         try {
-          const tempPath = `${this.BILLING_PATH}.tmp`;
+          const tempPath = atomicTempPath(this.BILLING_PATH);
           writeFileSync(tempPath, JSON.stringify(freshBilling), { encoding: 'utf-8', mode: 0o600 });
           renameSync(tempPath, this.BILLING_PATH);
         } catch { /* ignore write errors */ }

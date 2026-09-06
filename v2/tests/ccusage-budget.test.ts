@@ -14,6 +14,7 @@ import {
   CCUSAGE_MIN_REMAINING_MS,
   CCUSAGE_DEADLINE_RESERVE_MS,
 } from '../src/modules/ccusage-shared-module';
+import CCUsageSharedModule from '../src/modules/ccusage-shared-module';
 
 const NOW = 1_700_000_000_000;
 const withRemaining = (ms: number) => deriveCcusageTimeoutSec(NOW + ms, NOW);
@@ -69,5 +70,20 @@ describe('deriveCcusageTimeoutSec', () => {
   test('defaults sit inside the clamp', () => {
     expect(CCUSAGE_DEFAULT_TIMEOUT_SEC).toBeGreaterThanOrEqual(CCUSAGE_MIN_TIMEOUT_SEC);
     expect(CCUSAGE_DEFAULT_TIMEOUT_SEC).toBeLessThanOrEqual(CCUSAGE_MAX_TIMEOUT_SEC);
+  });
+});
+
+describe('background refresh guard', () => {
+  test('triggerBackgroundRefresh never spawns under a test runner', () => {
+    const lines: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.join(' ')); };
+    try {
+      CCUsageSharedModule.triggerBackgroundRefresh();
+    } finally {
+      console.error = orig;
+    }
+    expect(process.env.NODE_ENV).toBe('test');
+    expect(lines.join('\n')).not.toContain('Spawned detached background refresh');
   });
 });

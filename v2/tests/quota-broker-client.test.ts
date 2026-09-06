@@ -13,7 +13,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -645,6 +645,93 @@ describe('QuotaBrokerClient', () => {
 
       const result = QuotaBrokerClient.read();
       expect(result).not.toBeNull();
+    });
+  });
+
+  // --- spawn trigger: inactive slots + atomic spawn claim ---
+
+  describe('broker spawn trigger', () => {
+    const CLAIM_DIR = join(TEST_DIR, '.quota-broker-spawn.claim');
+    let spawnCalls: number;
+    let originalSpawn: any;
+
+    beforeEach(() => {
+      (QuotaBrokerClient as any).SPAWN_CLAIM_PATH = CLAIM_DIR;
+      QuotaBrokerClient.releaseSpawnClaim();
+      spawnCalls = 0;
+      originalSpawn = (QuotaBrokerClient as any).spawnBroker;
+      (QuotaBrokerClient as any).spawnBroker = () => { spawnCalls++; };
+      QuotaBrokerClient.enableBrokerSpawn();
+      QuotaBrokerClient.clearCache();
+    });
+
+    afterEach(() => {
+      (QuotaBrokerClient as any).spawnBroker = originalSpawn;
+      (QuotaBrokerClient as any).spawnEnabled = false;
+      QuotaBrokerClient.releaseSpawnClaim();
+    });
+
+    test('permanently-dead inactive slots never trigger a spawn', () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      writeFileSync(CACHE_FILE, JSON.stringify(makeCache({
+        ts: nowS,
+        slots: {
+          'slot-0': makeSlot({
+            status: 'inactive',
+            last_fetched: Date.now() - 246_543 * 60_000,
+            five_hour_resets_at: '',
+          }),
+          'slot-1': makeSlot({ last_fetched: Date.now(), five_hour_resets_at: new Date(Date.now() + 3600_000).toISOString() }),
+        },
+      })), 'utf-8');
+
+      const result = QuotaBrokerClient.read();
+      expect(result).not.toBeNull();
+      expect(result!.is_fresh).toBe(true);
+      expect(spawnCalls).toBe(0);
+    });
+
+    test('an ACTIVE stale slot still triggers a spawn', () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      writeFileSync(CACHE_FILE, JSON.stringify(makeCache({
+        ts: nowS,
+        slots: {
+          'slot-1': makeSlot({
+            status: 'active',
+            last_fetched: Date.now() - 60 * 60_000,
+            five_hour_resets_at: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+        },
+      })), 'utf-8');
+
+      QuotaBrokerClient.read();
+      expect(spawnCalls).toBe(1);
+    });
+  });
+
+  // --- spawn claim: atomic, one winner ---
+
+  describe('tryClaimSpawn', () => {
+    const CLAIM_DIR = join(TEST_DIR, '.claim-test');
+
+    beforeEach(() => {
+      (QuotaBrokerClient as any).SPAWN_CLAIM_PATH = CLAIM_DIR;
+      QuotaBrokerClient.releaseSpawnClaim();
+    });
+    afterEach(() => QuotaBrokerClient.releaseSpawnClaim());
+
+    test('exactly one of N concurrent claimants wins', () => {
+      const wins = Array.from({ length: 40 }, () => (QuotaBrokerClient as any).tryClaimSpawn())
+        .filter(Boolean).length;
+      expect(wins).toBe(1);
+    });
+
+    test('an expired claim is reclaimable', () => {
+      expect((QuotaBrokerClient as any).tryClaimSpawn()).toBe(true);
+      expect((QuotaBrokerClient as any).tryClaimSpawn()).toBe(false);
+      const past = new Date(Date.now() - 120_000);
+      utimesSync(CLAIM_DIR, past, past);
+      expect((QuotaBrokerClient as any).tryClaimSpawn()).toBe(true);
     });
   });
 });

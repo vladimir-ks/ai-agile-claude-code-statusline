@@ -13,7 +13,7 @@ import type {
   GlobalDataCache,
   GlobalDataCacheEntry,
 } from '../src/lib/sources/types';
-import { createEmptyGlobalCache } from '../src/lib/sources/types';
+import { cacheKeyFor, createEmptyGlobalCache, defaultContextKey, resolveContextKey } from '../src/lib/sources/types';
 
 describe('sources/types', () => {
 
@@ -22,9 +22,9 @@ describe('sources/types', () => {
   // -------------------------------------------------------------------------
 
   describe('createEmptyGlobalCache', () => {
-    test('returns version 2', () => {
+    test('returns version 3', () => {
       const cache = createEmptyGlobalCache();
-      expect(cache.version).toBe(2);
+      expect(cache.version).toBe(3);
     });
 
     test('returns empty sources', () => {
@@ -203,7 +203,7 @@ describe('sources/types', () => {
   describe('GlobalDataCache', () => {
     test('can create a populated cache', () => {
       const cache: GlobalDataCache = {
-        version: 2,
+        version: 3,
         updatedAt: Date.now(),
         sources: {
           billing_oauth: {
@@ -222,6 +222,65 @@ describe('sources/types', () => {
       expect(Object.keys(cache.sources)).toHaveLength(2);
       expect(cache.sources.billing_oauth.data.daily_cost).toBe(40.3);
       expect(cache.sources.git_status.contextKey).toBe('/home/user/project');
+    });
+  });
+  // -------------------------------------------------------------------------
+  // Context scoping (cache keys)
+  // -------------------------------------------------------------------------
+
+  describe('context scoping', () => {
+    const ctx = (over: Partial<GatherContext> = {}): GatherContext => ({
+      sessionId: 's', transcriptPath: null, jsonInput: null,
+      configDir: null, keychainService: null,
+      deadline: Date.now() + 1000, existingHealth: null,
+      projectPath: '/repo/alpha', ...over,
+    });
+
+    test('per-account sources default to the config dir', () => {
+      for (const id of ['quota', 'billing', 'slot_recommendation']) {
+        expect(defaultContextKey(id, ctx({ configDir: '/slots/S2/general' }))).toBe('/slots/S2/general');
+      }
+    });
+
+    test('per-account sources fall back to the keychain service', () => {
+      expect(defaultContextKey('quota', ctx({ keychainService: 'kc-abc' }))).toBe('kc-abc');
+    });
+
+    test('genuinely global sources have no context key', () => {
+      expect(defaultContextKey('version_check', ctx())).toBeUndefined();
+      expect(defaultContextKey('notifications', ctx())).toBeUndefined();
+    });
+
+    test('a declared contextKeyFor wins over the default', () => {
+      const src = { id: 'git_status', contextKeyFor: (c: GatherContext) => c.projectPath };
+      expect(resolveContextKey(src as any, ctx({ projectPath: '/repo/beta' }))).toBe('/repo/beta');
+    });
+
+    test('an empty context key resolves to undefined', () => {
+      const src = { id: 'git_status', contextKeyFor: () => '' };
+      expect(resolveContextKey(src as any, ctx())).toBeUndefined();
+    });
+
+    test('cacheKeyFor is the bare id when unscoped', () => {
+      expect(cacheKeyFor('version_check')).toBe('version_check');
+      expect(cacheKeyFor('version_check', undefined)).toBe('version_check');
+    });
+
+    test('cacheKeyFor separates distinct contexts and is stable', () => {
+      const a = cacheKeyFor('git_status', '/repo/alpha');
+      const b = cacheKeyFor('git_status', '/repo/beta');
+      expect(a).not.toBe(b);
+      expect(a).toBe(cacheKeyFor('git_status', '/repo/alpha'));
+      expect(a.startsWith('git_status::')).toBe(true);
+    });
+
+    test('cacheKeyFor is filename-safe (it also names lock files)', () => {
+      expect(cacheKeyFor('git_status', '/repo/a b/c')).toMatch(/^git_status::[0-9a-f]{12}$/);
+    });
+
+    test('the same context under two source ids never collides', () => {
+      expect(cacheKeyFor('quota', '/slots/S1/general'))
+        .not.toBe(cacheKeyFor('billing', '/slots/S1/general'));
     });
   });
 });

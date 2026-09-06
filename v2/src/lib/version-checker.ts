@@ -12,6 +12,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, renameSyn
 import { homedir } from 'os';
 import { dirname } from 'path';
 import { execSync } from 'child_process';
+import { atomicTempPath } from './atomic-temp-path';
 
 export interface VersionInfo {
   version: string;           // Semantic version (e.g., "2.1.31")
@@ -175,7 +176,7 @@ export class VersionChecker {
       }
 
       // Atomic write
-      const tmpPath = `${this.VERSION_CACHE_PATH}.${process.pid}.tmp`;
+      const tmpPath = atomicTempPath(this.VERSION_CACHE_PATH);
       writeFileSync(tmpPath, JSON.stringify(info, null, 2), { mode: 0o600 });
       try {
         renameSync(tmpPath, this.VERSION_CACHE_PATH);
@@ -232,7 +233,8 @@ export class VersionChecker {
       }
 
       const stats = statSync(this.VERSION_CACHE_PATH);
-      return Date.now() - stats.mtimeMs;
+      // contract: version-checker.test.ts "getCacheAge returns age in ms for existing cache"
+      return Math.max(0, Date.now() - stats.mtimeMs);
     } catch {
       return null;
     }

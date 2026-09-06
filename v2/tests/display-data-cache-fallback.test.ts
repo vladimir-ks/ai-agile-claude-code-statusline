@@ -70,7 +70,7 @@ describe('display-only data-cache.json fallback', () => {
 
       // Verify the file can be parsed by display-only logic
       const content = JSON.parse(require('fs').readFileSync(cachePath, 'utf-8'));
-      expect(content.version).toBe(2);
+      expect(content.version).toBe(3);
       expect(content.sources.billing.data.billing.costToday).toBe(40.3);
       expect(content.sources.quota.data.weeklyBudgetRemaining).toBe(42);
     } finally {
@@ -88,7 +88,7 @@ describe('display-only data-cache.json fallback', () => {
   test('data-cache.json structure is parseable by display-only fallback', () => {
     const cachePath = join(tempDir, 'data-cache.json');
     const cache = {
-      version: 2,
+      version: 3,
       updatedAt: Date.now(),
       sources: {
         billing: {
@@ -117,7 +117,7 @@ describe('display-only data-cache.json fallback', () => {
 
     // Simulate the display-only fallback logic
     const dataCache = JSON.parse(require('fs').readFileSync(cachePath, 'utf-8'));
-    expect(dataCache.version).toBe(2);
+    expect(dataCache.version).toBe(3);
     expect(dataCache.sources).toBeDefined();
 
     // Billing extraction (matches display-only.ts logic)
@@ -168,7 +168,7 @@ describe('display-only data-cache.json fallback', () => {
     try {
       if (existsSync(cachePath)) {
         const dataCache = JSON.parse(require('fs').readFileSync(cachePath, 'utf-8'));
-        if (dataCache?.version === 2 && dataCache?.sources) {
+        if (dataCache?.version === 3 && dataCache?.sources) {
           gotBilling = true;
         }
       }
@@ -179,7 +179,7 @@ describe('display-only data-cache.json fallback', () => {
   test('handles missing billing entry gracefully', () => {
     const cachePath = join(tempDir, 'data-cache.json');
     writeFileSync(cachePath, JSON.stringify({
-      version: 2,
+      version: 3,
       updatedAt: Date.now(),
       sources: {
         git_status: { data: { branch: 'main' }, fetchedAt: Date.now(), fetchedBy: 1 },

@@ -9,6 +9,7 @@ import { promisify } from 'util';
 import { writeFileSync, renameSync, unlinkSync, existsSync, readFileSync } from 'fs';
 import { homedir } from 'os';
 import { parse as parseYaml } from 'yaml';
+import { atomicTempPath } from './lib/atomic-temp-path';
 
 const execAsync = promisify(exec);
 const sharedBillingPath = `${homedir()}/.claude/session-health/billing-shared.json`;
@@ -187,7 +188,7 @@ async function forceBillingRefresh() {
 
     // Step 5: Write to shared cache
     console.log('\nWriting to billing-shared.json...');
-    const tempPath = `${sharedBillingPath}.tmp`;
+    const tempPath = atomicTempPath(sharedBillingPath);
     writeFileSync(tempPath, JSON.stringify(billing, null, 2), { encoding: 'utf-8', mode: 0o600 });
     renameSync(tempPath, sharedBillingPath);
 

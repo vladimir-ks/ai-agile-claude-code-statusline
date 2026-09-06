@@ -25,17 +25,21 @@ export interface GitSourceData {
   fetchedAt: number;
 }
 
-export const gitSource: DataSourceDescriptor<GitSourceData> = {
+export const gitSource: DataSourceDescriptor<GitSourceData | null> = {
   id: 'git_status',
   tier: 3,
   freshnessCategory: 'git_status',
   timeoutMs: 5000,
+  contextKeyFor: (ctx: GatherContext) => ctx.projectPath || undefined,
 
-  async fetch(ctx: GatherContext): Promise<GitSourceData> {
+  async fetch(ctx: GatherContext): Promise<GitSourceData | null> {
     const fetchStart = Date.now();
     // F-D2: pass ctx.projectPath so gitModule uses the session's project directory
     // rather than process.cwd() (which is the daemon's CWD, not the project).
     const gitData = await gitModule.fetch(ctx.sessionId, ctx.projectPath);
+
+    // contract: tier3-sources.test.ts "fetch returns null (not empty-but-fresh data) when git is unavailable"
+    if (!gitData || gitData.isRepo === false) return null;
 
     return {
       branch: gitData?.branch || '',
@@ -46,7 +50,8 @@ export const gitSource: DataSourceDescriptor<GitSourceData> = {
     };
   },
 
-  merge(target: SessionHealth, data: GitSourceData): void {
+  merge(target: SessionHealth, data: GitSourceData | null): void {
+    if (!data) return;
     target.git = {
       branch: data.branch,
       ahead: data.ahead,

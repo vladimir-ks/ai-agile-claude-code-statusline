@@ -21,6 +21,7 @@ import { homedir } from 'os';
 import { FreshnessManager } from './freshness-manager';
 import { RefreshIntentManager } from './refresh-intent-manager';
 import type { SessionHealth } from '../types/session-health';
+import { atomicTempPath } from './atomic-temp-path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -273,7 +274,7 @@ export class TelemetryDashboard {
       }
 
       const path = telemetryPath();
-      const tmpPath = `${path}.${process.pid}.tmp`;
+      const tmpPath = atomicTempPath(path);
       writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600 });
       renameSync(tmpPath, path);
     } catch { /* non-critical */ }

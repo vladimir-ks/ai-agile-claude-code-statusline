@@ -12,11 +12,9 @@
  *    file>`) and return the cache. The gather path never waits on ccusage.
  * 3. The background process writes the shared cache for every session.
  *
- * why: measured ccusage wall time on this host exceeds 300s, so no in-deadline
- * foreground budget can succeed — contract: tests/ccusage-budget.test.ts
- *
+ * why: ccusage wall time on this host exceeds every in-deadline foreground budget.
  * STATUSLINE_CCUSAGE_FOREGROUND=1 restores in-band execution, bounded by
- * deriveCcusageTimeoutSec() against the caller's gather deadline.
+ * deriveCcusageTimeoutSec(). contract: tests/ccusage-budget.test.ts
  */
 
 import type { DataModule, DataModuleConfig } from '../broker/data-broker';
@@ -28,6 +26,7 @@ import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import ProcessLock from '../lib/process-lock';
 import { FreshnessManager } from '../lib/freshness-manager';
+import { atomicTempPath } from '../lib/atomic-temp-path';
 
 const execAsync = promisify(exec);
 
@@ -270,7 +269,7 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
         lastFetched: Date.now()
       };
 
-      const tempPath = `${SHARED_CACHE_PATH}.tmp`;
+      const tempPath = atomicTempPath(SHARED_CACHE_PATH);
       writeFileSync(tempPath, JSON.stringify(cache), { encoding: 'utf-8', mode: 0o600 });
       renameSync(tempPath, SHARED_CACHE_PATH);
     } catch (error) {
@@ -475,6 +474,9 @@ class CCUsageSharedModule implements DataModule<CCUsageData> {
    * No-op while a background refresh is already in flight.
    */
   static triggerBackgroundRefresh(): void {
+    // why: the child runs ccusage for up to 600s against the operator's live
+    // data — a test run must never spawn it. contract: ccusage-budget.test.ts
+    if (process.env.NODE_ENV === 'test' || process.env.STATUSLINE_CCUSAGE_NO_BG === '1') return;
     try {
       if (existsSync(BG_LOCK_PATH)) {
         const ageMs = Date.now() - statSync(BG_LOCK_PATH).mtimeMs;

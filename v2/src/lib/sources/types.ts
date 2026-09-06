@@ -36,6 +36,13 @@ export interface DataSourceDescriptor<T = any> {
   dependencies?: string[];
 
   /**
+   * Scope this source's global-cache entry to a context (project path, config
+   * dir, ...). Sources without one share a single global entry.
+   * Default mapping for sources that do not declare it: `defaultContextKey`.
+   */
+  contextKeyFor?(ctx: GatherContext): string | undefined;
+
+  /**
    * Fetch fresh data for this source.
    * Should respect ctx.deadline and abort early if budget exceeded.
    */
@@ -83,12 +90,14 @@ export interface GlobalDataCacheEntry {
   contextKey?: string;
 }
 
+export const GLOBAL_CACHE_VERSION = 3;
+
 export interface GlobalDataCache {
   /** Schema version */
-  version: 2;
+  version: 3;
   /** When the cache was last written (Unix ms) */
   updatedAt: number;
-  /** Per-source cached data */
+  /** Per-source cached data, keyed by `cacheKeyFor(sourceId, contextKey)` */
   sources: Record<string, GlobalDataCacheEntry>;
 }
 
@@ -97,8 +106,55 @@ export interface GlobalDataCache {
  */
 export function createEmptyGlobalCache(): GlobalDataCache {
   return {
-    version: 2,
+    version: GLOBAL_CACHE_VERSION,
     updatedAt: Date.now(),
     sources: {}
   };
+}
+
+// ---------------------------------------------------------------------------
+// Context scoping
+// ---------------------------------------------------------------------------
+
+/**
+ * Context key for sources that do not declare `contextKeyFor`.
+ *
+ * Per-account data (quota, billing, slot recommendation) is scoped to the
+ * session's config dir; everything else is genuinely global.
+ */
+export function defaultContextKey(sourceId: string, ctx: GatherContext): string | undefined {
+  switch (sourceId) {
+    case 'quota':
+    case 'billing':
+    case 'slot_recommendation':
+      return ctx.configDir || ctx.keychainService || undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Resolve the effective context key for a source.
+ */
+export function resolveContextKey(
+  source: Pick<DataSourceDescriptor, 'id' | 'contextKeyFor'>,
+  ctx: GatherContext,
+): string | undefined {
+  const key = source.contextKeyFor
+    ? source.contextKeyFor(ctx)
+    : defaultContextKey(source.id, ctx);
+  return key && key.length > 0 ? key : undefined;
+}
+
+/**
+ * Cache/lock key for a source in a context.
+ *
+ * The context key is hashed because it also names single-flight lock FILES
+ * (RefreshIntentManager) — a raw path would not be filename-safe.
+ */
+export function cacheKeyFor(sourceId: string, contextKey?: string): string {
+  if (!contextKey) return sourceId;
+  const { createHash } = require('crypto') as typeof import('crypto');
+  const digest = createHash('sha1').update(contextKey).digest('hex').slice(0, 12);
+  return `${sourceId}::${digest}`;
 }

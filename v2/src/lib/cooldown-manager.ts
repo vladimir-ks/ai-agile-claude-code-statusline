@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { atomicTempPath } from './atomic-temp-path';
 
 export interface CooldownSpec {
   name: string;
@@ -85,7 +86,7 @@ class CooldownManager {
     };
 
     // Atomic write (temp + rename)
-    const tempPath = `${path}.tmp`;
+    const tempPath = atomicTempPath(path);
     try {
       writeFileSync(tempPath, JSON.stringify(cooldownData), { encoding: 'utf-8', mode: 0o600 });
       // Rename is atomic on POSIX systems

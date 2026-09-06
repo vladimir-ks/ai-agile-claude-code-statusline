@@ -15,6 +15,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
 import { dirname } from 'path';
+import { atomicTempPath } from './atomic-temp-path';
 
 export type NotificationType = 'version_update' | 'version_mismatch' | 'slot_switch' | 'restart_ready' | 'secrets_detected' | 'active_slot' | 'quota_stale' | 'quota_reset_passed' | 'transcript_sampler_dead' | 'weekly_quota_waste_certain' | 'weekly_quota_waste_likely' | 'pipeline_blocked' | 'pipeline_degraded';
 
@@ -94,7 +95,7 @@ export class NotificationManager {
       state.updatedAt = Date.now();
 
       // Atomic write
-      const tmpPath = `${this.STATE_PATH}.${process.pid}.tmp`;
+      const tmpPath = atomicTempPath(this.STATE_PATH);
       writeFileSync(tmpPath, JSON.stringify(state, null, 2), { mode: 0o600 });
       try {
         renameSync(tmpPath, this.STATE_PATH);

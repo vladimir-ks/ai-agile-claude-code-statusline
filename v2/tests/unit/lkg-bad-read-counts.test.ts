@@ -195,9 +195,9 @@ describe('P1-h BAD_READ_COUNTS — file-backed counter', () => {
     await loadFreshModule();
     readWithLkgFn(badSourcePath(), validateHotSwapFn, lkgPath());
 
-    // At minimum one write must use .tmp.<pid>
-    const pidSuffix = `.tmp.${process.pid}`;
-    const hasPidTmp = capturedPaths.some(p => p.endsWith(pidSuffix));
+    // At minimum one write must use .tmp.<pid>.<rand>
+    const pidPrefix = `.tmp.${process.pid}.`;
+    const hasPidTmp = capturedPaths.some(p => p.includes(pidPrefix));
     expect(hasPidTmp).toBe(true);
   });
 

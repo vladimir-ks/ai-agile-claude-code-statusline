@@ -7,7 +7,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
-import HealthStore from '../src/lib/health-store';
+import HealthStore, { atomicTempPath } from '../src/lib/health-store';
 import {
   SessionHealth,
   StatuslineConfig,
@@ -285,6 +285,30 @@ describe('HealthStore', () => {
       const ids = store.listSessionIds();
 
       expect(ids).toEqual([]);
+    });
+  });
+  describe('atomic write temp paths', () => {
+    test('are unique per call and carry the writer PID', () => {
+      const names = new Set<string>();
+      for (let i = 0; i < 200; i++) names.add(atomicTempPath('/tmp/x/sess.json'));
+      expect(names.size).toBe(200);
+      for (const n of names) {
+        expect(n.startsWith('/tmp/x/sess.json.')).toBe(true);
+        expect(n.includes(`.${process.pid}.`)).toBe(true);
+        expect(n).toContain(`.tmp.${process.pid}.`);
+      }
+    });
+
+    test('two writers never share a temp name', () => {
+      expect(atomicTempPath('/tmp/x/sessions.json')).not.toBe(atomicTempPath('/tmp/x/sessions.json'));
+    });
+
+    test('writeSessionHealth leaves no temp litter', () => {
+      const { readdirSync } = require('fs');
+      store.writeSessionHealth('tmp-litter-1', createDefaultHealth('tmp-litter-1'));
+      store.writeSessionHealth('tmp-litter-1', createDefaultHealth('tmp-litter-1'));
+      const leftovers = readdirSync(TEST_BASE).filter((f: string) => f.includes('.tmp'));
+      expect(leftovers).toEqual([]);
     });
   });
 });

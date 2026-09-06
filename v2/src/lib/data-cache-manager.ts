@@ -14,8 +14,9 @@ import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirS
 import { homedir } from 'os';
 import { dirname } from 'path';
 import type { GlobalDataCache, GlobalDataCacheEntry } from './sources/types';
-import { createEmptyGlobalCache } from './sources/types';
+import { createEmptyGlobalCache, GLOBAL_CACHE_VERSION } from './sources/types';
 import { FreshnessManager } from './freshness-manager';
+import { atomicTempPath } from './atomic-temp-path';
 
 // In-memory cache
 let cachedData: GlobalDataCache | null = null;
@@ -47,7 +48,7 @@ export class DataCacheManager {
         const parsed = JSON.parse(content);
 
         // Validate minimal schema
-        if (parsed && parsed.version === 2 && parsed.sources) {
+        if (parsed && parsed.version === GLOBAL_CACHE_VERSION && parsed.sources) {
           cachedData = parsed as GlobalDataCache;
           cacheTimestamp = now;
           return cachedData;
@@ -95,7 +96,7 @@ export class DataCacheManager {
         if (existsSync(this.CACHE_PATH)) {
           const content = readFileSync(this.CACHE_PATH, 'utf-8');
           const parsed = JSON.parse(content);
-          if (parsed && parsed.version === 2 && parsed.sources) {
+          if (parsed && parsed.version === GLOBAL_CACHE_VERSION && parsed.sources) {
             cache = parsed as GlobalDataCache;
           } else {
             cache = createEmptyGlobalCache();
@@ -111,6 +112,7 @@ export class DataCacheManager {
       for (const [sourceId, entry] of Object.entries(entries)) {
         cache.sources[sourceId] = entry;
       }
+      cache.version = GLOBAL_CACHE_VERSION;
       cache.updatedAt = Date.now();
 
       // Atomic write
@@ -119,7 +121,7 @@ export class DataCacheManager {
         mkdirSync(dir, { recursive: true, mode: 0o700 });
       }
 
-      const tmpPath = `${this.CACHE_PATH}.${process.pid}.tmp`;
+      const tmpPath = atomicTempPath(this.CACHE_PATH);
       writeFileSync(tmpPath, JSON.stringify(cache, null, 2), { mode: 0o600 });
       try {
         renameSync(tmpPath, this.CACHE_PATH);

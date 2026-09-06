@@ -17,7 +17,7 @@
  *   3. ~/.claude/session-health/ (LEGACY; removed in v2.2)
  */
 
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { spawn } from 'child_process';
 import type { MergedQuotaData, MergedQuotaSlot } from '../types/session-health';
@@ -52,6 +52,11 @@ export class QuotaBrokerClient {
   private static readonly SESSION_HEALTH_DIR = resolveSessionHealthDir();
   private static readonly CACHE_PATH = `${QuotaBrokerClient.SESSION_HEALTH_DIR}/merged-quota-cache.json`;
   private static readonly LOCK_PATH = `${QuotaBrokerClient.SESSION_HEALTH_DIR}/.quota-fetch.lock`;
+  // why: `.quota-fetch.lock` is written by quota-broker.sh only — after `timeout` +
+  // bash startup — a window in which N daemons all pass isLockAlive().
+  // contract: quota-broker-client.test.ts "tryClaimSpawn"
+  private static readonly SPAWN_CLAIM_PATH = `${QuotaBrokerClient.SESSION_HEALTH_DIR}/.quota-broker-spawn.claim`;
+  private static readonly SPAWN_CLAIM_TTL_MS = 50_000;
 
   // Render-path purity gate (locked decision #2): the DISPLAY layer must be a
   // pure file-read — it may NOT spawn the broker (no external work on the render
@@ -148,7 +153,10 @@ export class QuotaBrokerClient {
           const boundaryPassed = QuotaBrokerClient.resetBoundaryPassed(slot, now);
 
           if (ageStale || boundaryPassed) {
-            anySlotStale = true;
+            // contract: quota-broker-client.test.ts "permanently-dead inactive slots never trigger a spawn"
+            if (slot.status !== 'inactive') {
+              anySlotStale = true;
+            }
             // Per spec §11.2: a passed five_hour_resets_at boundary with a pre-reset
             // last_fetched forces consumers to treat the row as stale, regardless of
             // last_fetched age. Mark slot.is_fresh=false so getActiveQuota's isStale
@@ -184,6 +192,7 @@ export class QuotaBrokerClient {
       if (this.canSpawn() && (!parsed.is_fresh || anySlotStale) && !this.isLockAlive() && !this.allSlotsInBackoff()) {
         const staleSlots = Object.entries(parsed.slots || {})
           .filter(([, s]) => {
+            if (s.status === 'inactive') return false;
             const age = Math.floor(now / 1000) - Math.floor((s.last_fetched || 0) / 1000);
             return age > STALE_THRESHOLD_S;
           })
@@ -534,10 +543,44 @@ export class QuotaBrokerClient {
   }
 
   /**
+   * Atomically claim the right to spawn the broker (`mkdirSync`, no recursive).
+   * The claim expires by TTL only: the winner exits before its detached child.
+   */
+  private static tryClaimSpawn(): boolean {
+    const path = this.SPAWN_CLAIM_PATH;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        mkdirSync(path);
+        try {
+          writeFileSync(`${path}/owner`, `${process.pid}\n${Date.now()}\n`);
+        } catch { /* marker content is diagnostic only */ }
+        return true;
+      } catch (err: any) {
+        if (err?.code !== 'EEXIST') return false;
+        let age = 0;
+        try { age = Date.now() - statSync(path).mtimeMs; } catch { return false; }
+        if (age <= this.SPAWN_CLAIM_TTL_MS) return false;
+        try { rmSync(path, { recursive: true, force: true }); } catch { return false; }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Release the spawn claim (test/diagnostic helper — production lets it expire).
+   */
+  static releaseSpawnClaim(): void {
+    try { rmSync(this.SPAWN_CLAIM_PATH, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  /**
    * Spawn broker script in background with error detection
    * Only called when data is stale AND no lock is alive
    */
   private static spawnBroker(): void {
+    if (!this.tryClaimSpawn()) {
+      return;
+    }
     try {
       const brokerScript = this.getBrokerScript();
 
@@ -546,6 +589,7 @@ export class QuotaBrokerClient {
           `[QuotaBrokerClient] Broker script not found at ${brokerScript}. ` +
           `Checked: ENV:QUOTA_BROKER_SCRIPT, ~/cloud_configs/, ~/_claude-configs/`
         );
+        this.releaseSpawnClaim();
         return;
       }
 
@@ -583,6 +627,7 @@ export class QuotaBrokerClient {
       child.unref();
     } catch (error) {
       // Non-critical — broker spawn failed, data stays stale
+      this.releaseSpawnClaim();
       console.warn(`[QuotaBrokerClient] Failed to spawn broker:`, error);
     }
   }

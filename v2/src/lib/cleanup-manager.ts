@@ -214,7 +214,8 @@ class CleanupManager {
     try {
       const files = readdirSync(this.healthDir);
       for (const file of files) {
-        if (file.endsWith('.tmp')) {
+        // contract: cleanup-manager.test.ts — atomic temps are `<file>.tmp.<pid>.<rand>`
+        if (/\.tmp(\.|$)/.test(file)) {
           const path = join(this.healthDir, file);
           try {
             // Only remove if older than 1 hour (stale temp file)

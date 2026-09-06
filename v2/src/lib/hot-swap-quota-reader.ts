@@ -31,6 +31,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync, renameSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { homedir } from 'os';
+import { atomicTempPath } from './atomic-temp-path';
 
 export interface HotSwapSlotData {
   email: string;
@@ -510,7 +511,7 @@ export class HotSwapQuotaReader {
       }
 
       // Atomic write: temp file + rename
-      const tmpPath = `${this.CACHE_PATH}.${process.pid}.tmp`;
+      const tmpPath = atomicTempPath(this.CACHE_PATH);
       writeFileSync(tmpPath, JSON.stringify(cache, null, 2), { mode: 0o600 });
       renameSync(tmpPath, this.CACHE_PATH);
 

@@ -44,6 +44,26 @@ describe('gitSource', () => {
     test('has reasonable timeout', () => expect(gitSource.timeoutMs).toBeLessThanOrEqual(10000));
   });
 
+  describe('failure handling', () => {
+    test('declares a per-project context key', () => {
+      expect(gitSource.contextKeyFor!(makeCtx({ projectPath: '/repo/alpha' }))).toBe('/repo/alpha');
+    });
+
+    test('fetch returns null (not empty-but-fresh data) when git is unavailable', async () => {
+      const data = await gitSource.fetch(makeCtx({ projectPath: '/nonexistent-path-for-git-source-test' }));
+      expect(data).toBeNull();
+    });
+
+    test('merge of a null payload leaves the previous git section untouched', () => {
+      const health = createDefaultHealth('test');
+      gitSource.merge(health, { branch: 'main', ahead: 0, behind: 0, dirty: 3, fetchedAt: 111 });
+      gitSource.merge(health, null);
+      expect(health.git.branch).toBe('main');
+      expect(health.git.dirty).toBe(3);
+      expect(health.git.lastChecked).toBe(111);
+    });
+  });
+
   describe('merge', () => {
     test('writes git info to health', () => {
       const health = createDefaultHealth('test');

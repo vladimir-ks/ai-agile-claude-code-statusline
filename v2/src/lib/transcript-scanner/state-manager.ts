@@ -12,6 +12,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, readdir
 import { dirname } from 'path';
 import { homedir } from 'os';
 import type { ScannerState } from './types';
+import { atomicTempPath } from '../atomic-temp-path';
 
 export class StateManager {
   private static get STATE_DIR(): string {
@@ -115,7 +116,7 @@ export class StateManager {
    */
   static save(sessionId: string, state: ScannerState): void {
     const path = this.getStatePath(sessionId);
-    const tempPath = `${path}.tmp`;
+    const tempPath = atomicTempPath(path);
 
     try {
       // Ensure directory exists

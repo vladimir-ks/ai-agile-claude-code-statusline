@@ -9,12 +9,13 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { UnifiedDataBroker } from '../src/lib/unified-data-broker';
 import { DataSourceRegistry } from '../src/lib/sources/registry';
 import { DataCacheManager } from '../src/lib/data-cache-manager';
+import { cacheKeyFor, GLOBAL_CACHE_VERSION } from '../src/lib/sources/types';
 
 describe('UnifiedDataBroker', () => {
 
@@ -258,5 +259,162 @@ describe('UnifiedDataBroker', () => {
       // Cleanup
       DataSourceRegistry.remove('dependent_test');
     });
+  });
+  // -------------------------------------------------------------------------
+  // Tier 3 cache scoping + staleness gate
+  // -------------------------------------------------------------------------
+
+  describe('stampMergedTimestamp', () => {
+    const stamp = (health: any, sourceId: string, fetchedAt: number) =>
+      (UnifiedDataBroker as any).stampMergedTimestamp(health, sourceId, fetchedAt);
+
+    const fetchedAt = Date.now() - 600_000;
+
+    test('clamps git.lastChecked to the cache entry fetch time', () => {
+      const health: any = { git: { lastChecked: Date.now() } };
+      stamp(health, 'git_status', fetchedAt);
+      expect(health.git.lastChecked).toBe(fetchedAt);
+    });
+
+    test('clamps billing.lastFetched to the cache entry fetch time', () => {
+      const health: any = { billing: { lastFetched: Date.now() } };
+      stamp(health, 'billing', fetchedAt);
+      expect(health.billing.lastFetched).toBe(fetchedAt);
+    });
+
+    test('clamps billing.weeklyLastModified for the quota source', () => {
+      const health: any = { billing: { weeklyLastModified: Date.now() } };
+      stamp(health, 'quota', fetchedAt);
+      expect(health.billing.weeklyLastModified).toBe(fetchedAt);
+    });
+
+    test('an already-older timestamp is left alone (clamp never moves time forward)', () => {
+      const older = fetchedAt - 60_000;
+      const health: any = { billing: { lastFetched: older } };
+      stamp(health, 'billing', fetchedAt);
+      expect(health.billing.lastFetched).toBe(older);
+    });
+
+    test('a missing timestamp is filled with the fetch time', () => {
+      const health: any = { billing: {} };
+      stamp(health, 'billing', fetchedAt);
+      expect(health.billing.lastFetched).toBe(fetchedAt);
+    });
+
+    test('a zero/invalid fetchedAt is a no-op', () => {
+      const now = Date.now();
+      const health: any = { git: { lastChecked: now } };
+      stamp(health, 'git_status', 0);
+      expect(health.git.lastChecked).toBe(now);
+    });
+  });
+
+  describe('Tier 3 global cache', () => {
+    let tempDir: string;
+    let cachePath: string;
+    let originalPath: string;
+
+    // A path that is definitely not a git repo — gitSource.fetch returns null
+    // there, so nothing overwrites the seeded entry during the test.
+    const NON_REPO = join(tmpdir(), 'udb-not-a-repo');
+
+    function seedGitEntry(contextKey: string, ageMs: number, branch: string): void {
+      const fetchedAt = Date.now() - ageMs;
+      writeFileSync(cachePath, JSON.stringify({
+        version: GLOBAL_CACHE_VERSION,
+        updatedAt: Date.now(),
+        sources: {
+          [cacheKeyFor('git_status', contextKey)]: {
+            data: { branch, ahead: 0, behind: 0, dirty: 7, fetchedAt },
+            fetchedAt,
+            fetchedBy: 1234,
+            contextKey,
+          },
+        },
+      }));
+      DataCacheManager.clearCache();
+    }
+
+    beforeEach(() => {
+      tempDir = join(tmpdir(), `udb-cache-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+      mkdirSync(tempDir, { recursive: true });
+      mkdirSync(NON_REPO, { recursive: true });
+      cachePath = join(tempDir, 'data-cache.json');
+      originalPath = (DataCacheManager as any).CACHE_PATH;
+      Object.defineProperty(DataCacheManager, 'CACHE_PATH', {
+        value: cachePath, writable: true, configurable: true,
+      });
+      DataCacheManager.clearCache();
+    });
+
+    afterEach(() => {
+      Object.defineProperty(DataCacheManager, 'CACHE_PATH', {
+        value: originalPath, writable: true, configurable: true,
+      });
+      DataCacheManager.clearCache();
+      try { rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    test('another project\'s git entry is never merged into this session', async () => {
+      seedGitEntry('/repo/alpha', 60_000, 'alpha-branch');
+
+      const health = await UnifiedDataBroker.gatherAll('t', null, null, {
+        projectPath: NON_REPO,
+      });
+
+      expect(health.git.branch).not.toBe('alpha-branch');
+      expect(health.git.dirty).not.toBe(7);
+    }, 30_000);
+
+    test('this project\'s own entry IS merged, with the cache entry\'s timestamp', async () => {
+      const fetchedAt = Date.now() - 60_000;
+      seedGitEntry(NON_REPO, 60_000, 'own-branch');
+
+      const health = await UnifiedDataBroker.gatherAll('t', null, null, {
+        projectPath: NON_REPO,
+      });
+
+      expect(health.git.branch).toBe('own-branch');
+      // lastChecked must reflect when the data was fetched, not gatheredAt.
+      expect(health.git.lastChecked).toBeLessThanOrEqual(fetchedAt + 2000);
+      expect(health.gatheredAt - health.git.lastChecked).toBeGreaterThan(30_000);
+    }, 30_000);
+
+    test('a critically stale entry is NOT merged (git_status staleMs = 5min)', async () => {
+      seedGitEntry(NON_REPO, 10 * 60_000, 'ancient-branch');
+
+      const health = await UnifiedDataBroker.gatherAll('t', null, null, {
+        projectPath: NON_REPO,
+      });
+
+      expect(health.git.branch).not.toBe('ancient-branch');
+    }, 30_000);
+
+    test('cache entries are written under a context-scoped key carrying contextKey', async () => {
+      writeFileSync(cachePath, JSON.stringify({
+        version: GLOBAL_CACHE_VERSION, updatedAt: Date.now(), sources: {},
+      }));
+      DataCacheManager.clearCache();
+
+      await UnifiedDataBroker.gatherAll('t', null, null, {
+        projectPath: process.cwd(),
+        configDir: '/tmp/slots/S9/general',
+      });
+
+      const written = JSON.parse(readFileSync(cachePath, 'utf-8'));
+      expect(written.version).toBe(GLOBAL_CACHE_VERSION);
+
+      const scoped = Object.entries(written.sources as Record<string, any>)
+        .filter(([key]) => key.includes('::'));
+      expect(scoped.length).toBeGreaterThan(0);
+      for (const [key, entry] of scoped) {
+        expect(entry.contextKey).toBeTruthy();
+        expect(key).toBe(cacheKeyFor(key.split('::')[0], entry.contextKey));
+      }
+      // Unscoped ids must never carry a contextKey.
+      for (const [key, entry] of Object.entries(written.sources as Record<string, any>)) {
+        if (!key.includes('::')) expect(entry.contextKey).toBeUndefined();
+      }
+    }, 30_000);
   });
 });
